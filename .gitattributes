@@ -1,0 +1,3 @@
+# Урок монорепы (2026-07-16): CRLF от core.autocrlf=true на Windows ломает docker-билд
+# («exec ./entrypoint.sh: no such file or directory») — шелл-скрипты строго LF.
+*.sh text eol=lf
