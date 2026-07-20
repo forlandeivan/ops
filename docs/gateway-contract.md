@@ -57,6 +57,28 @@ HTTP-вызовов в другие сервисы нет.
 HTTP-режим включается только при заданном токене (URL без токена → in-process + warn);
 таймаут `UNICA_JANITOR_RUNTIME_TIMEOUT_MS` (дефолт 600000).
 
+## 3.1. Callback-gateway доменных операций (direction-2: janitor → монолит, J2.3b)
+
+Доменные операции уборки, владелец которых — монолит (копия в ops дрейфовала бы):
+janitor зовёт их по HTTP `UNICA_JANITOR_GATEWAY_URL` (= `http://unica:5000/api/internal/janitor`),
+bearer `UNICA_JANITOR_GATEWAY_TOKEN` (fallback `UNICA_JANITOR_RUNTIME_TOKEN` — один секрет
+на оба шва), таймаут `UNICA_JANITOR_GATEWAY_TIMEOUT_MS` (дефолт 300000).
+URL ПУСТ → in-process (переходный режим монорепы, ветку выбирает default-stores).
+
+- `GET /health` — без токена; `{status, tokenConfigured}`.
+- `POST /chat-attachments/purge-artifacts` — body `{workspaceId, attachment: {id, chatId,
+  filename, mimeType, storageKey, documentVersion, derivedManifestObjectKey, previewObjectKey}}`;
+  удаляет объект и все производные (превью/манифест/шарды). `200 {ok:true}`.
+- `POST /workspace-files/delete` — body `{workspaceId, storageKey}`; удаляет workspace-файл
+  с метерингом байтов (prefix-гард и usage-гейдж внутри владельца). `200 {ok:true}`.
+- `POST /qdrant-usage/reconcile` — body `{}`; пересчёт qdrantCollectionsCount по всем
+  пространствам. `200 {ok:true, reconciled:N}`.
+- Ошибки: нет токена → `503 JANITOR_GATEWAY_NOT_CONFIGURED`; неверный → `401
+  JANITOR_GATEWAY_UNAUTHORIZED`; невалидное тело → `400 JANITOR_GATEWAY_BAD_REQUEST`.
+
+Всё остальное (24 PG-задачи, S3-скан фидбек-сирот, Qdrant-скан/удаление коллекций,
+ledger, журнал, локи) janitor исполняет сам по общей БД/MinIO/Qdrant — gateway не нужен.
+
 ## 4. Семантика исполнения
 
 - Плановый тик каждые `JANITOR_TICK_MINUTES`; проходы не наслаиваются (skip при бегущем).
