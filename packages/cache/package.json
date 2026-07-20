@@ -1,0 +1,19 @@
+{
+  "name": "@unica/cache",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Кэш-абстракция Unica (L1 in-memory node-cache / L2 Redis по REDIS_URL, единый CacheProvider + cacheKeys). Пакет W2 (docs/w2-workflow-packaging-plan.md, срез S2; deps @unica/observability). Резолвится через tsconfig paths / vitest alias / esbuild bundle из исходников — не publish-пакет.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cache-manager": "./src/cache-manager.ts",
+    "./memory-cache": "./src/memory-cache.ts",
+    "./redis-cache": "./src/redis-cache.ts"
+  },
+  "dependencies": {
+    "node-cache": "^5.1.2",
+    "ioredis": "^5.9.2"
+  }
+}

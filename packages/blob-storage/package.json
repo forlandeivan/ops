@@ -1,0 +1,17 @@
+{
+  "name": "@unica/blob-storage",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Инфраструктура объектного хранилища Unica (MinIO/S3-клиент с пулом соединений, circuit breaker, мониторинг пула, stream-утилиты). Пакет W2 (docs/w2-workflow-packaging-plan.md, срез S2; deps @unica/observability). Резолвится через tsconfig paths / vitest alias / esbuild bundle из исходников — не publish-пакет.",
+  "exports": {
+    "./minio-client": "./src/minio-client.ts",
+    "./storage-circuit-breaker": "./src/storage-circuit-breaker.ts",
+    "./stream-utils": "./src/stream-utils.ts",
+    "./minio-pool-monitor": "./src/minio-pool-monitor.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.940.0",
+    "@smithy/node-http-handler": "^4.6.1"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@unica/runtime-utils",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Кросс-каттинг runtime-утилиты Unica: env-bootstrap load-env, детерминированный grounding-флаг, smalltalk phrase-индекс, трансформ грундинга источников агента (agent-source-grounding). Пакет W2 (docs/w2-workflow-packaging-plan.md, S3 load-env + S4 flag/phrases + WD4.2c-3 agent-source-grounding; deps @unica/cache для smalltalk). Резолвится через tsconfig paths / vitest alias / esbuild bundle из исходников — не publish-пакет.",
+  "exports": {
+    "./load-env": "./src/load-env.ts",
+    "./deterministic-grounding-flag": "./src/deterministic-grounding-flag.ts",
+    "./smalltalk-library-cache": "./src/smalltalk-library-cache.ts",
+    "./agent-source-grounding": "./src/agent-source-grounding.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  }
+}

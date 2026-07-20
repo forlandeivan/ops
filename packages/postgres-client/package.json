@@ -1,0 +1,18 @@
+{
+  "name": "@unica/postgres-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PG/Neon-примитив Unica: пул соединений + drizzle-клиент (@shared/schema), инструментация SQL (deps @unica/observability + @unica/instrumentation), env-bootstrap (@unica/runtime-utils). Общий инфра-пакет W2 (docs/w2-workflow-packaging-plan.md, срез S3; 125 импортёров через реэкспорт server/db.ts). Резолвится через tsconfig paths / vitest alias / esbuild bundle из исходников — не publish-пакет; один инстанс пула на процесс-бандл.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "@neondatabase/serverless": "^0.10.4",
+    "drizzle-orm": "^0.39.1",
+    "ws": "^8.18.0"
+  }
+}

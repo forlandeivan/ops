@@ -1,0 +1,13 @@
+{
+  "name": "@unica/instrumentation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Инструментация Unica: perf-config (env), pg-query-counter (per-request AsyncLocalStorage), stage-timings и db-metrics (SQL-инструментация, инжект setDbStatsProvider в prom-Registry). Пакет W2 (docs/w2-workflow-packaging-plan.md, срез S2; deps @unica/observability). Резолвится через tsconfig paths / vitest alias / esbuild bundle из исходников — не publish-пакет.",
+  "exports": {
+    "./perf-config": "./src/perf-config.ts",
+    "./pg-query-counter": "./src/pg-query-counter.ts",
+    "./stage-timings": "./src/stage-timings.ts",
+    "./db-metrics": "./src/db-metrics.ts"
+  }
+}
