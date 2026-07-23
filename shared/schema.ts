@@ -33,6 +33,7 @@ import {
 } from "./workflows";
 import { workflowNodeKinds } from "./workflow-compiler";
 import type { GlobalVariableValueType } from "./global-variables";
+import type { ReasoningProgressItem } from "./reasoning-progress";
 import type {
   ReferenceSetActorType,
   ReferenceSetAuditAction,
@@ -3498,6 +3499,14 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   modelId: text("model_id"),
   agentDefaultModelId: text("agent_model_id"),
   agentFastPathModelId: text("agent_fast_path_model_id"),
+  // --- Каскадный fallback LLM-моделей: ОБЩИЙ пул запасных моделей для обеих ролей (fast-path
+  // классификатор и основная модель агента). Ступени пробуются по порядку ПОСЛЕ основной модели роли
+  // (tier1 → tier2). Мягкие ссылки на models.id БЕЗ FK — битую/удалённую модель каскад просто
+  // пропускает (ensureModelAvailable → следующий кандидат), как agentDefaultModelId/agentFastPathModelId.
+  agentModelPool: jsonb("agent_model_pool")
+    .$type<{ tier1: string[]; tier2: string[] }>()
+    .notNull()
+    .default(sql`'{"tier1":[],"tier2":[]}'::jsonb`),
   // Режим reasoning для агентских запусков (значение из reasoningModes); null = по умолчанию модели
   // (inputCapabilities.reasoning.defaultMode). Применяется через провайдерский reasoningMapping —
   // тем же механизмом, что чат (buildReasoningRequestBodyPatch).
@@ -4436,6 +4445,8 @@ export type ChatMessageMetadata = {
     text?: string;
     mode?: ReasoningMode | string;
     label?: string;
+    items?: ReasoningProgressItem[];
+    truncated?: boolean;
   };
   workflowRunId?: string;
   workflowStatus?: string;
