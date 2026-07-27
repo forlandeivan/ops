@@ -4297,10 +4297,22 @@ export type BotActionRecord = typeof botActions.$inferSelect;
 export const packageBuilderStageValues = ["discovery", "clarification", "drafting", "review"] as const;
 export type PackageBuilderStage = (typeof packageBuilderStageValues)[number];
 
+/**
+ * Куда в итоге уезжает ответ ассистента из этого чата.
+ *
+ * `web` — наш фронт (markdown + KaTeX); `external` — переписка через внешний канал
+ * (Telegram и прочие webhook-адаптеры), где разметка отображается сырым текстом.
+ * Проставляется один раз при создании чата — чтобы горячий путь промпта не ходил
+ * за этим фактом в `external_trigger_sessions` на каждом запросе.
+ */
+export const chatOutputChannels = ["web", "external"] as const;
+export type ChatOutputChannel = (typeof chatOutputChannels)[number];
+
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
   activeDraftId?: string;
   stage?: PackageBuilderStage;
+  outputChannel?: ChatOutputChannel;
   [key: string]: unknown;
 };
 
