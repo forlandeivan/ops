@@ -1115,6 +1115,36 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
 export type KnowledgeDocumentImportSettings = typeof knowledgeDocumentImportSettings.$inferSelect;
 export type KnowledgeDocumentImportSettingsInsert = typeof knowledgeDocumentImportSettings.$inferInsert;
 
+// Настраиваемые лимиты загрузки файлов (Tier-1): размеры на файл и счётчики по всем контурам
+// (чат, файлы ассистента, фидбэк, База знаний). Singleton. Каждая колонка nullable:
+// NULL = «админ не переопределял» → fallback env → код-дефолт. Единицы: *_mb — в МБ, счётчики — целые.
+// Реестр ручек и дефолты — shared/file-upload-limits.ts; резолвер — server/file-upload-limits.ts.
+export const fileUploadLimits = pgTable("file_upload_limits", {
+  id: varchar("id").primaryKey().default("file_upload_limits_singleton"),
+  // Чат
+  chatAttachmentMaxSizeMb: integer("chat_attachment_max_size_mb"),
+  chatMediaMaxSizeMb: integer("chat_media_max_size_mb"),
+  chatAttachmentsTotalMaxMb: integer("chat_attachments_total_max_mb"),
+  chatMaxFilesPerMessage: integer("chat_max_files_per_message"),
+  // Файлы ассистента
+  assistantFileMaxSizeMb: integer("assistant_file_max_size_mb"),
+  assistantFilesPerRequest: integer("assistant_files_per_request"),
+  assistantMaterialsPerAssistant: integer("assistant_materials_per_assistant"),
+  // Фидбэк
+  feedbackAttachmentMaxSizeMb: integer("feedback_attachment_max_size_mb"),
+  feedbackAttachmentsMaxCount: integer("feedback_attachments_max_count"),
+  // База знаний
+  kbDocumentUploadMaxMb: integer("kb_document_upload_max_mb"),
+  kbArchiveMaxSizeMb: integer("kb_archive_max_size_mb"),
+  kbArchiveMaxEntries: integer("kb_archive_max_entries"),
+  kbAiOcrMaxPagesPerFile: integer("kb_ai_ocr_max_pages_per_file"),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type FileUploadLimits = typeof fileUploadLimits.$inferSelect;
+export type FileUploadLimitsInsert = typeof fileUploadLimits.$inferInsert;
+
 export const indexingArenaRuns = pgTable(
   "indexing_arena_runs",
   {
