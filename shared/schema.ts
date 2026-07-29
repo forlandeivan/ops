@@ -3523,9 +3523,12 @@ export const ocrProviders = pgTable(
 
 export const unicaChatConfig = pgTable("unica_chat_config", {
   id: varchar("id").primaryKey().default("singleton"),
+  /** @deprecated Модель Unica Chat берётся из общего дефолта assistant_llm_policy; поле не читается,
+   * колонка ждёт отдельной миграции удаления в будущем релизе. */
   llmProviderConfigId: varchar("llm_provider_config_id").references(() => llmProviders.id, {
     onDelete: "set null",
   }),
+  /** @deprecated См. llmProviderConfigId — пара упразднена вместе. */
   modelId: text("model_id"),
   agentDefaultModelId: text("agent_model_id"),
   agentFastPathModelId: text("agent_fast_path_model_id"),
@@ -4343,6 +4346,9 @@ export type ChatSessionMetadata = {
   activeDraftId?: string;
   stage?: PackageBuilderStage;
   outputChannel?: ChatOutputChannel;
+  /** Явно выбранная пользователем модель этого чата (models.id).
+   * null/отсутствует = «По умолчанию» — следует за моделью ассистента/политикой. */
+  selectedLlmModelId?: string | null;
   [key: string]: unknown;
 };
 
