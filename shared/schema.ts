@@ -3615,6 +3615,18 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // personal, системный сид и starters ассистентов не учитываются. NULL = «Авто»
   // (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет создания новых. Превышение → 409.
   promptsInstanceLimit: integer("prompts_instance_limit"),
+  // --- W2 Code Node (workflow-code-node-roadmap.md): лимиты code runner'а узла «Код (JavaScript)».
+  // Все поля NULL = «Авто» (env WORKFLOW_CODE_RUNNER_* workflow-сервиса → дефолт); число — явный
+  // админ-override. Читает workflow-сервис через gateway getUnicaChatConfig. Память и конкурентность
+  // в external-режиме принадлежат env sidecar-контейнера — админ-значения применяются к internal-пулу. ---
+  workflowCodeExecTimeoutMs: integer("workflow_code_exec_timeout_ms"),
+  workflowCodeExecMemoryMb: integer("workflow_code_exec_memory_mb"),
+  workflowCodeExecConcurrency: integer("workflow_code_exec_concurrency"),
+  workflowCodeExecMaxPayloadMb: integer("workflow_code_exec_max_payload_mb"),
+  workflowCodeExecQueueWaitMs: integer("workflow_code_exec_queue_wait_ms"),
+  // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание),
+  // false = только платформенный админ. Шов под будущую лицензионную проверку.
+  workflowCodeExecDelegationEnabled: boolean("workflow_code_exec_delegation_enabled"),
   // --- Волна 2A: Prefetch базы знаний. Все поля NULL = «Авто» (env-дефолт/fallback); значение — явный
   // админ-override. Управляют автоподгрузкой документов привязанной БЗ в контекст агента до первого
   // вызова модели (Node-сторона, resolveKbPrefetchConfig; в Python не прокидывается). ---
