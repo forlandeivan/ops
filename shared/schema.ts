@@ -3627,6 +3627,11 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание),
   // false = только платформенный админ. Шов под будущую лицензионную проверку.
   workflowCodeExecDelegationEnabled: boolean("workflow_code_exec_delegation_enabled"),
+  // --- Узел checklist_verify: параллельность батч-судьи /v1/checklist-judge. NULL = «Авто»
+  // (дефолт КОДА 4 — env-фолбэка нет намеренно); число — явный админ-override (1..16). Читает
+  // workflow-сервис через getUnicaChatConfig и шлёт per-request полем concurrency (паттерн
+  // runtimeCapacity). Применяется без рестарта. ---
+  workflowChecklistJudgeConcurrency: integer("workflow_checklist_judge_concurrency"),
   // --- Волна 2A: Prefetch базы знаний. Все поля NULL = «Авто» (env-дефолт/fallback); значение — явный
   // админ-override. Управляют автоподгрузкой документов привязанной БЗ в контекст агента до первого
   // вызова модели (Node-сторона, resolveKbPrefetchConfig; в Python не прокидывается). ---
