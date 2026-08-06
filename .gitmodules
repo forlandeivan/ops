@@ -1,0 +1,3 @@
+[submodule "chart"]
+	path = chart
+	url = https://gitlab.hopper-it.ru/aidev/devops/helm-charts/ai.unica.ops.chart.git
