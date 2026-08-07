@@ -6159,7 +6159,17 @@ export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 export type PasswordResetTokenInsert = typeof passwordResetTokens.$inferInsert;
 export type PublicUser = Omit<
   User,
-  "passwordHash" | "personalApiTokenHash" | "personalApiTokenLastFour" | "avatarKey" | "avatarUpdatedAt"
+  | "passwordHash"
+  | "personalApiTokenHash"
+  | "personalApiTokenLastFour"
+  | "avatarKey"
+  | "avatarUpdatedAt"
+  // OAuth-идентификаторы — серверная деталь: клиенту не нужны и не должны
+  // попадать в /api/auth/session и sessionStorage (аудит M3).
+  | "googleId"
+  | "googleEmailVerified"
+  | "yandexId"
+  | "yandexEmailVerified"
 > & {
   avatarUrl: string | null;
   avatarSource: UserAvatarSource;
