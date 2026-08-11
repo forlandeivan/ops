@@ -9,6 +9,11 @@ import { createLogger } from "./lib/logger";
 import { startJanitorHealthServer, type JanitorHealthState } from "./janitor/health-server";
 import { startJanitorOrchestrator, type JanitorOrchestratorHandle } from "./janitor/janitor-orchestrator";
 import { startJanitorRuntimeApiServer } from "./janitor/runtime-api-server";
+import { createHttpJanitorDomainGateway, gatewayToken, gatewayUrl } from "./janitor/domain-gateway-client";
+import {
+  startFileArtifactCleanupWorker,
+  type FileArtifactCleanupWorkerHandle,
+} from "./janitor/file-artifact-cleanup-worker";
 
 const logger = createLogger("janitor-runtime-entry");
 
@@ -50,11 +55,18 @@ function validateRuntimeConfiguration(): void {
 async function probeDatabaseReady(): Promise<{ ready: boolean; reason: string | null }> {
   try {
     const result = await db.execute(
-      sql`SELECT to_regclass('public.cleanup_policies') IS NOT NULL AS ready`,
+      sql`SELECT
+        to_regclass('public.cleanup_policies') IS NOT NULL
+        AND to_regclass('public.file_artifact_cleanup_jobs') IS NOT NULL AS ready`,
     );
     const rows = (result as { rows?: Array<Record<string, unknown>> }).rows ?? [];
     const ready = rows[0]?.ready === true;
-    return { ready, reason: ready ? null : "cleanup_policies table not found (migrations not applied yet)" };
+    return {
+      ready,
+      reason: ready
+        ? null
+        : "cleanup_policies or file_artifact_cleanup_jobs table not found (migrations not applied yet)",
+    };
   } catch (error) {
     return { ready: false, reason: error instanceof Error ? error.message : String(error) };
   }
@@ -79,12 +91,14 @@ async function bootstrapRuntime(): Promise<void> {
     startedAt: new Date().toISOString(),
     databaseReady: false,
     orchestratorStarted: false,
+    cleanupWorkerStarted: false,
     enabled,
     tickMinutes: parsePositiveInt(process.env.JANITOR_TICK_MINUTES, 15),
   };
 
   let shuttingDown = false;
   let orchestrator: JanitorOrchestratorHandle | null = null;
+  let cleanupWorker: FileArtifactCleanupWorkerHandle | null = null;
   let healthServer: Awaited<ReturnType<typeof startJanitorHealthServer>> | null = null;
   let runtimeApiServer: Awaited<ReturnType<typeof startJanitorRuntimeApiServer>> | null = null;
 
@@ -113,6 +127,7 @@ async function bootstrapRuntime(): Promise<void> {
       // stop() прерывает текущий проход между батчами и дожидается его завершения,
       // чтобы pool.end() не оборвал бегущий SQL на полуслове.
       await orchestrator?.stop();
+      await cleanupWorker?.stop();
 
       const { pool } = await import("./db");
       if (pool && typeof pool.end === "function") {
@@ -158,6 +173,21 @@ async function bootstrapRuntime(): Promise<void> {
   }
   state.databaseReady = true;
   logger.info("[janitor-runtime-entry] database is ready");
+
+  // Durable cleanup-очередь обслуживается всегда, даже когда администратор отключил
+  // плановые retention-политики через JANITOR_ENABLED=false. Ручные удаления не должны
+  // зависеть от расписания janitor.
+  const cleanupGatewayUrl = gatewayUrl();
+  if (!cleanupGatewayUrl) {
+    throw new Error("UNICA_JANITOR_GATEWAY_URL is required for file artifact cleanup worker");
+  }
+  if (!gatewayToken()) {
+    throw new Error("UNICA_JANITOR_GATEWAY_TOKEN (or UNICA_JANITOR_RUNTIME_TOKEN) is required");
+  }
+  cleanupWorker = startFileArtifactCleanupWorker({
+    gateway: createHttpJanitorDomainGateway(cleanupGatewayUrl),
+  });
+  state.cleanupWorkerStarted = true;
 
   // Runtime-RPC (preview/run-now из api) поднимаем до оркестратора: он нужен и при
   // выключенном плановом тике (JANITOR_ENABLED=false), а к моменту ready уже слушает.

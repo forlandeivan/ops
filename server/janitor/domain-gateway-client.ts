@@ -24,8 +24,30 @@ export interface GatewayChatAttachmentRef {
   previewObjectKey: string | null;
 }
 
+export interface GatewayFileArtifactCleanupRequest {
+  version: 1;
+  jobId: string;
+  workspaceId: string;
+  resourceType: string;
+  resourceId: string;
+  reason: string;
+  artifact: {
+    attachmentId?: string | null;
+    chatId?: string | null;
+    fileId?: string | null;
+    filename?: string | null;
+    mimeType?: string | null;
+    storageKey?: string | null;
+    documentVersion?: number | null;
+    derivedManifestObjectKey?: string | null;
+    previewObjectKey?: string | null;
+    externalUri?: string | null;
+  };
+}
+
 /** Доменные операции уборки, исполняемые владельцем (монолитом). */
 export interface JanitorDomainGateway {
+  cleanupFileArtifacts(request: GatewayFileArtifactCleanupRequest, signal?: AbortSignal): Promise<void>;
   purgeChatAttachmentArtifacts(workspaceId: string, attachment: GatewayChatAttachmentRef): Promise<void>;
   deleteWorkspaceFile(workspaceId: string, storageKey: string): Promise<void>;
   reconcileQdrantUsage(): Promise<void>;
@@ -34,12 +56,14 @@ export interface JanitorDomainGateway {
 export class JanitorDomainGatewayError extends Error {
   status: number;
   code: string;
+  retryable: boolean;
 
-  constructor(message: string, status: number, code: string) {
+  constructor(message: string, status: number, code: string, retryable = status >= 500 || status === 429) {
     super(message);
     this.name = "JanitorDomainGatewayError";
     this.status = status;
     this.code = code;
+    this.retryable = retryable;
   }
 }
 
@@ -66,10 +90,17 @@ function timeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_TIMEOUT_MS;
 }
 
-async function callGateway(baseUrl: string, path: string, body: Record<string, unknown>): Promise<void> {
+async function callGateway(
+  baseUrl: string,
+  path: string,
+  body: Record<string, unknown>,
+  parentSignal?: AbortSignal,
+): Promise<void> {
   const token = gatewayToken();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
+  const abortFromParent = () => controller.abort();
+  parentSignal?.addEventListener("abort", abortFromParent, { once: true });
 
   let response: Response;
   try {
@@ -95,19 +126,25 @@ async function callGateway(baseUrl: string, path: string, body: Record<string, u
     );
   } finally {
     clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", abortFromParent);
   }
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     const message = typeof payload.message === "string" ? payload.message : `janitor gateway HTTP ${response.status}`;
     const code = typeof payload.code === "string" ? payload.code : "JANITOR_GATEWAY_ERROR";
-    throw new JanitorDomainGatewayError(message, response.status, code);
+    const retryable = typeof payload.retryable === "boolean"
+      ? payload.retryable
+      : response.status >= 500 || response.status === 429;
+    throw new JanitorDomainGatewayError(message, response.status, code, retryable);
   }
 }
 
 /** HTTP-реализация gateway; boundary-URL валидируется вызывающим (default-stores). */
 export function createHttpJanitorDomainGateway(baseUrl: string): JanitorDomainGateway {
   return {
+    cleanupFileArtifacts: (request, signal) =>
+      callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal),
     purgeChatAttachmentArtifacts: (workspaceId, attachment) =>
       callGateway(baseUrl, "/chat-attachments/purge-artifacts", { workspaceId, attachment }),
     deleteWorkspaceFile: (workspaceId, storageKey) =>

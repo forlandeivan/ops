@@ -310,6 +310,7 @@ export const models = pgTable(
 
 type FileStorageAuthType = "none" | "bearer";
 
+/** @deprecated Release-A compatibility only; runtime uses the fixed Files service. */
 export const fileStorageProviders = pgTable(
   "file_storage_providers",
   {
@@ -359,7 +360,9 @@ export const files = pgTable(
     objectKey: text("object_key"),
     objectVersion: text("object_version"),
     externalUri: text("external_uri"),
+    /** @deprecated Release-A compatibility; new writes use externalUri. */
     providerId: varchar("provider_id").references(() => fileStorageProviders.id, { onDelete: "set null" }),
+    /** @deprecated Release-A compatibility; new writes use externalUri. */
     providerFileId: text("provider_file_id"),
     status: fileStatusEnum("status").notNull().default("ready"),
     metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
@@ -373,6 +376,52 @@ export const files = pgTable(
     messageIdx: index("files_message_idx").on(table.messageId),
   }),
 );
+
+export const fileArtifactCleanupJobStatuses = ["pending", "processing", "success", "error"] as const;
+export type FileArtifactCleanupJobStatus = (typeof fileArtifactCleanupJobStatuses)[number];
+export type FileArtifactCleanupPayload = {
+  attachmentId?: string | null;
+  chatId?: string | null;
+  fileId?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+  storageKey?: string | null;
+  documentVersion?: number | null;
+  derivedManifestObjectKey?: string | null;
+  previewObjectKey?: string | null;
+  externalUri?: string | null;
+};
+
+export const fileArtifactCleanupJobs = pgTable(
+  "file_artifact_cleanup_jobs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    idempotencyKey: text("idempotency_key").notNull(),
+    workspaceId: varchar("workspace_id").notNull(),
+    resourceType: text("resource_type").notNull(),
+    resourceId: text("resource_id").notNull(),
+    reason: text("reason").notNull(),
+    payloadVersion: integer("payload_version").notNull().default(1),
+    payload: jsonb("payload").$type<FileArtifactCleanupPayload>().notNull(),
+    status: text("status").$type<FileArtifactCleanupJobStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    workerId: text("worker_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+  },
+  (table) => ({
+    idempotencyUniqueIdx: uniqueIndex("file_artifact_cleanup_jobs_idempotency_unique_idx").on(table.idempotencyKey),
+    statusRetryIdx: index("file_artifact_cleanup_jobs_status_retry_idx").on(table.status, table.nextRetryAt, table.createdAt),
+    leaseIdx: index("file_artifact_cleanup_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
+    workspaceIdx: index("file_artifact_cleanup_jobs_workspace_idx").on(table.workspaceId, table.createdAt),
+  }),
+);
+
+export type FileArtifactCleanupJob = typeof fileArtifactCleanupJobs.$inferSelect;
+export type FileArtifactCleanupJobInsert = typeof fileArtifactCleanupJobs.$inferInsert;
 
 // TODO(usage): workspace_usage_month will become the single usage aggregate keyed by workspace_id + period_code (see docs/workspace-usage-foundation.md)
 export const workspaces = pgTable("workspaces", {
@@ -394,6 +443,7 @@ export const workspaces = pgTable("workspaces", {
   qdrantCollectionsCount: integer("qdrant_collections_count").notNull().default(0),
   qdrantPointsCount: bigint("qdrant_points_count", { mode: "bigint" }).notNull().default(0n),
   qdrantStorageBytes: bigint("qdrant_storage_bytes", { mode: "bigint" }).notNull().default(0n),
+  /** @deprecated Release-A compatibility; runtime uses UNICA_FILES_API_URL. */
   defaultFileStorageProviderId: varchar("default_file_storage_provider_id").references(() => fileStorageProviders.id, {
     onDelete: "set null",
   }),
@@ -3402,16 +3452,14 @@ export const knowledgeBaseSearchSettings = pgTable(
 
 export const speechProviderTypes = ["stt", "tts"] as const;
 export type SpeechProviderType = (typeof speechProviderTypes)[number];
-
 export const speechProviderDirections = ["audio_to_text", "text_to_speech"] as const;
 export type SpeechProviderDirection = (typeof speechProviderDirections)[number];
-
 export const speechProviderStatuses = ["Disabled", "Enabled", "Error"] as const;
 export type SpeechProviderStatus = (typeof speechProviderStatuses)[number];
-
 export const asrProviderTypes = ["unica", "unica_v2"] as const;
 export type AsrProviderType = (typeof asrProviderTypes)[number];
 
+/** @deprecated Release-A compatibility; runtime ASR selection is fixed by environment. */
 export const speechProviders = pgTable("speech_providers", {
   id: text("id").primaryKey(),
   displayName: text("display_name").notNull(),
@@ -3432,12 +3480,11 @@ export const speechProviders = pgTable("speech_providers", {
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
+/** @deprecated Release-A compatibility; fixed service credentials are environment-owned. */
 export const speechProviderSecrets = pgTable(
   "speech_provider_secrets",
   {
-    providerId: text("provider_id")
-      .notNull()
-      .references(() => speechProviders.id, { onDelete: "cascade" }),
+    providerId: text("provider_id").notNull().references(() => speechProviders.id, { onDelete: "cascade" }),
     secretKey: text("secret_key").notNull(),
     secretValue: text("secret_value").notNull().default(""),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -3492,6 +3539,7 @@ export const ocrProviders = pgTable(
       .references(() => llmProviders.id, { onDelete: "restrict" }),
     model: text("model").notNull(),
     imageTransport: text("image_transport").$type<OcrImageTransport>().notNull().default("base64"),
+    /** @deprecated Release-A compatibility; local_url uploads use the fixed Files service. */
     fileStorageProviderId: varchar("file_storage_provider_id").references(() => fileStorageProviders.id, {
       onDelete: "set null",
     }),
@@ -3511,7 +3559,6 @@ export const ocrProviders = pgTable(
   },
   (table) => ({
     llmProviderIdx: index("ocr_providers_llm_provider_idx").on(table.llmProviderConfigId),
-    fileStorageProviderIdx: index("ocr_providers_file_storage_provider_idx").on(table.fileStorageProviderId),
     activeDefaultIdx: index("ocr_providers_active_default_idx").on(table.isActive, table.isDefault),
     // Гарантия единственного дефолтного OCR-провайдера на уровне БД (как у tariff_plans). Снимает
     // недетерминизм резолвера getActiveDefaultOcrProvider при нескольких is_default=true. Миграция 0255.
@@ -3891,6 +3938,7 @@ export const assistants = pgTable(
       .$type<AssistantTranscriptionFlowMode>()
       .notNull()
       .default("standard"),
+    /** @deprecated Release-A compatibility; runtime uses SpeechRecognition v2. */
     asrProviderId: text("asr_provider_id").references(() => speechProviders.id, { onDelete: "set null" }),
     onTranscriptionMode: text("on_transcription_mode")
       .$type<AssistantTranscriptionMode>()
@@ -5064,7 +5112,9 @@ export type UnicaAsrDiarizationPolicy = (typeof unicaAsrDiarizationPolicies)[num
 export interface UnicaAsrAdvancedOptions {
   diarize?: boolean;
   diarizationPolicy?: UnicaAsrDiarizationPolicy;
+  /** @deprecated Release-A passthrough only; SpeechRecognition v2 ignores this section. */
   processingOptions?: UnicaAsrAdvancedOptionRecord;
+  /** @deprecated Release-A passthrough only; SpeechRecognition v2 ignores this section. */
   vadOptions?: UnicaAsrAdvancedOptionRecord;
   generalOptions?: UnicaAsrAdvancedOptionRecord;
 }
@@ -5783,12 +5833,6 @@ const ocrProviderBaseSchema = createInsertSchema(ocrProviders)
     llmProviderConfigId: z.string().trim().min(1, "Выберите LLM-провайдера"),
     model: z.string().trim().min(1, "Укажите модель"),
     imageTransport: z.enum(ocrImageTransports).default("base64"),
-    fileStorageProviderId: z
-      .string()
-      .trim()
-      .optional()
-      .nullable()
-      .transform((value) => (value && value.length > 0 ? value : null)),
     imageDetail: z.enum(ocrImageDetails).default("auto"),
     imageEnhancementEnabled: z.boolean().default(true),
     additionalBodyFields: ocrProviderAdditionalBodyFieldsSchema,
@@ -5796,27 +5840,13 @@ const ocrProviderBaseSchema = createInsertSchema(ocrProviders)
     isActive: z.boolean().default(true),
   });
 
-function validateOcrProviderTransport(
-  data: { imageTransport?: OcrImageTransport; fileStorageProviderId?: string | null },
-  ctx: z.RefinementCtx,
-) {
-  if (data.imageTransport === "local_url" && !data.fileStorageProviderId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Для local_url выберите внешний файловый провайдер Unica",
-      path: ["fileStorageProviderId"],
-    });
-  }
-}
-
-export const insertOcrProviderSchema = ocrProviderBaseSchema.superRefine(validateOcrProviderTransport);
+export const insertOcrProviderSchema = ocrProviderBaseSchema;
 
 export const updateOcrProviderSchema = ocrProviderBaseSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0, {
     message: "Нет данных для обновления",
-  })
-  .superRefine(validateOcrProviderTransport);
+  });
 
 const callbackUrlSchema = z
   .string()
@@ -6224,20 +6254,15 @@ export type SpeechProvider = typeof speechProviders.$inferSelect;
 export type SpeechProviderInsert = typeof speechProviders.$inferInsert;
 export type SpeechProviderSecret = typeof speechProviderSecrets.$inferSelect;
 
-// Unica ASR configuration interface
+/** @deprecated Release-A compatibility for persisted provider config. */
 export interface UnicaAsrConfig {
   baseUrl: string;
   workspaceId: string;
   skipSslVerify?: boolean;
   pollingIntervalMs?: number;
   timeoutMs?: number;
-  /**
-   * Optional file storage provider to use for Unica ASR.
-   * Used as fallback when assistant/workspace default file provider is not configured.
-   */
   fileStorageProviderId?: string;
 }
-
 export type LlmProvider = typeof llmProviders.$inferSelect;
 export type LlmProviderInsert = typeof llmProviders.$inferInsert;
 export type UnicaChatConfig = typeof unicaChatConfig.$inferSelect;
@@ -6308,7 +6333,7 @@ export const asrExecutions = pgTable(
     userMessageId: uuid("user_message_id"),
     transcriptMessageId: uuid("transcript_message_id"),
     transcriptId: uuid("transcript_id"),
-    provider: text("provider"),
+    engine: text("engine"),
     mode: text("mode"),
     fileId: uuid("file_id").references(() => files.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
@@ -6320,9 +6345,15 @@ export const asrExecutions = pgTable(
     failureHttpStatus: integer("failure_http_status"),
     retryable: boolean("retryable"),
     attachmentId: uuid("attachment_id"),
+    /** @deprecated Release-A compatibility; new runtime writes externalFileUri. */
     providerFileId: text("provider_file_id"),
+    /** @deprecated Release-A compatibility; new runtime writes operationId. */
     providerOperationId: text("provider_operation_id"),
+    /** @deprecated Release-A compatibility; new runtime writes taskId. */
     providerTaskId: text("provider_task_id"),
+    externalFileUri: text("external_file_uri"),
+    operationId: text("operation_id"),
+    taskId: text("task_id"),
     correlationId: text("correlation_id"),
     correlationQuality: text("correlation_quality"),
     lastTransitionAt: timestamp("last_transition_at", { withTimezone: true }),
@@ -6348,6 +6379,8 @@ export const asrExecutions = pgTable(
     failureStageIdx: index("asr_executions_failure_stage_idx").on(table.failureStage, table.createdAt),
     providerOperationIdx: index("asr_executions_provider_operation_idx").on(table.providerOperationId),
     providerTaskIdx: index("asr_executions_provider_task_idx").on(table.providerTaskId),
+    operationIdx: index("asr_executions_operation_idx").on(table.operationId),
+    taskIdx: index("asr_executions_task_idx").on(table.taskId),
     attachmentIdx: index("asr_executions_attachment_idx").on(table.attachmentId),
   }),
 );
@@ -6392,7 +6425,17 @@ export const asrExecutionEvents = pgTable(
 export type AsrExecutionEventRow = typeof asrExecutionEvents.$inferSelect;
 export type AsrExecutionEventInsert = typeof asrExecutionEvents.$inferInsert;
 
-export const asrCompletionJobStatuses = ["pending", "transcribing", "completing", "postprocessing", "success", "error", "cancelled"] as const;
+export const asrCompletionJobStatuses = [
+  "starting",
+  "dispatch_unknown",
+  "pending",
+  "transcribing",
+  "completing",
+  "postprocessing",
+  "success",
+  "error",
+  "cancelled",
+] as const;
 export type AsrCompletionJobStatus = (typeof asrCompletionJobStatuses)[number];
 export const asrCompletionJobActionStatuses = ["pending", "queued", "running", "success", "error", "cancelled", "skipped"] as const;
 export type AsrCompletionJobActionStatus = (typeof asrCompletionJobActionStatuses)[number];
@@ -6411,11 +6454,20 @@ export const asrCompletionJobs = pgTable(
       .notNull()
       .references(() => assistants.id, { onDelete: "cascade" }),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Nullable during rolling deploys; new runtime always writes all three fields.
+    requestOperationId: text("request_operation_id"),
+    idempotencyKey: text("idempotency_key"),
+    requestFingerprint: text("request_fingerprint"),
     operationId: text("operation_id").notNull(),
     taskId: text("task_id"),
     asrExecutionId: uuid("asr_execution_id").references(() => asrExecutions.id, { onDelete: "set null" }),
     fileId: uuid("file_id").references(() => files.id, { onDelete: "set null" }),
+    /** @deprecated Release-A compatibility; new runtime writes externalFileUri. */
     providerFileId: text("provider_file_id"),
+    // Snapshots intentionally have no FK: they must survive attachment/message cleanup.
+    attachmentId: uuid("attachment_id"),
+    userMessageId: varchar("user_message_id"),
+    externalFileUri: text("external_file_uri"),
     fileName: text("file_name"),
     actionPlanExplicit: boolean("action_plan_explicit").notNull().default(false),
     postTranscriptionActionIds: jsonb("post_transcription_action_ids").$type<string[] | null>(),
@@ -6429,15 +6481,23 @@ export const asrCompletionJobs = pgTable(
     transcriptMessageId: varchar("transcript_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    cancellationConfirmedAt: timestamp("cancellation_confirmed_at", { withTimezone: true }),
+    billingCompletedAt: timestamp("billing_completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
     operationUniqueIdx: uniqueIndex("asr_completion_jobs_operation_unique_idx").on(table.operationId),
+    requestOperationUniqueIdx: uniqueIndex("asr_completion_jobs_request_operation_unique_idx").on(table.requestOperationId),
+    idempotencyUniqueIdx: uniqueIndex("asr_completion_jobs_idempotency_unique_idx").on(table.idempotencyKey),
     statusNextRetryIdx: index("asr_completion_jobs_status_next_retry_idx").on(table.status, table.nextRetryAt, table.createdAt),
     leaseIdx: index("asr_completion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
     chatIdx: index("asr_completion_jobs_chat_idx").on(table.chatId, table.createdAt),
     asrExecutionIdx: index("asr_completion_jobs_asr_execution_idx").on(table.asrExecutionId),
+    asrExecutionNewUniqueIdx: uniqueIndex("asr_completion_jobs_asr_execution_new_unique_idx")
+      .on(table.asrExecutionId)
+      .where(sql`${table.requestOperationId} IS NOT NULL`),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_jobs_workspace_id_idx").on(table.workspaceId),
   }),

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { startJanitorHealthServer, type JanitorHealthState } from "../../server/janitor/health-server";
+import { fileArtifactCleanupQueueJobs } from "../../server/monitoring/file-artifact-cleanup-metrics";
 import { janitorRunsTotal } from "../../server/monitoring/janitor-metrics";
 
 function makeState(partial: Partial<JanitorHealthState> = {}): JanitorHealthState {
@@ -8,6 +9,7 @@ function makeState(partial: Partial<JanitorHealthState> = {}): JanitorHealthStat
     startedAt: "2026-07-17T00:00:00.000Z",
     databaseReady: false,
     orchestratorStarted: false,
+    cleanupWorkerStarted: false,
     enabled: true,
     tickMinutes: 15,
     ...partial,
@@ -34,14 +36,19 @@ describe("janitor health server", () => {
     const notReady = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
     expect(notReady.status).toBe(503);
 
-    state = makeState({ databaseReady: true, orchestratorStarted: true });
+    state = makeState({ databaseReady: true, orchestratorStarted: true, cleanupWorkerStarted: true });
     const ready = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
     expect(ready.status).toBe(200);
     await expect(ready.json()).resolves.toMatchObject({ ready: true });
   });
 
-  it("при JANITOR_ENABLED=false под готов после БД даже без оркестратора", async () => {
-    const state = makeState({ databaseReady: true, orchestratorStarted: false, enabled: false });
+  it("при JANITOR_ENABLED=false под готов после БД и запуска cleanup worker даже без оркестратора", async () => {
+    const state = makeState({
+      databaseReady: true,
+      orchestratorStarted: false,
+      cleanupWorkerStarted: true,
+      enabled: false,
+    });
     const server = await startJanitorHealthServer({ port: 0, getState: () => state });
     close = server.close;
 
@@ -49,8 +56,19 @@ describe("janitor health server", () => {
     expect(ready.status).toBe(200);
   });
 
+  it("не готов без durable cleanup worker даже при выключенных плановых политиках", async () => {
+    const state = makeState({ databaseReady: true, cleanupWorkerStarted: false, enabled: false });
+    const server = await startJanitorHealthServer({ port: 0, getState: () => state });
+    close = server.close;
+
+    const ready = await fetch(`http://127.0.0.1:${server.port}/ready`);
+    expect(ready.status).toBe(503);
+  });
+
   it("отдаёт Prometheus-метрики janitor на /metrics", async () => {
     janitorRunsTotal.inc({ policy: "pg.assistant_executions", status: "success", trigger: "auto" });
+    fileArtifactCleanupQueueJobs.set({ status: "error" }, 2);
+    fileArtifactCleanupQueueJobs.set({ status: "dead" }, 3);
 
     const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
     close = server.close;
@@ -59,6 +77,8 @@ describe("janitor health server", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("janitor_runs_total");
+    expect(body).toContain('file_artifact_cleanup_queue_jobs{status="error"} 2');
+    expect(body).toContain('file_artifact_cleanup_queue_jobs{status="dead"} 3');
   });
 
   it("неизвестный путь — 404", async () => {

@@ -45,17 +45,66 @@ describe("janitor domain-gateway client", () => {
       },
       async (base, requests) => {
         const gateway = createHttpJanitorDomainGateway(base);
+        await gateway.cleanupFileArtifacts({
+          version: 1,
+          jobId: "job-1",
+          workspaceId: "ws-1",
+          resourceType: "chat_attachment",
+          resourceId: "att-1",
+          reason: "manual_chat_delete",
+          artifact: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+        });
         await gateway.deleteWorkspaceFile("ws-1", "feedback-attachments/u/a.png");
         await gateway.reconcileQdrantUsage();
 
-        expect(requests).toHaveLength(2);
-        expect(requests[0].url).toBe("/workspace-files/delete");
+        expect(requests).toHaveLength(3);
+        expect(requests[0].url).toBe("/v1/file-artifacts/cleanup");
         expect(requests[0].auth).toBe("Bearer gw-secret");
         expect(JSON.parse(requests[0].body)).toEqual({
+          version: 1,
+          jobId: "job-1",
+          workspaceId: "ws-1",
+          resourceType: "chat_attachment",
+          resourceId: "att-1",
+          reason: "manual_chat_delete",
+          artifact: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+        });
+        expect(requests[1].url).toBe("/workspace-files/delete");
+        expect(JSON.parse(requests[1].body)).toEqual({
           workspaceId: "ws-1",
           storageKey: "feedback-attachments/u/a.png",
         });
-        expect(requests[1].url).toBe("/qdrant-usage/reconcile");
+        expect(requests[2].url).toBe("/qdrant-usage/reconcile");
+      },
+    );
+  });
+
+  it("читает retryable и код активной ASR из структурированной ошибки", async () => {
+    vi.stubEnv("UNICA_JANITOR_GATEWAY_TOKEN", "gw-secret");
+    await withStub(
+      (_req, _body, res) => {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          message: "ASR is active",
+          code: "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR",
+          retryable: true,
+        }));
+      },
+      async (base) => {
+        const gateway = createHttpJanitorDomainGateway(base);
+        await expect(gateway.cleanupFileArtifacts({
+          version: 1,
+          jobId: "job-1",
+          workspaceId: "ws-1",
+          resourceType: "chat_attachment",
+          resourceId: "att-1",
+          reason: "retention",
+          artifact: { attachmentId: "att-1" },
+        })).rejects.toMatchObject({
+          status: 409,
+          code: "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR",
+          retryable: true,
+        });
       },
     );
   });

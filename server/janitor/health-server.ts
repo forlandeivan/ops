@@ -15,6 +15,8 @@ export interface JanitorHealthState {
   databaseReady: boolean;
   /** Оркестратор запущен (false до готовности БД или при JANITOR_ENABLED=false). */
   orchestratorStarted: boolean;
+  /** Постоянный исполнитель durable file_artifact_cleanup_jobs. */
+  cleanupWorkerStarted: boolean;
   /** Значение гейта JANITOR_ENABLED на старте процесса. */
   enabled: boolean;
   tickMinutes: number;
@@ -40,7 +42,7 @@ export async function startJanitorHealthServer(params: {
     if (url === "/health/ready" || url === "/ready") {
       // При выключенном оркестраторе (JANITOR_ENABLED=false) под считается готовым,
       // как только БД доступна: деплой не должен флапать из-за осознанно выключенной уборки.
-      const ready = state.databaseReady && (state.orchestratorStarted || !state.enabled);
+      const ready = state.databaseReady && state.cleanupWorkerStarted && (state.orchestratorStarted || !state.enabled);
       res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ status: ready ? "ready" : "starting", ready, role: "janitor", ...state }));
       return;
