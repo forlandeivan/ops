@@ -4479,10 +4479,6 @@ export type ChatMessageAttachmentMetadata = {
 
 export const transcriptAudioWaveformStatuses = ["pending", "processing", "ready", "failed"] as const;
 export type TranscriptAudioWaveformStatus = (typeof transcriptAudioWaveformStatuses)[number];
-export const transcriptAudioWaveformStatusEnum = pgEnum(
-  "transcript_audio_waveform_status",
-  transcriptAudioWaveformStatuses,
-);
 
 export type TranscriptAudioSourceDto = {
   transcriptId: string;
@@ -4597,7 +4593,9 @@ export const transcriptAudioSources = pgTable(
     attachmentId: varchar("attachment_id").references(() => chatAttachments.id, { onDelete: "set null" }),
     messageId: varchar("message_id").references(() => chatMessages.id, { onDelete: "set null" }),
     durationMs: integer("duration_ms"),
-    waveformStatus: transcriptAudioWaveformStatusEnum("waveform_status").notNull().default("pending"),
+    // text, не pgEnum: миграция 0178 создала колонку text'ом, и все базы (включая push-управляемые)
+    // живут без PG-типа transcript_audio_waveform_status — декларация enum здесь была фикцией.
+    waveformStatus: text("waveform_status").$type<TranscriptAudioWaveformStatus>().notNull().default("pending"),
     waveformPeaksJson: jsonb("waveform_peaks_json").$type<number[] | null>(),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
