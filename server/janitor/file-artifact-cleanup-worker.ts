@@ -123,11 +123,7 @@ export async function processFileArtifactCleanupJob(params: {
       await params.gateway.cleanupFileArtifacts({
         version: 1,
         jobId: params.job.id,
-        workspaceId: params.job.workspaceId,
-        resourceType: params.job.resourceType,
-        resourceId: params.job.resourceId,
-        reason: params.job.reason,
-        artifact: params.job.payload,
+        workerId: params.workerId,
       }, params.signal);
     } catch (error) {
       if (params.stopping?.() && params.signal?.aborted) {

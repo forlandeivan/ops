@@ -79,11 +79,11 @@ describe("file artifact cleanup worker", () => {
     });
 
     expect(outcome).toBe("success");
-    expect(cleanup).toHaveBeenCalledWith(expect.objectContaining({
+    expect(cleanup).toHaveBeenCalledWith({
       version: 1,
       jobId: "00000000-0000-0000-0000-000000000001",
-      artifact: expect.objectContaining({ externalUri: "asr/a.mp3" }),
-    }), undefined);
+      workerId: "worker-1",
+    }, undefined);
     expect(fakeStore.complete).toHaveBeenCalledWith(job().id, "worker-1");
   });
 

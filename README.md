@@ -31,8 +31,9 @@ tests/janitor/               юнит-тесты движков, очереди,
 - **Сам исполняет:** 24 PG-задачи retention, скан осиротевших объектов S3,
   скан/удаление коллекций Qdrant, grace-ledger, журнал прогонов, распределённые локи.
 - **Через callback-gateway монолита** (`/api/internal/janitor`, см. `docs/gateway-contract.md` §3.1):
-  единая очистка MinIO + Files по durable snapshot, удаление workspace-файла с метерингом,
-  reconcile Qdrant-usage. Владелец доменной логики — монолит, Files напрямую не вызывается.
+  единая очистка MinIO + Files по ссылке `{jobId, workerId}` на каноническую durable job,
+  удаление workspace-файла с метерингом, reconcile Qdrant-usage. Владелец доменной логики —
+  монолит, Files напрямую не вызывается.
 - **Всегда обслуживает** `file_artifact_cleanup_jobs`, даже если `JANITOR_ENABLED=false`:
   SKIP LOCKED, lease/reclaim, heartbeat, active-ASR guard и exponential backoff.
 - **Не делает:** миграции БД (их применяет монолит), доменные чтения вне своих задач.

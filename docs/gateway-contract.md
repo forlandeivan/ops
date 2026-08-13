@@ -82,9 +82,9 @@ URL или токен пуст → ops завершается с понятно�
   filename, mimeType, storageKey, documentVersion, derivedManifestObjectKey, previewObjectKey}}`;
   удаляет объект и все производные (превью/манифест/шарды). `200 {ok:true}`.
 - `POST /v1/file-artifacts/cleanup` — единая версия для durable-очереди. Body
-  `{version:1, jobId, workspaceId, resourceType, resourceId, reason, artifact:{attachmentId,
-  chatId, fileId, filename, mimeType, storageKey, documentVersion,
-  derivedManifestObjectKey, previewObjectKey, externalUri}}`. Монолит идемпотентно удаляет
+  `{version:1, jobId, workerId}`. `workspaceId` и snapshot артефакта не передаются как
+  authority: монолит загружает каноническую job из общей `file_artifact_cleanup_jobs` по
+  `jobId` и проверяет текущего lease-владельца по `workerId`. Затем он идемпотентно удаляет
   канонические и производные MinIO-объекты и Files-копию, после чего очищает ссылки.
   `2xx` — успех; `409 FILE_ARTIFACT_CLEANUP_ACTIVE_ASR` — отложить без attempts;
   остальные ошибки содержат `code` и `retryable`.
@@ -108,6 +108,8 @@ ledger, журнал, локи) janitor исполняет сам по обще�
 - Журнал прогонов — `cleanup_run_log` (`triggered_by` auto|manual, `freed_bytes`).
 - `file_artifact_cleanup_jobs` захватывается атомарно через `FOR UPDATE SKIP LOCKED`.
   Истёкший lease reclaim-ится другим pod; долгий gateway-вызов держит lease heartbeat-ом.
+  Cleanup gateway получает только `{version, jobId, workerId}` и разрешает workspace,
+  resource и artifact snapshot из этой канонической строки очереди.
 - Ручные удаления, S3-политики и физический purge `pg.chat_sessions`/
   `pg.assistants.archived` создают один и тот же versioned snapshot до исчезновения
   исходных строк. Для двух PG-политик enqueue snapshots и каскадный DELETE выполняются

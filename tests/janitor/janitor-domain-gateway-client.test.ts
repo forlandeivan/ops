@@ -48,11 +48,7 @@ describe("janitor domain-gateway client", () => {
         await gateway.cleanupFileArtifacts({
           version: 1,
           jobId: "job-1",
-          workspaceId: "ws-1",
-          resourceType: "chat_attachment",
-          resourceId: "att-1",
-          reason: "manual_chat_delete",
-          artifact: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+          workerId: "worker-1",
         });
         await gateway.deleteWorkspaceFile("ws-1", "feedback-attachments/u/a.png");
         await gateway.reconcileQdrantUsage();
@@ -63,11 +59,7 @@ describe("janitor domain-gateway client", () => {
         expect(JSON.parse(requests[0].body)).toEqual({
           version: 1,
           jobId: "job-1",
-          workspaceId: "ws-1",
-          resourceType: "chat_attachment",
-          resourceId: "att-1",
-          reason: "manual_chat_delete",
-          artifact: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+          workerId: "worker-1",
         });
         expect(requests[1].url).toBe("/workspace-files/delete");
         expect(JSON.parse(requests[1].body)).toEqual({
@@ -95,11 +87,7 @@ describe("janitor domain-gateway client", () => {
         await expect(gateway.cleanupFileArtifacts({
           version: 1,
           jobId: "job-1",
-          workspaceId: "ws-1",
-          resourceType: "chat_attachment",
-          resourceId: "att-1",
-          reason: "retention",
-          artifact: { attachmentId: "att-1" },
+          workerId: "worker-1",
         })).rejects.toMatchObject({
           status: 409,
           code: "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR",

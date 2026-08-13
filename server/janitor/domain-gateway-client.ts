@@ -27,22 +27,7 @@ export interface GatewayChatAttachmentRef {
 export interface GatewayFileArtifactCleanupRequest {
   version: 1;
   jobId: string;
-  workspaceId: string;
-  resourceType: string;
-  resourceId: string;
-  reason: string;
-  artifact: {
-    attachmentId?: string | null;
-    chatId?: string | null;
-    fileId?: string | null;
-    filename?: string | null;
-    mimeType?: string | null;
-    storageKey?: string | null;
-    documentVersion?: number | null;
-    derivedManifestObjectKey?: string | null;
-    previewObjectKey?: string | null;
-    externalUri?: string | null;
-  };
+  workerId: string;
 }
 
 /** Доменные операции уборки, исполняемые владельцем (монолитом). */

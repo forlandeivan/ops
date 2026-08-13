@@ -417,6 +417,10 @@ export const fileArtifactCleanupJobs = pgTable(
     statusRetryIdx: index("file_artifact_cleanup_jobs_status_retry_idx").on(table.status, table.nextRetryAt, table.createdAt),
     leaseIdx: index("file_artifact_cleanup_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
     workspaceIdx: index("file_artifact_cleanup_jobs_workspace_idx").on(table.workspaceId, table.createdAt),
+    statusCheck: check(
+      "file_artifact_cleanup_jobs_status_check",
+      sql`${table.status} IN ('pending', 'processing', 'success', 'error')`,
+    ),
   }),
 );
 
@@ -6338,6 +6342,8 @@ export const asrExecutions = pgTable(
     transcriptMessageId: uuid("transcript_message_id"),
     transcriptId: uuid("transcript_id"),
     engine: text("engine"),
+    /** @deprecated Release-A compatibility; read fallback only until Release B. */
+    provider: text("provider"),
     mode: text("mode"),
     fileId: uuid("file_id").references(() => files.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
@@ -6493,15 +6499,20 @@ export const asrCompletionJobs = pgTable(
   },
   (table) => ({
     operationUniqueIdx: uniqueIndex("asr_completion_jobs_operation_unique_idx").on(table.operationId),
-    requestOperationUniqueIdx: uniqueIndex("asr_completion_jobs_request_operation_unique_idx").on(table.requestOperationId),
-    idempotencyUniqueIdx: uniqueIndex("asr_completion_jobs_idempotency_unique_idx").on(table.idempotencyKey),
+    requestOperationUniqueIdx: uniqueIndex("asr_completion_jobs_request_operation_unique_idx")
+      .on(table.workspaceId, table.requestOperationId)
+      .where(sql`${table.requestOperationId} IS NOT NULL`),
+    idempotencyUniqueIdx: uniqueIndex("asr_completion_jobs_idempotency_unique_idx")
+      .on(table.workspaceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
     statusNextRetryIdx: index("asr_completion_jobs_status_next_retry_idx").on(table.status, table.nextRetryAt, table.createdAt),
+    statusUpdatedIdx: index("asr_completion_jobs_status_updated_idx").on(table.status, table.updatedAt),
     leaseIdx: index("asr_completion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
     chatIdx: index("asr_completion_jobs_chat_idx").on(table.chatId, table.createdAt),
     asrExecutionIdx: index("asr_completion_jobs_asr_execution_idx").on(table.asrExecutionId),
     asrExecutionNewUniqueIdx: uniqueIndex("asr_completion_jobs_asr_execution_new_unique_idx")
       .on(table.asrExecutionId)
-      .where(sql`${table.requestOperationId} IS NOT NULL`),
+      .where(sql`${table.requestOperationId} IS NOT NULL AND ${table.asrExecutionId} IS NOT NULL`),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_jobs_workspace_id_idx").on(table.workspaceId),
   }),
