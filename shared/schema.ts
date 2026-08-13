@@ -1158,6 +1158,10 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   aiOcrPageConcurrency: integer("ai_ocr_page_concurrency"),
   documentImportWorkerConcurrency: integer("document_import_worker_concurrency"),
   visionOcrMaxConcurrency: integer("vision_ocr_max_concurrency"),
+  // Структуризатор импортируемых документов (rule-based): включён по умолчанию; пороги правил —
+  // jsonb, NULL = дефолты кода. См. shared/knowledge-document-structure-enhancement.ts.
+  structureEnhancementEnabled: boolean("structure_enhancement_enabled").notNull().default(true),
+  structureEnhancementRules: jsonb("structure_enhancement_rules"),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
