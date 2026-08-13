@@ -22,7 +22,7 @@ describe("file artifact cleanup job store", () => {
             resource_id: "att-1",
             reason: "manual_chat_delete",
             payload_version: 1,
-            payload: { attachmentId: "att-1", externalUri: "asr/a.mp3" },
+            payload: { attachmentId: "att-1", externalUri: "/ws-1/asr/a.mp3" },
             status: "processing",
             attempts: 0,
             worker_id: "worker-1",
@@ -42,7 +42,7 @@ describe("file artifact cleanup job store", () => {
     expect(querySql).toMatch(/lease_expires_at < now\(\)/i);
     expect(claimed).toMatchObject({
       id: "00000000-0000-0000-0000-000000000001",
-      payload: { externalUri: "asr/a.mp3" },
+      payload: { externalUri: "/ws-1/asr/a.mp3" },
     });
   });
 
@@ -64,7 +64,7 @@ describe("file artifact cleanup job store", () => {
       resourceId: "att-1",
       reason: "retention",
       payloadVersion: 1,
-      payload: { attachmentId: "att-1", fileId: "file-1", externalUri: "asr/a.mp3" },
+      payload: { attachmentId: "att-1", fileId: "file-1", externalUri: "/ws-1/asr/a.mp3" },
       status: "processing",
       attempts: 0,
       workerId: "worker-1",
@@ -79,6 +79,31 @@ describe("file artifact cleanup job store", () => {
     expect(querySql).toContain("asr_executions");
     expect(querySql).toContain("COALESCE(execution.lifecycle_status, execution.status, 'accepted')");
     expect(querySql).toContain("NOT IN ('completed', 'failed', 'cancelled', 'expired')");
+  });
+
+  it("owner mutations отклоняют просроченный lease", async () => {
+    const dialect = new PgDialect();
+    const statements: string[] = [];
+    const database = {
+      execute: vi.fn(async (query: unknown) => {
+        statements.push(dialect.sqlToQuery(query as never).sql);
+        return { rows: [] };
+      }),
+    };
+    const store = createFileArtifactCleanupJobStore(database);
+
+    await expect(store.heartbeat("00000000-0000-0000-0000-000000000001", "worker-1", 60_000)).resolves.toBe(false);
+    await expect(store.deferForActiveAsr("00000000-0000-0000-0000-000000000001", "worker-1", new Date())).resolves.toBe(false);
+    await expect(store.release("00000000-0000-0000-0000-000000000001", "worker-1")).resolves.toBe(false);
+    await expect(store.complete("00000000-0000-0000-0000-000000000001", "worker-1")).resolves.toBe(false);
+    await expect(store.fail("00000000-0000-0000-0000-000000000001", "worker-1", {
+      attempts: 1,
+      nextRetryAt: null,
+      error: "expired",
+    })).resolves.toBe(false);
+
+    expect(statements).toHaveLength(5);
+    for (const statement of statements) expect(statement).toMatch(/lease_expires_at > now\(\)/i);
   });
 
   it("новый enqueue redrive-ит только terminal error с cooldown, сохраняя attempts и last_error", async () => {
@@ -100,7 +125,7 @@ describe("file artifact cleanup job store", () => {
       resourceType: "chat_attachment",
       resourceId: "att-1",
       reason: "s3.chat_attachments.audio_video",
-      payload: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+      payload: { attachmentId: "att-1", storageKey: "chat/a.mp3", externalUri: "/ws-1/asr/a.mp3" },
     })).resolves.toBe(true);
 
     const conflictClause = querySql.slice(querySql.indexOf("ON CONFLICT"));
@@ -140,14 +165,14 @@ describe("file artifact cleanup job store", () => {
       resourceType: "chat_attachment",
       resourceId: "att-1",
       reason: "s3.chat_attachments.audio_video",
-      payload: { storageKey: "chat/a.mp3", externalUri: "asr/a.mp3", documentVersion: 1 },
+      payload: { storageKey: "chat/a.mp3", externalUri: "/ws-1/asr/a.mp3", documentVersion: 1 },
     };
     const first = scheduledCleanupIdempotencyKey(input);
     expect(first).toMatch(/^janitor:[a-f0-9]{32}$/);
     expect(scheduledCleanupIdempotencyKey({ ...input, reason: "another policy" })).toBe(first);
     expect(scheduledCleanupIdempotencyKey({
       ...input,
-      payload: { ...input.payload, externalUri: "asr/b.mp3" },
+      payload: { ...input.payload, externalUri: "/ws-1/asr/b.mp3" },
     })).not.toBe(first);
   });
 });

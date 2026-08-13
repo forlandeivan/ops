@@ -18,7 +18,7 @@ function job(overrides: Partial<FileArtifactCleanupJobRecord> = {}): FileArtifac
     resourceId: "att-1",
     reason: "manual_chat_delete",
     payloadVersion: 1,
-    payload: { attachmentId: "att-1", fileId: "file-1", storageKey: "chat/a.mp3", externalUri: "asr/a.mp3" },
+    payload: { attachmentId: "att-1", fileId: "file-1", storageKey: "chat/a.mp3", externalUri: "/ws-1/asr/a.mp3" },
     status: "processing",
     attempts: 0,
     workerId: "worker-1",

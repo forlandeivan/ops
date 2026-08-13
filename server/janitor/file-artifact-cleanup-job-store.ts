@@ -160,6 +160,7 @@ export function createFileArtifactCleanupJobStore(
         SET lease_expires_at = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
             updated_at = NOW()
         WHERE id = ${jobId}::uuid AND status = 'processing' AND worker_id = ${workerId}
+          AND lease_expires_at > NOW()
         RETURNING id
       `);
       return rowsOf(result).length === 1;
@@ -203,6 +204,7 @@ export function createFileArtifactCleanupJobStore(
         SET status = 'pending', worker_id = NULL, lease_expires_at = NULL,
             next_retry_at = ${nextRetryAt}, last_error = NULL, updated_at = NOW()
         WHERE id = ${jobId}::uuid AND status = 'processing' AND worker_id = ${workerId}
+          AND lease_expires_at > NOW()
         RETURNING id
       `);
       return rowsOf(result).length === 1;
@@ -214,6 +216,7 @@ export function createFileArtifactCleanupJobStore(
         SET status = 'pending', worker_id = NULL, lease_expires_at = NULL,
             next_retry_at = NOW(), updated_at = NOW()
         WHERE id = ${jobId}::uuid AND status = 'processing' AND worker_id = ${workerId}
+          AND lease_expires_at > NOW()
         RETURNING id
       `);
       return rowsOf(result).length === 1;
@@ -225,6 +228,7 @@ export function createFileArtifactCleanupJobStore(
         SET status = 'success', worker_id = NULL, lease_expires_at = NULL,
             next_retry_at = NULL, last_error = NULL, updated_at = NOW()
         WHERE id = ${jobId}::uuid AND status = 'processing' AND worker_id = ${workerId}
+          AND lease_expires_at > NOW()
         RETURNING id
       `);
       return rowsOf(result).length === 1;
@@ -237,6 +241,7 @@ export function createFileArtifactCleanupJobStore(
             lease_expires_at = NULL, next_retry_at = ${params.nextRetryAt},
             last_error = ${params.error.slice(0, 4000)}, updated_at = NOW()
         WHERE id = ${jobId}::uuid AND status = 'processing' AND worker_id = ${workerId}
+          AND lease_expires_at > NOW()
         RETURNING id
       `);
       return rowsOf(result).length === 1;
