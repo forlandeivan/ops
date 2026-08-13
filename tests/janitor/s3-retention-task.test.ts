@@ -290,7 +290,7 @@ describe("createChatAttachmentS3Store durable queue", () => {
             document_version: 1,
             derived_manifest_object_key: "chat/audio.manifest.json",
             preview_object_key: null,
-            external_uri: "asr/audio.mp3",
+            external_uri: "/ws-1/asr/audio.mp3",
             size_bytes: 123,
           }],
         };
@@ -331,7 +331,7 @@ describe("createChatAttachmentS3Store durable queue", () => {
         documentVersion: 1,
         derivedManifestObjectKey: "chat/audio.manifest.json",
         previewObjectKey: null,
-        externalUri: "asr/audio.mp3",
+        externalUri: "/ws-1/asr/audio.mp3",
       },
     });
   });
