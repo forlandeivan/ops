@@ -479,6 +479,22 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultBatchSize: 200,
     intervalMinutes: 1440,
   }),
+  task({
+    key: "s3.json_imports.stale",
+    label: "Файлы JSON-импорта Базы Знаний",
+    description:
+      "Удаляет исходные файлы JSON/JSONL-импорта Базы Знаний из хранилища после завершения задачи импорта (finished_at) старше срока хранения. Адрес файла в строке обнуляется, строка задачи и её статистика сохраняются. Поглощает прежний фоновый джоб json-import-cleanup: тот был зарегистрирован, но не удалял ничего (пустая реализация), поэтому включённая по умолчанию уборка лишь достраивает задуманное изначально поведение.",
+    category: "storage",
+    storage: "s3",
+    action: "delete_object",
+    table: "json_import_jobs",
+    timeColumn: "finished_at",
+    strippedColumns: ["source_file_key"],
+    defaultEnabled: true,
+    defaultRetentionDays: 7,
+    defaultBatchSize: 100,
+    intervalMinutes: 360,
+  }),
 
   // ── Векторное хранилище (Qdrant) ────────────────────────────────────────────
   // GC осиротевших коллекций Qdrant: удаляет коллекции, не связанные ни с одной БЗ/

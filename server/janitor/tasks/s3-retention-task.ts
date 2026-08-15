@@ -272,3 +272,48 @@ export function createChatFeedbackAttachmentS3Store(
     },
   };
 }
+
+/**
+ * Стор для исходных файлов JSON-импорта БЗ (таблица json_import_jobs, E15 монолита).
+ * Колонка ключа здесь source_file_key (не storage_key), поэтому общий whereFragment не
+ * подходит — фильтр собирается на месте: finished_at старше cutoff + непустой ключ.
+ * Производных артефактов нет: удаляем объект и обнуляем ключ пустой строкой (колонка NOT
+ * NULL — как в chat_feedback_attachments), строка задачи и её статистика сохраняются.
+ */
+export function createJsonImportJobS3Store(
+  database: S3Executor = db as unknown as S3Executor,
+  deps: { deleteObject: (workspaceId: string, storageKey: string) => Promise<void> },
+): S3RetentionStore {
+  const where = (filter: S3CandidateFilter, cutoff: Date) =>
+    sql`${sql.identifier(filter.timeColumn)} < ${cutoff} AND source_file_key IS NOT NULL AND source_file_key <> ''`;
+
+  return {
+    async countMatches({ filter, cutoff, cap }) {
+      const query = sql`SELECT count(*)::int AS count FROM (SELECT 1 FROM json_import_jobs WHERE ${where(
+        filter,
+        cutoff,
+      )} LIMIT ${cap}) AS sub`;
+      return firstCount(await database.execute(query));
+    },
+
+    async purgeBatch({ filter, cutoff, batchSize }) {
+      const timeId = sql.identifier(filter.timeColumn);
+      const query = sql`SELECT id, workspace_id, source_file_key, source_file_size FROM json_import_jobs WHERE ${where(
+        filter,
+        cutoff,
+      )} ORDER BY ${timeId} LIMIT ${batchSize}`;
+      const result = (await database.execute(query)) as { rows?: Array<Record<string, unknown>> };
+      const rows = result.rows ?? [];
+
+      let deleted = 0;
+      let freedBytes = 0;
+      for (const row of rows) {
+        await deps.deleteObject(String(row.workspace_id), String(row.source_file_key));
+        await database.execute(sql`UPDATE json_import_jobs SET source_file_key = '' WHERE id = ${row.id}`);
+        deleted += 1;
+        freedBytes += toNumber(row.source_file_size);
+      }
+      return { deleted, freedBytes };
+    },
+  };
+}

@@ -1112,6 +1112,8 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   aiOcrPageConcurrency: integer("ai_ocr_page_concurrency"),
   documentImportWorkerConcurrency: integer("document_import_worker_concurrency"),
   visionOcrMaxConcurrency: integer("vision_ocr_max_concurrency"),
+  // Потолок одновременных job-ов индексации на пространство (fair claim, S16). NULL = env/дефолт.
+  kbIndexingPerWorkspaceLimit: integer("kb_indexing_per_workspace_limit"),
   // Структуризатор импортируемых документов (rule-based): включён по умолчанию; пороги правил —
   // jsonb, NULL = дефолты кода. См. shared/knowledge-document-structure-enhancement.ts.
   structureEnhancementEnabled: boolean("structure_enhancement_enabled").notNull().default(true),
@@ -1663,6 +1665,9 @@ export const knowledgeBaseIndexingJobs = pgTable(
       .references(() => knowledgeDocumentVersions.id, { onDelete: "cascade" }),
     status: text("status").$type<KnowledgeBaseIndexingJobStatus>().notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
+    // Холостые переносы на занятом advisory-локе документа: не ошибка (в last_error не пишем)
+    // и не попытка (attempts восстанавливается) — отдельный счётчик для диагностики (S16).
+    lockBusyCount: integer("lock_busy_count").notNull().default(0),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
     lastError: text("last_error"),
     chunkCount: integer("chunk_count"),

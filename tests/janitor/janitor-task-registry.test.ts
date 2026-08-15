@@ -37,6 +37,9 @@ describe("janitor task registry", () => {
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
         "s3.chat_attachments.drafts",
+        // E15 монолита: поглощённый json-import-cleanup — джоб был зарегистрирован, но с пустым
+        // телом; включённая политика достраивает задуманное изначально поведение (7 дней).
+        "s3.json_imports.stale",
         // журнал запусков агента (eec6aabb): новые таблицы, но включены по умолчанию намеренно —
         // debug-трейс содержит тексты документов пользователей (strip через 7д = privacy-by-default),
         // а строки запуска удаляются через 90д, чтобы журнал не рос неограниченно. summary-логи
