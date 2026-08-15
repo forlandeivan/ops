@@ -480,6 +480,22 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 1440,
   }),
   task({
+    key: "s3.ingest_sources.workdir",
+    label: "Рабочие файлы конвейера приёма (ingest/)",
+    description:
+      "Удаляет промежуточные рабочие файлы конвейера приёма (префикс ingest/) для источников в терминальном статусе старше срока хранения (отсчёт от terminal_at). Удаляются ТОЛЬКО объекты под ingest/ — оригиналы файлов и кэш разбора canonical/ этой политикой не затрагиваются: кэш адресуется содержимым, по возрасту не удаляется (иначе каждый реиндекс возвращает повторный OCR) и живёт до удаления пространства.",
+    category: "storage",
+    storage: "s3",
+    action: "delete_object",
+    table: "ingest_sources",
+    timeColumn: "terminal_at",
+    strippedColumns: ["blob_key"],
+    defaultEnabled: true,
+    defaultRetentionDays: 7,
+    defaultBatchSize: 100,
+    intervalMinutes: 360,
+  }),
+  task({
     key: "s3.json_imports.stale",
     label: "Файлы JSON-импорта Базы Знаний",
     description:

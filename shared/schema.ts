@@ -1605,6 +1605,10 @@ export const knowledgeUploadSessionItems = pgTable(
     importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, { onDelete: "set null" }),
     executorJobId: text("executor_job_id"),
     checksumSha256: text("checksum_sha256"),
+    // Потоковый sha256 всего файла при приёме (конвейер приёма, C11): собирается из
+    // per-part хэшей на финализации; algo фиксирует алгоритм на будущее.
+    contentSha256: varchar("content_sha256", { length: 64 }),
+    contentDigestAlgo: text("content_digest_algo"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     uploadStartedAt: timestamp("upload_started_at", { withTimezone: true }),
@@ -9467,3 +9471,312 @@ export const referenceSetAuditLog = pgTable(
 );
 export type ReferenceSetAuditLogRow = typeof referenceSetAuditLog.$inferSelect;
 export type ReferenceSetAuditLogInsert = typeof referenceSetAuditLog.$inferInsert;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Единый конвейер приёма контента «кинул и забыл» (docs/ingestion-unified-pipeline-design.md)
+// PostgreSQL — источник истины конвейера: судьба пакета/источника/стадии читается из
+// этих таблиц; брокер (этап Э1) — только wake-up-сигнал. Runtime-DDL для ingest_* не
+// заводится: таблицы существуют только после миграции 0311.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const ingestScopes = ["kb", "assistant", "chat"] as const;
+export type IngestScope = (typeof ingestScopes)[number];
+
+export const ingestOriginKinds = ["upload", "url", "expanded", "connector"] as const;
+export type IngestOriginKind = (typeof ingestOriginKinds)[number];
+
+export const ingestBatchStatuses = [
+  "collecting",
+  "processing",
+  "completed",
+  "completed_with_issues",
+  "canceled",
+] as const;
+export type IngestBatchStatus = (typeof ingestBatchStatuses)[number];
+
+export const ingestSourceStatuses = [
+  "received",
+  "detecting",
+  "extracting",
+  "normalizing",
+  "persisting",
+  "chunking",
+  "indexing",
+  "ready",
+  "ready_with_quality_notes",
+  "needs_attention",
+  "failed",
+  "canceled",
+  "superseded",
+] as const;
+export type IngestSourceStatus = (typeof ingestSourceStatuses)[number];
+
+export const ingestStageRunStatuses = ["pending", "running", "succeeded", "failed", "canceled"] as const;
+export type IngestStageRunStatus = (typeof ingestStageRunStatuses)[number];
+
+// Имена стадий = имена очередей брокера (дизайн 3.7): routing key строится без маппинга.
+// Канонический список живёт и в @unica/doc-model (C3) — снапшот-тест ловит расхождение.
+export const ingestStages = [
+  "detect",
+  "extract.text",
+  "extract.doc",
+  "extract.sheet",
+  "extract.ocr",
+  "expand",
+  "media.demux",
+  "media.asr",
+  "vision",
+  "normalize",
+  "persist",
+  "chunk",
+  "index",
+] as const;
+export type IngestStage = (typeof ingestStages)[number];
+
+export const ingestOutboxStatuses = ["pending", "sent", "failed"] as const;
+export type IngestOutboxStatus = (typeof ingestOutboxStatuses)[number];
+
+export const ingestBatches = pgTable(
+  "ingest_batches",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<IngestScope>().notNull(),
+    scopeRefId: varchar("scope_ref_id"),
+    createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+    title: text("title"),
+    sourceCount: integer("source_count").notNull().default(0),
+    readyCount: integer("ready_count").notNull().default(0),
+    warnedCount: integer("warned_count").notNull().default(0),
+    failedCount: integer("failed_count").notNull().default(0),
+    attentionCount: integer("attention_count").notNull().default(0),
+    status: text("status").$type<IngestBatchStatus>().notNull().default("collecting"),
+    priority: integer("priority").notNull().default(5),
+    etaSeconds: integer("eta_seconds"),
+    creditsHoldId: varchar("credits_hold_id"),
+    creditsEstimatedCents: bigint("credits_estimated_cents", { mode: "number" }).notNull().default(0),
+    creditsSpentCents: bigint("credits_spent_cents", { mode: "number" }).notNull().default(0),
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
+    notifiedAt: timestamp("notified_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceStatusCreatedIdx: index("ingest_batches_workspace_status_created_idx").on(
+      table.workspaceId,
+      table.status,
+      table.createdAt,
+    ),
+    statusUpdatedIdx: index("ingest_batches_status_updated_idx").on(table.status, table.updatedAt),
+  }),
+);
+export type IngestBatch = typeof ingestBatches.$inferSelect;
+export type IngestBatchInsert = typeof ingestBatches.$inferInsert;
+
+export const ingestSources = pgTable(
+  "ingest_sources",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => ingestBatches.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<IngestScope>().notNull(),
+    scopeRefId: varchar("scope_ref_id"),
+    targetParentId: varchar("target_parent_id"),
+    // Self-FK объявлен в миграции 0311 (drizzle-описание самоссылки не заводим — стиль parentId соседей).
+    parentSourceId: uuid("parent_source_id"),
+    originKind: text("origin_kind").$type<IngestOriginKind>().notNull(),
+    originUri: text("origin_uri"),
+    displayName: text("display_name").notNull(),
+    blobKey: text("blob_key"),
+    bytes: bigint("bytes", { mode: "number" }).notNull().default(0),
+    contentSha256: varchar("content_sha256", { length: 64 }),
+    contentDigestAlgo: text("content_digest_algo"),
+    detectedMime: text("detected_mime"),
+    contentClass: text("content_class"),
+    detectConfidence: doublePrecision("detect_confidence"),
+    detectorVersion: text("detector_version"),
+    probe: jsonb("probe").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    pipelineId: text("pipeline_id"),
+    pipelineVersion: text("pipeline_version"),
+    priority: integer("priority").notNull().default(5),
+    status: text("status").$type<IngestSourceStatus>().notNull().default("received"),
+    stage: text("stage").$type<IngestStage>(),
+    stageUnitDone: integer("stage_unit_done").notNull().default(0),
+    stageUnitTotal: integer("stage_unit_total"),
+    // Дизайн описывает jsonb[]; осознанно одиночный jsonb-массив: читается целиком,
+    // массив jsonb в PG хуже индексируется (см. миграцию 0311).
+    qualityFlags: jsonb("quality_flags").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
+    warnings: jsonb("warnings").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
+    errorCode: text("error_code"),
+    errorDetail: text("error_detail"),
+    parserVersion: text("parser_version"),
+    chunkerVersion: text("chunker_version"),
+    embeddingModel: text("embedding_model"),
+    vectorDim: integer("vector_dim"),
+    targetDocumentId: varchar("target_document_id"),
+    canonicalKey: text("canonical_key"),
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
+    uploadSessionItemId: uuid("upload_session_item_id").references(() => knowledgeUploadSessionItems.id, {
+      onDelete: "set null",
+    }),
+    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+  },
+  (table) => ({
+    batchStatusIdx: index("ingest_sources_batch_status_idx").on(table.batchId, table.status),
+    workspaceStatusUpdatedIdx: index("ingest_sources_workspace_status_updated_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+    workspaceCanonicalKeyIdx: index("ingest_sources_workspace_canonical_key_idx").on(
+      table.workspaceId,
+      table.canonicalKey,
+    ),
+    uploadSessionItemIdx: index("ingest_sources_upload_session_item_idx").on(table.uploadSessionItemId),
+    importEntryIdx: index("ingest_sources_import_entry_idx").on(table.importEntryId),
+    parentSourceIdx: index("ingest_sources_parent_source_idx").on(table.parentSourceId),
+  }),
+);
+export type IngestSource = typeof ingestSources.$inferSelect;
+export type IngestSourceInsert = typeof ingestSources.$inferInsert;
+
+export const ingestStageRuns = pgTable(
+  "ingest_stage_runs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    // Денормализация обязательна: per-workspace лимиты в claim без неё пошли бы через join.
+    workspaceId: varchar("workspace_id").notNull(),
+    stage: text("stage").$type<IngestStage>().notNull(),
+    attempt: integer("attempt").notNull().default(0),
+    inputFingerprint: text("input_fingerprint").notNull(),
+    status: text("status").$type<IngestStageRunStatus>().notNull().default("pending"),
+    workerId: text("worker_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    progressCheckpoint: jsonb("progress_checkpoint")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    outputRef: text("output_ref"),
+    errorCode: text("error_code"),
+    errorDetail: text("error_detail"),
+    retryClass: text("retry_class"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => ({
+    sourceStageFingerprintUnique: uniqueIndex("ingest_stage_runs_source_stage_fingerprint_unique").on(
+      table.sourceId,
+      table.stage,
+      table.inputFingerprint,
+    ),
+    // Частичный claim-индекс (WHERE status='pending') объявлен в миграции 0311; drizzle
+    // partial-index здесь не описываем — источник истины по DDL миграция, не схема.
+    workspaceStatusLeaseIdx: index("ingest_stage_runs_workspace_status_lease_idx").on(
+      table.workspaceId,
+      table.status,
+      table.leaseExpiresAt,
+    ),
+    statusLeaseIdx: index("ingest_stage_runs_status_lease_idx").on(table.status, table.leaseExpiresAt),
+    sourceStageIdx: index("ingest_stage_runs_source_stage_idx").on(table.sourceId, table.stage),
+  }),
+);
+export type IngestStageRun = typeof ingestStageRuns.$inferSelect;
+export type IngestStageRunInsert = typeof ingestStageRuns.$inferInsert;
+
+export const ingestWorkers = pgTable(
+  "ingest_workers",
+  {
+    workerId: text("worker_id").primaryKey(),
+    processRole: text("process_role"),
+    host: text("host"),
+    stages: text("stages").array().notNull().default(sql`'{}'::text[]`),
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    version: text("version"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true })
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  },
+  (table) => ({
+    heartbeatIdx: index("ingest_workers_heartbeat_idx").on(table.lastHeartbeatAt),
+  }),
+);
+export type IngestWorker = typeof ingestWorkers.$inferSelect;
+export type IngestWorkerInsert = typeof ingestWorkers.$inferInsert;
+
+export const ingestOutbox = pgTable(
+  "ingest_outbox",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id").notNull(),
+    batchId: uuid("batch_id"),
+    sourceId: uuid("source_id"),
+    stageRunId: uuid("stage_run_id"),
+    exchange: text("exchange").notNull(),
+    routingKey: text("routing_key").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status").$type<IngestOutboxStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    idempotencyKeyUnique: uniqueIndex("ingest_outbox_idempotency_key_unique").on(table.idempotencyKey),
+    statusNextAttemptIdx: index("ingest_outbox_status_next_attempt_idx").on(table.status, table.nextAttemptAt),
+  }),
+);
+export type IngestOutboxRow = typeof ingestOutbox.$inferSelect;
+export type IngestOutboxInsert = typeof ingestOutbox.$inferInsert;
+
+export const ingestDeadLetters = pgTable(
+  "ingest_dead_letters",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id").notNull(),
+    batchId: uuid("batch_id"),
+    sourceId: uuid("source_id"),
+    stageRunId: uuid("stage_run_id"),
+    stage: text("stage").$type<IngestStage>().notNull(),
+    errorCode: text("error_code").notNull(),
+    retryClass: text("retry_class"),
+    parserVersion: text("parser_version"),
+    attempt: integer("attempt"),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    errorTail: text("error_tail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    republishedAt: timestamp("republished_at", { withTimezone: true }),
+    republishedBy: varchar("republished_by"),
+  },
+  (table) => ({
+    workspaceCreatedIdx: index("ingest_dead_letters_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+    stageErrorIdx: index("ingest_dead_letters_stage_error_idx").on(table.stage, table.errorCode),
+  }),
+);
+export type IngestDeadLetter = typeof ingestDeadLetters.$inferSelect;
+export type IngestDeadLetterInsert = typeof ingestDeadLetters.$inferInsert;

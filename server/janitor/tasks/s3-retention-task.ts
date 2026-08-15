@@ -274,6 +274,54 @@ export function createChatFeedbackAttachmentS3Store(
 }
 
 /**
+ * Стор рабочих файлов конвейера приёма (таблица ingest_sources, C12 монолита).
+ * Чистит ТОЛЬКО объекты под префиксом ingest/ (жёсткий гард в WHERE): blob_key
+ * терминального источника может указывать и на оригинал (kb-uploads/...) — оригиналы
+ * этой политикой не трогаются (П14), кэш canonical/ по возрасту не удаляется вовсе.
+ */
+export function createIngestSourceWorkdirS3Store(
+  database: S3Executor = db as unknown as S3Executor,
+  deps: { deleteObject: (workspaceId: string, storageKey: string) => Promise<void> },
+): S3RetentionStore {
+  const where = (filter: S3CandidateFilter, cutoff: Date) =>
+    sql`${sql.identifier(filter.timeColumn)} IS NOT NULL
+      AND ${sql.identifier(filter.timeColumn)} < ${cutoff}
+      AND blob_key IS NOT NULL AND blob_key <> ''
+      AND blob_key LIKE 'ingest/%'`;
+
+  return {
+    async countMatches({ filter, cutoff, cap }) {
+      const query = sql`SELECT count(*)::int AS count FROM (SELECT 1 FROM ingest_sources WHERE ${where(
+        filter,
+        cutoff,
+      )} LIMIT ${cap}) AS sub`;
+      return firstCount(await database.execute(query));
+    },
+
+    async purgeBatch({ filter, cutoff, batchSize }) {
+      const timeId = sql.identifier(filter.timeColumn);
+      const query = sql`SELECT id, workspace_id, blob_key, bytes FROM ingest_sources WHERE ${where(
+        filter,
+        cutoff,
+      )} ORDER BY ${timeId} LIMIT ${batchSize}`;
+      const result = (await database.execute(query)) as { rows?: Array<Record<string, unknown>> };
+      const rows = result.rows ?? [];
+
+      let deleted = 0;
+      let freedBytes = 0;
+      for (const row of rows) {
+        await deps.deleteObject(String(row.workspace_id), String(row.blob_key));
+        // blob_key обнуляем пустой строкой: строка источника и его история сохраняются.
+        await database.execute(sql`UPDATE ingest_sources SET blob_key = '' WHERE id = ${row.id}`);
+        deleted += 1;
+        freedBytes += toNumber(row.bytes);
+      }
+      return { deleted, freedBytes };
+    },
+  };
+}
+
+/**
  * Стор для исходных файлов JSON-импорта БЗ (таблица json_import_jobs, E15 монолита).
  * Колонка ключа здесь source_file_key (не storage_key), поэтому общий whereFragment не
  * подходит — фильтр собирается на месте: finished_at старше cutoff + непустой ключ.
