@@ -22,7 +22,6 @@ import {
   isManagedCollectionName,
 } from "../qdrant-collection-names";
 import {
-  chatAttachments,
   embeddingProviders,
   workspaces,
   workspaceVectorCollections,
@@ -56,6 +55,7 @@ import {
   findKnownKeysInDb,
   type FeedbackAttachmentOrphanStore,
 } from "./tasks/s3-feedback-attachment-orphan-task";
+import { createFileArtifactCleanupJobStore } from "./file-artifact-cleanup-job-store";
 
 const logger = createLogger("janitor-default-stores");
 
@@ -83,14 +83,6 @@ function requireDomainGateway(): JanitorDomainGateway {
     );
   }
   return createHttpJanitorDomainGateway(url);
-}
-
-/** Обнуление адресов вложения после удаления объектов (своя таблица-владелец чата — читаем/пишем по общей БД). */
-async function markChatAttachmentCleaned(attachmentId: string): Promise<void> {
-  await db
-    .update(chatAttachments)
-    .set({ storageKey: "", previewObjectKey: null, derivedManifestObjectKey: null })
-    .where(eq(chatAttachments.id, attachmentId));
 }
 
 /** Снятие регистрации коллекции + инвалидация кэша резолва «коллекция → workspace». */
@@ -208,13 +200,12 @@ async function listFeedbackS3Objects(
 
 export function defaultStores(): JanitorStores {
   const gateway = requireDomainGateway();
+  const cleanupJobs = createFileArtifactCleanupJobStore();
   return {
     pg: createPgRetentionStore(),
     s3: {
       chat_attachments: createChatAttachmentS3Store(undefined, {
-        deleteArtifacts: (workspaceId, attachment) =>
-          gateway.purgeChatAttachmentArtifacts(workspaceId, attachment),
-        markCleaned: markChatAttachmentCleaned,
+        enqueueCleanup: (input) => cleanupJobs.enqueue(input),
       }),
       chat_feedback_attachments: createChatFeedbackAttachmentS3Store(undefined, {
         deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),

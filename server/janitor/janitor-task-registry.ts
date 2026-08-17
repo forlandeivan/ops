@@ -420,7 +420,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     key: "s3.chat_attachments.audio_video",
     label: "Аудио/видео чата",
     description:
-      "Удаляет аудио- и видео-файлы вложений чата (mime audio/* и video/*) старше срока хранения. Транскрипт и текст сохраняются — удаляется только тяжёлый медиафайл. Срок задаёт администратор.",
+      "Ставит в durable-очередь удаление канонического объекта MinIO, производных и Files-копии для audio/video старше срока. Активные ASR-задачи пропускаются; транскрипт, текст и история сохраняются.",
     category: "storage",
     storage: "s3",
     action: "delete_object",
@@ -428,6 +428,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     timeColumn: "created_at",
     strippedColumns: ["storage_key", "preview_object_key", "derived_manifest_object_key"],
     mimePrefixes: ["audio/", "video/"],
+    defaultEnabled: false,
     defaultRetentionDays: 30,
     defaultBatchSize: 100,
     intervalMinutes: 360,
@@ -604,7 +605,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     key: "pg.assistants.archived",
     label: "Архивные ассистенты (physical purge)",
     description:
-      "Физически удаляет ассистентов из архива (status='archived') старше срока хранения. Активные и системные ассистенты не трогаются (системные нельзя архивировать). Срок отсчитывается от последнего изменения строки (фактически — момента архивации: у ассистента нет отдельной колонки archived_at). Каскадно удаляет все данные ассистента; тяжёлые файлы в MinIO и коллекция в Qdrant остаются сиротами до профильных GC-политик. Выключена по умолчанию.",
+      "Физически удаляет ассистентов из архива (status='archived') старше срока хранения. Активные и системные ассистенты не трогаются. Перед каскадом вложения всех чатов атомарно ставятся в durable file-cleanup очередь; ассистент с активной ASR откладывается. Выключена по умолчанию.",
     category: "assistants",
     action: "delete_rows",
     table: "assistants",
@@ -616,19 +617,20 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 1440,
     sensitive: true,
     cascadeNote:
-      "Каскадно удаляет ВСЕ данные ассистента: чаты (сообщения, карточки, вложения, транскрипты), файлы-метаданные, действия, привязки навыков, прогоны и события workflow. Объекты MinIO и коллекция Qdrant остаются сиротами до политик «Осиротевшие коллекции Qdrant» и storage-реконсиляции. Действие необратимо.",
+      "Каскадно удаляет ВСЕ данные ассистента. Chat-вложения сначала фиксируются в durable cleanup-очереди; активная ASR блокирует purge кандидата. Коллекция Qdrant остаётся до профильного GC. Действие необратимо.",
   }),
   task({
     key: "pg.chat_sessions",
     label: "Удалённые чаты (physical purge soft-deleted)",
     description:
-      "Физически удаляет чаты, помеченные удалёнными (deleted_at), старше срока хранения. Активные чаты не трогаются. Каскадно удаляет сообщения, карточки, вложения и транскрипты.",
+      "Физически удаляет чаты, помеченные удалёнными (deleted_at), старше срока хранения. Перед каскадом snapshots вложений атомарно ставятся в durable file-cleanup очередь. Чаты с активной ASR откладываются.",
     category: "assistants",
     action: "delete_rows",
     table: "chat_sessions",
     timeColumn: "deleted_at",
     sensitive: true,
-    cascadeNote: "Каскадно удаляет сообщения, карточки, вложения и транскрипты чата.",
+    cascadeNote:
+      "Каскадно удаляет сообщения, карточки, вложения и транскрипты; MinIO/Files очищает durable worker по сохранённым snapshots.",
   }),
 ] as const;
 

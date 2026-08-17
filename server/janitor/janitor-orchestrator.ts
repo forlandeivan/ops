@@ -84,6 +84,7 @@ function resolveS3Store(stores: JanitorStores, task: JanitorTaskDefinition): S3R
 
 function s3FilterOf(task: JanitorTaskDefinition): S3CandidateFilter {
   return {
+    policyKey: task.key,
     timeColumn: task.timeColumn,
     mimePrefixes: task.mimePrefixes ?? [],
     mimePrefixExclude: task.mimePrefixExclude ?? false,

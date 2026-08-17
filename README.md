@@ -7,24 +7,23 @@ notify (SMTP), maintenance-mode и admin-analytics (волна P3).
 
 ## Статус: код janitor перенесён (волна J2.3c)
 
-Сервис собирается и запускается standalone: `tsc` чист, `vitest` 86/86,
-esbuild-бандл ~590 КБ (0 внешних `@unica/*` — инлайнятся из исходников).
+Сервис собирается и запускается standalone: TypeScript, Vitest и esbuild.
 Полный контур доказан локально: preview/run-now по RPC, health/readiness/metrics,
-доменный callback уходит в монолит.
+доменный callback уходит в монолит, durable file cleanup переживает рестарты.
 
 ## Состав
 
 ```
 server/
-  janitor-runtime-entry.ts   точка входа: readiness БД → health-сервер → RPC → оркестратор
+  janitor-runtime-entry.ts   точка входа: readiness БД → cleanup worker → RPC → оркестратор
   janitor/                   реестр политик, оркестратор, policy-service, движки задач,
-                             health-сервер, runtime-RPC, клиент callback-gateway,
+                             health-сервер, runtime-RPC, durable cleanup queue, callback-gateway,
                              default-stores (ops-вариант: доменные операции ТОЛЬКО по gateway)
   db.ts cache/ lib/ monitoring/ config/ qdrant*.ts minio-client.ts   тонкая инфра (реэкспорты @unica/*)
 packages/                    @unica/*: observability, postgres-client, cache, runtime-utils,
                              instrumentation, blob-storage
 shared/                      ВЕРБАТИМ-зеркало контрактов монолита (SoT — монорепа)
-tests/janitor/               86 юнит-тестов (движки, реестр, health, RPC, gateway-клиент)
+tests/janitor/               юнит-тесты движков, очереди, health, RPC и gateway-клиента
 ```
 
 ## Границы сервиса
@@ -32,8 +31,11 @@ tests/janitor/               86 юнит-тестов (движки, реест�
 - **Сам исполняет:** 24 PG-задачи retention, скан осиротевших объектов S3,
   скан/удаление коллекций Qdrant, grace-ledger, журнал прогонов, распределённые локи.
 - **Через callback-gateway монолита** (`/api/internal/janitor`, см. `docs/gateway-contract.md` §3.1):
-  удаление вложения чата с производными, удаление workspace-файла с метерингом,
-  reconcile Qdrant-usage. Владелец доменной логики — монолит, копий здесь нет.
+  единая очистка MinIO + Files по ссылке `{jobId, workerId}` на каноническую durable job,
+  удаление workspace-файла с метерингом, reconcile Qdrant-usage. Владелец доменной логики —
+  монолит, Files напрямую не вызывается.
+- **Всегда обслуживает** `file_artifact_cleanup_jobs`, даже если `JANITOR_ENABLED=false`:
+  SKIP LOCKED, lease/reclaim, heartbeat, active-ASR guard и exponential backoff.
 - **Не делает:** миграции БД (их применяет монолит), доменные чтения вне своих задач.
 
 ## Запуск

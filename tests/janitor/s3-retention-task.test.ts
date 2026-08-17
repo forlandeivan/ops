@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 import {
+  createChatAttachmentS3Store,
   createChatFeedbackAttachmentS3Store,
   runS3RetentionTask,
   type S3CandidateFilter,
@@ -267,5 +268,71 @@ describe("createChatFeedbackAttachmentS3Store purgeBatch", () => {
     // Регрессия аудита: UPDATE ... SET storage_key = NULL падал на NOT NULL каждым тиком.
     expect(updateSql).toContain("storage_key = ''");
     expect(updateSql).not.toMatch(/storage_key\s*=\s*null/i);
+  });
+});
+
+describe("createChatAttachmentS3Store durable queue", () => {
+  it("не удаляет напрямую: ставит snapshot с externalUri и SQL guard активной ASR", async () => {
+    const dialect = new PgDialect();
+    let selectSql = "";
+    const database = {
+      execute: vi.fn(async (query: unknown) => {
+        selectSql = dialect.sqlToQuery(query as never).sql;
+        return {
+          rows: [{
+            id: "att-1",
+            workspace_id: "ws-1",
+            chat_id: "chat-1",
+            file_id: "file-1",
+            filename: "audio.mp3",
+            mime_type: "audio/mpeg",
+            storage_key: "chat/audio.mp3",
+            document_version: 1,
+            derived_manifest_object_key: "chat/audio.manifest.json",
+            preview_object_key: null,
+            external_uri: "/ws-1/asr/audio.mp3",
+            size_bytes: 123,
+          }],
+        };
+      }),
+    };
+    const enqueueCleanup = vi.fn(async () => true);
+    const store = createChatAttachmentS3Store(database, { enqueueCleanup });
+
+    const result = await store.purgeBatch({
+      filter: { ...audioVideoFilter, policyKey: "s3.chat_attachments.audio_video" },
+      cutoff: NOW,
+      batchSize: 10,
+    });
+
+    expect(result).toEqual({ deleted: 1, freedBytes: 123 });
+    expect(selectSql).toContain("file_artifact_cleanup_jobs");
+    expect(selectSql).toContain("payload->>'attachmentId'");
+    expect(selectSql).toContain("payload->>'storageKey'");
+    expect(selectSql).toContain("payload->>'externalUri'");
+    expect(selectSql).not.toContain("cleanup.resource_type");
+    expect(selectSql).not.toContain("cleanup.resource_id");
+    expect(selectSql).toContain("cleanup.status = 'error' AND cleanup.next_retry_at IS NULL");
+    expect(selectSql).toContain("asr_completion_jobs");
+    expect(selectSql).toContain("asr_executions");
+    expect(selectSql).toContain("COALESCE(execution.lifecycle_status, execution.status, 'accepted')");
+    expect(enqueueCleanup).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      resourceType: "chat_attachment",
+      resourceId: "att-1",
+      reason: "s3.chat_attachments.audio_video",
+      payload: {
+        attachmentId: "att-1",
+        chatId: "chat-1",
+        fileId: "file-1",
+        filename: "audio.mp3",
+        mimeType: "audio/mpeg",
+        storageKey: "chat/audio.mp3",
+        documentVersion: 1,
+        derivedManifestObjectKey: "chat/audio.manifest.json",
+        previewObjectKey: null,
+        externalUri: "/ws-1/asr/audio.mp3",
+      },
+    });
   });
 });
