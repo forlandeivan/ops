@@ -513,6 +513,66 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 360,
   }),
 
+  // ── Артефакты конвейера приёма (волна 4/E13) ────────────────────────────────
+  // Осиротевшие объекты под ingest/ и canonical/ и кадры видео под frames/.
+  // Оригиналы источников по ВРЕМЕНИ не удаляются (Р2: срок задаёт политика, а кэш
+  // canonical живёт, пока жив исходник) — только сироты без строки-владельца.
+  // Исполнитель s3_reconcile для этих префиксов живёт в ops-репозитории; здесь —
+  // только метаданные политики (verify:janitor-import-surface).
+  task({
+    key: "s3.ingest.orphans",
+    label: "Осиротевшие объекты приёма (ingest/)",
+    description:
+      "Удаляет объекты под префиксом ingest/, у которых больше нет строки ingest_sources (источник удалён каскадом базы или пространства, а объект остался). По времени НЕ удаляет ничего: живые источники и их рабочие файлы не затрагиваются. Включается администратором осознанно.",
+    category: "storage",
+    storage: "s3_reconcile",
+    action: "delete_object",
+    table: "ingest_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    timeColumn: "first_seen_at",
+    defaultEnabled: false,
+    defaultRetentionDays: 7, // grace: сирота должна продержаться неделю, случайные гонки не удаляются
+    defaultBatchSize: 200,
+    intervalMinutes: 1440,
+    sensitive: true,
+    cascadeNote:
+      "Удаляет оригиналы файлов безвозвратно. Документ, чей оригинал удалён, нельзя перечитать другим парсером — только реиндекс со стадии чанкинга.",
+  }),
+  task({
+    key: "s3.canonical.orphans",
+    label: "Осиротевший кэш разбора (canonical/)",
+    description:
+      "Удаляет артефакты канонического разбора под canonical/, на которые не ссылается ни один источник. Живой кэш по возрасту не удаляется: он адресуется содержимым, и его потеря означает повторный разбор (для сканов — повторный платный OCR) при следующем реиндексе. Включается администратором осознанно.",
+    category: "storage",
+    storage: "s3_reconcile",
+    action: "delete_object",
+    table: "canonical_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    timeColumn: "first_seen_at",
+    defaultEnabled: false,
+    defaultRetentionDays: 7,
+    defaultBatchSize: 200,
+    intervalMinutes: 1440,
+    sensitive: true,
+    cascadeNote:
+      "Удаление кэша разбора означает повторный парсинг (и повторный OCR для сканов) при следующем реиндексе затронутых документов.",
+  }),
+  task({
+    key: "s3.ingest_frames",
+    label: "Ключевые кадры видео (frames/)",
+    description:
+      "Удаляет ключевые кадры видео под frames/ для источников в терминальном статусе старше срока хранения (отсчёт от terminal_at). Кадры нужны в первые дни работы с материалом; после удаления пересчитываются из сохранённого оригинала по требованию.",
+    category: "storage",
+    storage: "s3",
+    action: "delete_object",
+    table: "ingest_sources",
+    timeColumn: "terminal_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 30,
+    defaultBatchSize: 100,
+    intervalMinutes: 1440,
+    cascadeNote:
+      "Цитата по видео после удаления кадра показывает кадр не мгновенно, а после пересчёта из оригинала.",
+  }),
+
   // ── Векторное хранилище (Qdrant) ────────────────────────────────────────────
   // GC осиротевших коллекций Qdrant: удаляет коллекции, не связанные ни с одной БЗ/
   // ассистентом в БД (после неудачных удалений БЗ, каскадов при удалении пространства,
