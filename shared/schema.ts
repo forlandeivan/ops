@@ -1179,6 +1179,22 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
 export type KnowledgeDocumentImportSettings = typeof knowledgeDocumentImportSettings.$inferSelect;
 export type KnowledgeDocumentImportSettingsInsert = typeof knowledgeDocumentImportSettings.$inferInsert;
 
+// Платформенные настройки ASR (singleton). Не свойства модели, а политика распознавания:
+// сколько платформа готова ждать стенограмму. Вынесено из ENV решением владельца 17.08.2026 —
+// deployment-контракт остаётся топологией (адреса и токены), а продуктовые пороги живут в админке.
+// NULL = «админ не переопределял» → дефолт кода (ROSPARTNER_SERVICE_POLICY_DEFAULTS).
+export const asrPlatformSettings = pgTable("asr_platform_settings", {
+  id: varchar("id").primaryKey().default("asr_platform_settings_singleton"),
+  // Абсолютный дедлайн операции от принятого dispatch до terminal state, мс.
+  // Согласован со StageTimeoutSeconds принимающего SpeechRecognition (86400 с).
+  operationTimeoutMs: integer("operation_timeout_ms"),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type AsrPlatformSettings = typeof asrPlatformSettings.$inferSelect;
+export type AsrPlatformSettingsInsert = typeof asrPlatformSettings.$inferInsert;
+
 // Настраиваемые лимиты загрузки файлов (Tier-1): размеры на файл и счётчики по всем контурам
 // (чат, файлы ассистента, фидбэк, База знаний). Singleton. Каждая колонка nullable:
 // NULL = «админ не переопределял» → fallback env → код-дефолт. Единицы: *_mb — в МБ, счётчики — целые.
