@@ -1202,6 +1202,8 @@ export const fileUploadLimits = pgTable("file_upload_limits", {
   kbArchiveMaxSizeMb: integer("kb_archive_max_size_mb"),
   kbArchiveMaxEntries: integer("kb_archive_max_entries"),
   kbAiOcrMaxPagesPerFile: integer("kb_ai_ocr_max_pages_per_file"),
+  // Волна 3/N3: порог суммы страниц сканов в пакете до запроса подтверждения (U15).
+  kbIngestOcrConfirmPages: integer("kb_ingest_ocr_confirm_pages"),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -1480,6 +1482,8 @@ export const knowledgeUploadSourceKinds = [
   "archive_legacy",
   "json_legacy",
   "document_legacy",
+  // Волна 3/U2: единая зона загрузки без клиентского выбора типа импорта.
+  "unified",
 ] as const;
 export type KnowledgeUploadSourceKind = (typeof knowledgeUploadSourceKinds)[number];
 
@@ -1498,6 +1502,8 @@ export const knowledgeUploadImportKinds = [
   "document_file",
   "archive",
   "json_dataset",
+  // Волна 3/U2: файл единой зоны — тип определяет серверный detect, не клиент.
+  "ingest_source",
 ] as const;
 export type KnowledgeUploadImportKind = (typeof knowledgeUploadImportKinds)[number];
 
@@ -2453,6 +2459,9 @@ export const knowledgeDocuments = pgTable(
     sourceUrl: text("source_url"),
     contentHash: text("content_hash"),
     language: text("language"),
+    // Метки качества импорта (волна 3/N7): переживают исчезновение карточки источника.
+    // Элемент: { code, severity: 'info'|'warning', stage?, detail?, at } — см. shared/ingestion.ts.
+    qualityFlags: jsonb("quality_flags").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
     versionTag: text("version_tag"),
     crawledAt: timestamp("crawled_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
@@ -9630,6 +9639,13 @@ export const ingestBatches = pgTable(
     creditsEstimatedCents: bigint("credits_estimated_cents", { mode: "number" }).notNull().default(0),
     creditsSpentCents: bigint("credits_spent_cents", { mode: "number" }).notNull().default(0),
     cancelRequested: boolean("cancel_requested").notNull().default(false),
+    // Подтверждение дорогого пакета (волна 3/N3+U15): порог считает сервер, состояние — здесь.
+    confirmationRequired: boolean("confirmation_required").notNull().default(false),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    confirmMode: text("confirm_mode").$type<"all" | "text_only" | null>(),
+    // Дебаунс автоиндексации пакета (волна 3/S17): состояние в PG, не в памяти процесса.
+    indexDebounceUntil: timestamp("index_debounce_until", { withTimezone: true }),
+    indexDebounceDeadline: timestamp("index_debounce_deadline", { withTimezone: true }),
     notifiedAt: timestamp("notified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -9694,6 +9710,8 @@ export const ingestSources = pgTable(
     targetDocumentId: varchar("target_document_id"),
     canonicalKey: text("canonical_key"),
     cancelRequested: boolean("cancel_requested").notNull().default(false),
+    // Явное «Скрыть» карточки пользователем (волна 3/N2): скрытые не отдаются в выдачу по умолчанию.
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
     uploadSessionItemId: uuid("upload_session_item_id").references(() => knowledgeUploadSessionItems.id, {
       onDelete: "set null",
     }),

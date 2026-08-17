@@ -38,6 +38,8 @@ import { createPgRetentionStore, type RetentionStore } from "./tasks/pg-retentio
 import {
   createChatAttachmentS3Store,
   createChatFeedbackAttachmentS3Store,
+  createIngestSourceWorkdirS3Store,
+  createJsonImportJobS3Store,
   type S3RetentionStore,
 } from "./tasks/s3-retention-task";
 import {
@@ -206,6 +208,16 @@ export function defaultStores(): JanitorStores {
         enqueueCleanup: (input) => cleanupJobs.enqueue(input),
       }),
       chat_feedback_attachments: createChatFeedbackAttachmentS3Store(undefined, {
+        deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),
+      }),
+      // E15 монолита: файлы JSON-импорта БЗ (s3.json_imports.stale) — удаление объекта с
+      // метерингом байтов через гейтвей, ключ в строке обнуляется.
+      json_import_jobs: createJsonImportJobS3Store(undefined, {
+        deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),
+      }),
+      // C12 монолита: рабочие файлы конвейера приёма (s3.ingest_sources.workdir) — только
+      // префикс ingest/, оригиналы и canonical/ не затрагиваются.
+      ingest_sources: createIngestSourceWorkdirS3Store(undefined, {
         deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),
       }),
     },
