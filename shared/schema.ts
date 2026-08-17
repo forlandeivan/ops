@@ -2408,6 +2408,9 @@ export const knowledgeDocuments = pgTable(
     // Метки качества импорта (волна 3/N7): переживают исчезновение карточки источника.
     // Элемент: { code, severity: 'info'|'warning', stage?, detail?, at } — см. shared/ingestion.ts.
     qualityFlags: jsonb("quality_flags").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
+    // Волна 4/E14: сохранён ли исходный файл (null = импортирован до появления признака).
+    // Точечная плашка «оригинал не сохранён — перепарсинг недоступен» вместо баннера на базу.
+    hasOriginal: boolean("has_original"),
     versionTag: text("version_tag"),
     crawledAt: timestamp("crawled_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
@@ -9669,6 +9672,48 @@ export const ingestSources = pgTable(
 );
 export type IngestSource = typeof ingestSources.$inferSelect;
 export type IngestSourceInsert = typeof ingestSources.$inferInsert;
+
+/** Состояния URL во фронтире краула (волна 4/E7). */
+export const ingestCrawlFrontierStates = ["pending", "visiting", "visited", "skipped", "failed"] as const;
+export type IngestCrawlFrontierState = (typeof ingestCrawlFrontierStates)[number];
+
+/**
+ * Фронтир краула (волна 4/E7): очередь URL и множество посещённых в PG вместо памяти
+ * процесса. UNIQUE (source_id, normalized_url) — обход не посещает URL дважды;
+ * claim идёт FOR UPDATE SKIP LOCKED по (source_id, state, depth, discovered_at).
+ */
+export const ingestCrawlFrontier = pgTable(
+  "ingest_crawl_frontier",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").notNull(),
+    normalizedUrl: text("normalized_url").notNull(),
+    depth: integer("depth").notNull().default(0),
+    state: text("state").$type<IngestCrawlFrontierState>().notNull().default("pending"),
+    skipReason: text("skip_reason"),
+    httpStatus: integer("http_status"),
+    childSourceId: uuid("child_source_id"),
+    attempts: integer("attempts").notNull().default(0),
+    discoveredAt: timestamp("discovered_at", { withTimezone: true }).notNull().default(sql`now()`),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    visitedAt: timestamp("visited_at", { withTimezone: true }),
+  },
+  (table) => ({
+    sourceUrlUq: uniqueIndex("ingest_crawl_frontier_source_url_uq").on(table.sourceId, table.normalizedUrl),
+    claimIdx: index("ingest_crawl_frontier_claim_idx").on(
+      table.sourceId,
+      table.state,
+      table.depth,
+      table.discoveredAt,
+    ),
+    stateIdx: index("ingest_crawl_frontier_state_idx").on(table.sourceId, table.state),
+  }),
+);
+export type IngestCrawlFrontierRow = typeof ingestCrawlFrontier.$inferSelect;
+export type IngestCrawlFrontierInsert = typeof ingestCrawlFrontier.$inferInsert;
 
 export const ingestStageRuns = pgTable(
   "ingest_stage_runs",
