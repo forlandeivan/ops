@@ -1220,6 +1220,9 @@ export const fileUploadLimits = pgTable("file_upload_limits", {
   kbAiOcrMaxPagesPerFile: integer("kb_ai_ocr_max_pages_per_file"),
   // Волна 3/N3: порог суммы страниц сканов в пакете до запроса подтверждения (U15).
   kbIngestOcrConfirmPages: integer("kb_ingest_ocr_confirm_pages"),
+  // Волна 6 (Э3/M2): лимиты медиа при импорте в БЗ (размер и длительность).
+  kbMediaMaxSizeMb: integer("kb_media_max_size_mb"),
+  kbMediaMaxDurationMinutes: integer("kb_media_max_duration_minutes"),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -9622,7 +9625,8 @@ export const ingestStages = [
   "extract.sheet",
   "extract.ocr",
   "expand",
-  "media.demux",
+  // media.demux упразднена решением Р26 (17.08.2026): SpeechRecognition принимает
+  // оригинальный файл целиком и сам извлекает аудиодорожку, транскода и сегментации нет.
   "media.asr",
   "vision",
   "normalize",
@@ -9709,6 +9713,9 @@ export const ingestSources = pgTable(
     detectConfidence: doublePrecision("detect_confidence"),
     detectorVersion: text("detector_version"),
     probe: jsonb("probe").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    // Длительность медиа из ffprobe-зонда (волна 6/M1): дубль значения из probe отдельной
+    // колонкой — предоценка кредитов и потолок длительности читаются без разбора jsonb.
+    durationMs: integer("duration_ms"),
     pipelineId: text("pipeline_id"),
     pipelineVersion: text("pipeline_version"),
     priority: integer("priority").notNull().default(5),
