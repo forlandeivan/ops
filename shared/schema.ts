@@ -4509,6 +4509,8 @@ export const assistantFiles = pgTable(
     mimeType: text("mime_type"),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     version: integer("version").notNull().default(1),
+    sourceChatAttachmentId: varchar("source_chat_attachment_id")
+      .references(() => chatAttachments.id, { onDelete: "set null" }),
     role: text("role").$type<AssistantFileRole>().notNull().default(ASSISTANT_FILE_ROLE_DEFAULT),
     status: text("status").$type<AssistantFileStatus>().notNull().default("uploaded"),
     processingStatus: text("processing_status").$type<AssistantFileStatus>().notNull().default("processing"),
@@ -4520,6 +4522,9 @@ export const assistantFiles = pgTable(
   (table) => ({
     workspaceIdx: index("assistant_files_workspace_idx").on(table.workspaceId, table.createdAt),
     assistantIdx: index("assistant_files_assistant_idx").on(table.assistantId, table.createdAt),
+    sourceChatAttachmentUniqueIdx: uniqueIndex("assistant_files_source_chat_attachment_unique_idx")
+      .on(table.assistantId, table.sourceChatAttachmentId)
+      .where(sql`${table.sourceChatAttachmentId} IS NOT NULL`),
   }),
 );
 
