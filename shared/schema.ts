@@ -1379,35 +1379,6 @@ export type KnowledgeBaseIndexingPolicyInsert = typeof knowledgeBaseIndexingPoli
 export const knowledgeBaseIndexingJobStatuses = ["pending", "processing", "completed", "failed", "paused", "canceled"] as const;
 export type KnowledgeBaseIndexingJobStatus = (typeof knowledgeBaseIndexingJobStatuses)[number];
 
-export const jsonImportJobStatuses = [
-  "pending",
-  "processing",
-  "completed",
-  "completed_with_errors",
-  "canceled",
-  "failed",
-] as const;
-export type JsonImportJobStatus = (typeof jsonImportJobStatuses)[number];
-
-export const archiveImportJobStatuses = [
-  "pending",
-  "processing",
-  "completed",
-  "completed_with_errors",
-  "canceled",
-  "failed",
-] as const;
-export type ArchiveImportJobStatus = (typeof archiveImportJobStatuses)[number];
-
-export const archiveImportItemStatuses = [
-  "pending",
-  "processing",
-  "completed",
-  "failed",
-  "skipped",
-] as const;
-export type ArchiveImportItemStatus = (typeof archiveImportItemStatuses)[number];
-
 export const archiveImportConflictPolicies = ["skip", "replace", "new_version"] as const;
 export type ArchiveImportConflictPolicy = (typeof archiveImportConflictPolicies)[number];
 
@@ -1452,48 +1423,6 @@ export type KnowledgeDocumentImportMode = (typeof knowledgeDocumentImportModes)[
 
 export const knowledgeDocumentImportOcrDecisions = ["off", "on", "unsure"] as const;
 export type KnowledgeDocumentImportOcrDecision = (typeof knowledgeDocumentImportOcrDecisions)[number];
-
-export const knowledgeImportEntryKinds = [
-  "document_file",
-  "archive",
-  "json_dataset",
-  "url_single",
-  "url_crawl",
-] as const;
-export type KnowledgeImportEntryKind = (typeof knowledgeImportEntryKinds)[number];
-
-export const knowledgeImportEntryStatuses = [
-  "needs_choice",
-  "uploading",
-  "needs_config",
-  "ready",
-  "queued",
-  "processing",
-  "paused",
-  "completed",
-  "completed_with_errors",
-  "failed",
-  "canceled",
-] as const;
-export type KnowledgeImportEntryStatus = (typeof knowledgeImportEntryStatuses)[number];
-
-export type KnowledgeImportEntryProgress = {
-  percent?: number | null;
-  uploadedBytes?: number | null;
-  totalBytes?: number | null;
-  totalItems?: number | null;
-  processedItems?: number | null;
-  activeItems?: number | null;
-  createdItems?: number | null;
-  failedItems?: number | null;
-  skippedItems?: number | null;
-  discoveredItems?: number | null;
-  fetchedItems?: number | null;
-  savedItems?: number | null;
-  errorItems?: number | null;
-  currentPart?: number | null;
-  totalParts?: number | null;
-};
 
 export const knowledgeUploadSourceKinds = [
   "regular_batch",
@@ -1559,53 +1488,6 @@ export type KnowledgeUploadSessionUploadedPart = {
   checksumSha256?: string | null;
   uploadedAt: string;
 };
-
-export const knowledgeImportEntries = pgTable(
-  "knowledge_import_entries",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    baseId: varchar("base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    parentId: varchar("parent_id"),
-    slotPosition: integer("slot_position").notNull().default(0),
-    kind: text("kind").$type<KnowledgeImportEntryKind>().notNull(),
-    title: text("title").notNull(),
-    status: text("status").$type<KnowledgeImportEntryStatus>().notNull().default("ready"),
-    phase: text("phase"),
-    progress: jsonb("progress").$type<KnowledgeImportEntryProgress>().notNull().default(sql`'{}'::jsonb`),
-    sourcePayload: jsonb("source_payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    configDraft: jsonb("config_draft").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    executorKind: text("executor_kind"),
-    executorJobId: text("executor_job_id"),
-    resultNodeId: varchar("result_node_id"),
-    resultSummary: jsonb("result_summary").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    errorMessage: text("error_message"),
-    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    baseParentIdx: index("knowledge_import_entries_base_parent_idx").on(table.baseId, table.parentId, table.updatedAt),
-    baseParentSlotIdx: index("knowledge_import_entries_base_parent_slot_idx").on(
-      table.baseId,
-      table.parentId,
-      table.slotPosition,
-      table.createdAt,
-    ),
-    baseStatusIdx: index("knowledge_import_entries_base_status_idx").on(table.baseId, table.status, table.updatedAt),
-    executorIdx: index("knowledge_import_entries_executor_idx").on(table.executorKind, table.executorJobId),
-    workspaceBaseIdx: index("knowledge_import_entries_workspace_base_idx").on(table.workspaceId, table.baseId, table.updatedAt),
-  }),
-);
-export type KnowledgeImportEntry = typeof knowledgeImportEntries.$inferSelect;
-export type KnowledgeImportEntryInsert = typeof knowledgeImportEntries.$inferInsert;
 
 export const knowledgeUploadSessions = pgTable(
   "knowledge_upload_sessions",
@@ -1681,7 +1563,6 @@ export const knowledgeUploadSessionItems = pgTable(
       .notNull()
       .default("pending"),
     importOptions: jsonb("import_options").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, { onDelete: "set null" }),
     executorJobId: text("executor_job_id"),
     checksumSha256: text("checksum_sha256"),
     // Потоковый sha256 всего файла при приёме (конвейер приёма, C11): собирается из
@@ -1704,7 +1585,6 @@ export const knowledgeUploadSessionItems = pgTable(
       table.processingStatus,
       table.updatedAt,
     ),
-    importEntryIdx: index("knowledge_upload_session_items_import_entry_idx").on(table.importEntryId),
     executorJobIdx: index("knowledge_upload_session_items_executor_job_idx").on(table.executorJobId),
   }),
 );
@@ -1836,230 +1716,6 @@ export const knowledgeDeleteJobs = pgTable(
 );
 export type KnowledgeDeleteJob = typeof knowledgeDeleteJobs.$inferSelect;
 export type KnowledgeDeleteJobInsert = typeof knowledgeDeleteJobs.$inferInsert;
-
-export const jsonImportJobs = pgTable(
-  "json_import_jobs",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, { onDelete: "set null" }),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    baseId: varchar("base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    status: text("status")
-      .$type<JsonImportJobStatus>()
-      .notNull()
-      .default("pending"),
-    mappingConfig: jsonb("mapping_config").notNull().default(sql`'{}'::jsonb`),
-    hierarchyConfig: jsonb("hierarchy_config").notNull().default(sql`'{}'::jsonb`),
-    totalRecords: integer("total_records").notNull().default(0),
-    processedRecords: integer("processed_records").notNull().default(0),
-    createdDocuments: integer("created_documents").notNull().default(0),
-    skippedRecords: integer("skipped_records").notNull().default(0),
-    errorRecords: integer("error_records").notNull().default(0),
-    sourceFileKey: text("source_file_key").notNull(),
-    sourceFileName: text("source_file_name").notNull(),
-    sourceFileSize: bigint("source_file_size", { mode: "number" }).notNull().default(0),
-    sourceFileFormat: text("source_file_format")
-      .$type<"json" | "jsonl">()
-      .notNull(),
-    attempts: integer("attempts").notNull().default(0),
-    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
-    lastError: text("last_error"),
-    errorLog: jsonb("error_log").notNull().default(sql`'[]'::jsonb`),
-    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
-    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    workspaceBaseIdx: index("json_import_jobs_workspace_base_idx").on(
-      table.workspaceId,
-      table.baseId,
-    ),
-    statusIdx: index("json_import_jobs_status_idx").on(table.status, table.createdAt),
-    nextRetryIdx: index("json_import_jobs_next_retry_idx").on(table.nextRetryAt),
-    // 0260: FK-индекс под каскад удаления БЗ (base_id; в составном он 2-й после workspace_id).
-    baseIdx: index("json_import_jobs_base_id_idx").on(table.baseId),
-  }),
-);
-export type JsonImportJob = typeof jsonImportJobs.$inferSelect;
-export type JsonImportJobInsert = typeof jsonImportJobs.$inferInsert;
-
-export const archiveImportJobs = pgTable(
-  "archive_import_jobs",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, { onDelete: "set null" }),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    baseId: varchar("base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    status: text("status")
-      .$type<ArchiveImportJobStatus>()
-      .notNull()
-      .default("pending"),
-    archiveFileKey: text("archive_file_key").notNull(),
-    archiveFileName: text("archive_file_name").notNull(),
-    archiveFileSize: bigint("archive_file_size", { mode: "number" }).notNull().default(0),
-    archiveFormat: text("archive_format")
-      .$type<"zip" | "rar" | "7z" | "unknown">()
-      .notNull()
-      .default("unknown"),
-    parentId: varchar("parent_id"),
-    conflictPolicy: text("conflict_policy")
-      .$type<ArchiveImportConflictPolicy>()
-      .notNull()
-      .default("skip"),
-    totalItems: integer("total_items").notNull().default(0),
-    processedItems: integer("processed_items").notNull().default(0),
-    createdItems: integer("created_items").notNull().default(0),
-    failedItems: integer("failed_items").notNull().default(0),
-    skippedItems: integer("skipped_items").notNull().default(0),
-    attempts: integer("attempts").notNull().default(0),
-    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
-    lastError: text("last_error"),
-    errorLog: jsonb("error_log").notNull().default(sql`'[]'::jsonb`),
-    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
-    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    workspaceBaseIdx: index("archive_import_jobs_workspace_base_idx").on(table.workspaceId, table.baseId),
-    statusIdx: index("archive_import_jobs_status_idx").on(table.status, table.createdAt),
-    nextRetryIdx: index("archive_import_jobs_next_retry_idx").on(table.nextRetryAt),
-    // 0260: FK-индекс под каскад удаления БЗ (base_id; в составном он 2-й после workspace_id).
-    baseIdx: index("archive_import_jobs_base_id_idx").on(table.baseId),
-  }),
-);
-export type ArchiveImportJob = typeof archiveImportJobs.$inferSelect;
-export type ArchiveImportJobInsert = typeof archiveImportJobs.$inferInsert;
-
-export const knowledgeDocumentImportJobs = pgTable(
-  "knowledge_document_import_jobs",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, { onDelete: "set null" }),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    baseId: varchar("base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    parentId: varchar("parent_id"),
-    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    status: text("status")
-      .$type<KnowledgeDocumentImportJobStatus>()
-      .notNull()
-      .default("pending"),
-    phase: text("phase")
-      .$type<KnowledgeDocumentImportJobPhase>()
-      .notNull()
-      .default("queued"),
-    percent: integer("percent").notNull().default(0),
-    sourceFileKey: text("source_file_key").notNull(),
-    sourceFileName: text("source_file_name").notNull(),
-    documentTitle: text("document_title").notNull(),
-    sourceFileSize: bigint("source_file_size", { mode: "number" }).notNull().default(0),
-    sourceMimeType: text("source_mime_type"),
-    sourceFileKind: text("source_file_kind")
-      .$type<KnowledgeDocumentImportSourceKind>()
-      .notNull(),
-    importMode: text("import_mode")
-      .$type<KnowledgeDocumentImportMode>()
-      .notNull()
-      .default("standard"),
-    ocrProviderId: varchar("ocr_provider_id"),
-    ocrModel: text("ocr_model"),
-    attempts: integer("attempts").notNull().default(0),
-    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
-    doclingTaskId: text("docling_task_id"),
-    ocrDecision: text("ocr_decision").$type<KnowledgeDocumentImportOcrDecision>(),
-    ocrUsed: boolean("ocr_used"),
-    doclingAttempt: integer("docling_attempt").notNull().default(0),
-    preflightSummary: jsonb("preflight_summary").$type<KnowledgeDocumentImportPreflightSummary | null>(),
-    pipelineUsed: text("pipeline_used").$type<KnowledgeDocumentImportPipeline>(),
-    fallbackReasonCode: text("fallback_reason_code"),
-    fallbackReasonMessage: text("fallback_reason_message"),
-    warningCode: text("warning_code"),
-    warningMessage: text("warning_message"),
-    lastError: text("last_error"),
-    errorLog: jsonb("error_log").notNull().default(sql`'[]'::jsonb`),
-    createdDocumentNodeId: varchar("created_document_node_id"),
-    createdDocumentId: varchar("created_document_id"),
-    createdVersionId: varchar("created_version_id").references(() => knowledgeDocumentVersions.id, {
-      onDelete: "set null",
-    }),
-    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
-    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    workspaceBaseIdx: index("knowledge_document_import_jobs_workspace_base_idx").on(table.workspaceId, table.baseId),
-    statusIdx: index("knowledge_document_import_jobs_status_idx").on(table.status, table.createdAt),
-    nextRetryIdx: index("knowledge_document_import_jobs_next_retry_idx").on(table.nextRetryAt),
-    taskIdIdx: index("knowledge_document_import_jobs_docling_task_idx").on(table.doclingTaskId),
-    // 0260: FK-индекс под каскад удаления БЗ (base_id; в составном он 2-й после workspace_id).
-    baseIdx: index("knowledge_document_import_jobs_base_id_idx").on(table.baseId),
-  }),
-);
-export type KnowledgeDocumentImportJob = typeof knowledgeDocumentImportJobs.$inferSelect;
-export type KnowledgeDocumentImportJobInsert = typeof knowledgeDocumentImportJobs.$inferInsert;
-
-export const archiveImportJobItems = pgTable(
-  "archive_import_job_items",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    jobId: uuid("job_id")
-      .notNull()
-      .references(() => archiveImportJobs.id, { onDelete: "cascade" }),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    baseId: varchar("base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    relativePath: text("relative_path").notNull(),
-    normalizedPath: text("normalized_path").notNull(),
-    status: text("status")
-      .$type<ArchiveImportItemStatus>()
-      .notNull()
-      .default("pending"),
-    documentTitle: text("document_title"),
-    fileSize: bigint("file_size", { mode: "number" }).notNull().default(0),
-    contentType: text("content_type"),
-    errorCode: text("error_code"),
-    errorMessage: text("error_message"),
-    retryCount: integer("retry_count").notNull().default(0),
-    createdNodeId: varchar("created_node_id"),
-    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    jobStatusIdx: index("archive_import_job_items_job_status_idx").on(table.jobId, table.status),
-    workspaceBaseStatusIdx: index("archive_import_job_items_workspace_base_status_idx").on(
-      table.workspaceId,
-      table.baseId,
-      table.status,
-    ),
-    uniquePathPerJobIdx: uniqueIndex("archive_import_job_items_job_path_unique_idx").on(
-      table.jobId,
-      table.normalizedPath,
-    ),
-    // 0260: FK-индекс под каскад удаления БЗ (base_id; в составном он 2-й после workspace_id).
-    baseIdx: index("archive_import_job_items_base_id_idx").on(table.baseId),
-  }),
-);
-export type ArchiveImportJobItem = typeof archiveImportJobItems.$inferSelect;
-export type ArchiveImportJobItemInsert = typeof archiveImportJobItems.$inferInsert;
 
 export const knowledgeDocumentIndexRevisionStatuses = [
   "processing",
@@ -3310,16 +2966,20 @@ export const UNICA_EMBEDDING_RESPONSE_CONFIG: EmbeddingResponseConfig = {
   rawVectorType: "float32",
 };
 
-export const DEFAULT_LLM_MATH_FORMATTING_INSTRUCTION =
-  "Если в ответе есть математические формулы, записывай их в LaTeX: короткие формулы внутри строки оборачивай в `$...$`, отдельные или длинные формулы — в `$$...$$`. Не помещай формулы в блоки кода, если это не пример кода.";
-
+/**
+ * Дефолт поля «Системный промпт» в карточке провайдера: подложка, когда своего нет,
+ * и предзаполнение формы в админке.
+ *
+ * Это пользовательский текст, поэтому разметки под наш рендер в нём нет. LaTeX-контракт задаёт
+ * платформенная директива `math_latex` (`packages/llm-client-core/src/platform-directives.ts`) и только там,
+ * где ответ рендерим мы сами. Дублировать её сюда нельзя: во внешних каналах и текстовых
+ * ответах RAG формулы уехали бы сырыми долларами, а в чат пришли бы дважды.
+ */
 export const DEFAULT_LLM_REQUEST_CONFIG = {
   modelField: "model",
   messagesField: "messages",
-  systemPrompt: [
+  systemPrompt:
     "Ты — помощник для базы знаний. Отвечай на вопросы пользователя на основе предоставленных фрагментов контента. Если в фрагментах нет ответа, честно сообщи об этом.",
-    DEFAULT_LLM_MATH_FORMATTING_INSTRUCTION,
-  ].join("\n\n"),
   additionalBodyFields: {
     stream: false,
   },
@@ -3419,11 +3079,18 @@ export const embeddingProviders = pgTable("embedding_providers", {
   responseConfig: jsonb("response_config").$type<EmbeddingResponseConfig>().notNull().default(sql`'{}'::jsonb`),
   qdrantConfig: jsonb("qdrant_config").$type<QdrantIntegrationConfig>().notNull().default(sql`'{}'::jsonb`),
   unicaWorkspaceId: text("unica_workspace_id"),
+  // См. одноимённые поля llmProviders и migrations/0319.
+  discoveryUrl: text("discovery_url"),
+  isSystem: boolean("is_system").notNull().default(false),
   workspaceId: varchar("workspace_id")
     .references(() => workspaces.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
-});
+}, (table) => ({
+  singleSystemIdx: uniqueIndex("embedding_providers_single_system_idx")
+    .on(table.isSystem)
+    .where(sql`${table.isSystem}`),
+}));
 
 export const knowledgeBaseRagRequests = pgTable("knowledge_base_rag_requests", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
@@ -3569,11 +3236,21 @@ export const llmProviders = pgTable("llm_providers", {
   requestHeaders: jsonb("request_headers").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
   requestConfig: jsonb("request_config").$type<LlmRequestConfig>().notNull().default(sql`'{}'::jsonb`),
   responseConfig: jsonb("response_config").$type<LlmResponseConfig>().notNull().default(sql`'{}'::jsonb`),
+  // Адрес каталога моделей шлюза. Держится отдельно от адреса инференса, чтобы каталог
+  // можно было увести на другой хост, не трогая рабочий трафик (см. migrations/0319).
+  discoveryUrl: text("discovery_url"),
+  // Провайдер создан платформой из переменных окружения. Автодискаверинг работает ТОЛЬКО
+  // на таких строках; провайдеры, заведённые администратором, не читаются и не меняются.
+  isSystem: boolean("is_system").notNull().default(false),
   workspaceId: varchar("workspace_id")
     .references(() => workspaces.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
-});
+}, (table) => ({
+  singleSystemIdx: uniqueIndex("llm_providers_single_system_idx")
+    .on(table.isSystem)
+    .where(sql`${table.isSystem}`),
+}));
 
 const ocrImageTransports = ["local_url", "base64"] as const;
 type OcrImageTransport = (typeof ocrImageTransports)[number];
@@ -9741,9 +9418,6 @@ export const ingestSources = pgTable(
     uploadSessionItemId: uuid("upload_session_item_id").references(() => knowledgeUploadSessionItems.id, {
       onDelete: "set null",
     }),
-    importEntryId: uuid("import_entry_id").references(() => knowledgeImportEntries.id, {
-      onDelete: "set null",
-    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     terminalAt: timestamp("terminal_at", { withTimezone: true }),
@@ -9760,7 +9434,6 @@ export const ingestSources = pgTable(
       table.canonicalKey,
     ),
     uploadSessionItemIdx: index("ingest_sources_upload_session_item_idx").on(table.uploadSessionItemId),
-    importEntryIdx: index("ingest_sources_import_entry_idx").on(table.importEntryId),
     parentSourceIdx: index("ingest_sources_parent_source_idx").on(table.parentSourceId),
   }),
 );
