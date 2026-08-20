@@ -1,4 +1,3 @@
-import type { JsonImportJobStatus } from "./schema";
 
 export type FieldRole =
   | "id" // идентификатор для дедупликации
@@ -25,6 +24,9 @@ export interface FieldInfo {
   frequency?: number; // процент записей с этим полем (0-100)
   sampleValues?: string[]; // примеры значений (до 3)
   description?: string; // описание поля (для template variables)
+  // Статистика для автомаппинга датасета (E4); считается по сэмплу анализатора.
+  avgStringLength?: number; // средняя длина строкового значения
+  uniqueRatio?: number; // доля уникальных значений в сэмпле, 0..1
 }
 
 export type EmptyValueStrategy =
@@ -47,22 +49,6 @@ export interface HierarchyConfig {
   baseParentId?: string | null;
 }
 
-export interface JsonImportJobProgress {
-  totalRecords: number;
-  processedRecords: number;
-  createdDocuments: number;
-  skippedRecords: number;
-  errorRecords: number;
-  percent: number;
-}
-
-export interface JsonImportJobTiming {
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  durationSeconds: number | null;
-}
-
 export type ErrorType =
   | "parse_error" // ошибка парсинга JSON
   | "validation_error" // ошибка валидации данных
@@ -78,49 +64,6 @@ export interface ImportRecordError {
   message: string;
   field?: string; // поле с ошибкой (для валидации)
   rawPreview?: string; // первые 200 символов записи
-}
-
-export interface ImportErrorLog {
-  errors: ImportRecordError[];
-  summary: {
-    parseErrors: number;
-    validationErrors: number;
-    mappingErrors: number;
-    duplicates: number;
-    databaseErrors: number;
-    unknownErrors: number;
-  };
-}
-
-export interface CreateJsonImportRequest {
-  fileKey: string; // ключ файла в S3 после загрузки
-  fileName: string; // оригинальное имя файла
-  fileSize: number; // размер файла в байтах
-  estimatedTotalRecords?: number; // оценка количества записей из предпросмотра
-  mappingConfig: MappingConfig;
-  hierarchyConfig: HierarchyConfig;
-  parentId?: string | null; // родительская папка для импорта (если указана, все документы создаются в ней)
-}
-
-export interface CreateJsonImportResponse {
-  jobId: string;
-  status: "pending";
-}
-
-export interface GetJsonImportStatusResponse {
-  jobId: string;
-  baseId: string;
-  baseName: string;
-  status: JsonImportJobStatus;
-  progress: JsonImportJobProgress;
-  timing: JsonImportJobTiming;
-  recentErrors: ImportRecordError[];
-  hasMoreErrors: boolean;
-}
-
-export interface GetActiveJsonImportResponse {
-  jobId: string | null;
-  status: JsonImportJobStatus | null;
 }
 
 // === Expression-based Mapping Types (v2) ===

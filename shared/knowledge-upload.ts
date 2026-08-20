@@ -50,7 +50,6 @@ export type PublicKnowledgeUploadSessionItem = {
   uploadStatus: KnowledgeUploadItemUploadStatus;
   processingStatus: KnowledgeUploadItemProcessingStatus;
   importOptions: Record<string, unknown>;
-  importEntryId: string | null;
   executorJobId: string | null;
   checksumSha256: string | null;
   lastError: string | null;
@@ -101,9 +100,18 @@ export type CompleteKnowledgeUploadSessionItemResponse = {
   item: PublicKnowledgeUploadSessionItem;
 };
 
+/** Файл, отклонённый на регистрации: отказ поимённый, соседи по пакету принимаются (F5). */
+export type RejectedKnowledgeUploadItem = {
+  clientFileKey?: string;
+  fileName: string;
+  errorCode: "ARCHIVE_NOT_SUPPORTED" | "FILE_TOO_LARGE";
+  message: string;
+};
+
 export type GetKnowledgeUploadSessionResponse = {
   session: PublicKnowledgeUploadSession;
   items: PublicKnowledgeUploadSessionItem[];
+  rejected?: RejectedKnowledgeUploadItem[];
 };
 
 export type KnowledgeUploadSessionEvent =
@@ -160,7 +168,6 @@ export function toPublicKnowledgeUploadSessionItem(item: KnowledgeUploadSessionI
     uploadStatus: item.uploadStatus,
     processingStatus: item.processingStatus,
     importOptions: (item.importOptions ?? {}) as Record<string, unknown>,
-    importEntryId: item.importEntryId ?? null,
     executorJobId: item.executorJobId ?? null,
     checksumSha256: item.checksumSha256 ?? null,
     lastError: item.lastError ?? null,
