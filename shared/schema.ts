@@ -1195,6 +1195,23 @@ export const asrPlatformSettings = pgTable("asr_platform_settings", {
 export type AsrPlatformSettings = typeof asrPlatformSettings.$inferSelect;
 export type AsrPlatformSettingsInsert = typeof asrPlatformSettings.$inferInsert;
 
+// Настройки маскирования персональных данных (действие «Убрать ПДн»). Singleton, каждая
+// колонка nullable: NULL = «админ не переопределял» → код-дефолт из shared/pii-mask-settings.ts.
+// Новых ENV для сервиса не заводится, base_url по умолчанию — DNS-имя сервиса в compose/кластере.
+export const piiMaskSettings = pgTable("pii_mask_settings", {
+  id: varchar("id").primaryKey().default("pii_mask_settings_singleton"),
+  baseUrl: text("base_url"),
+  syncMaxChars: integer("sync_max_chars"),
+  chunkChars: integer("chunk_chars"),
+  maxInputChars: integer("max_input_chars"),
+  maxConcurrentRuns: integer("max_concurrent_runs"),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type PiiMaskSettingsRow = typeof piiMaskSettings.$inferSelect;
+export type PiiMaskSettingsInsert = typeof piiMaskSettings.$inferInsert;
+
 // Настраиваемые лимиты загрузки файлов (Tier-1): размеры на файл и счётчики по всем контурам
 // (чат, файлы ассистента, фидбэк, База знаний). Singleton. Каждая колонка nullable:
 // NULL = «админ не переопределял» → fallback env → код-дефолт. Единицы: *_mb — в МБ, счётчики — целые.
@@ -3790,13 +3807,13 @@ export type PromptInsert = typeof prompts.$inferInsert;
 export const actionScopes = ["system", "workspace"] as const;
 export type ActionScope = (typeof actionScopes)[number];
 
-export const actionTargets = ["transcript", "knowledge_document", "message", "selection", "conversation"] as const;
+export const actionTargets = ["transcript", "knowledge_document", "message", "selection", "conversation", "chat_attachment"] as const;
 export type ActionTarget = (typeof actionTargets)[number];
 
 export const actionSources = actionTargets;
 export type ActionSource = (typeof actionSources)[number];
 
-export const actionPlacements = ["canvas", "chat_message", "chat_toolbar"] as const;
+export const actionPlacements = ["canvas", "chat_message", "chat_toolbar", "composer_slash"] as const;
 export type ActionPlacement = (typeof actionPlacements)[number];
 
 export const actionInputTypes = ["full_transcript", "full_text", "selection", "message_text"] as const;
@@ -3807,6 +3824,13 @@ export type ActionOutputMode = (typeof actionOutputModes)[number];
 
 export const actionKinds = ["prompt", "tool", "hybrid"] as const;
 export type ActionKind = (typeof actionKinds)[number];
+
+// Кому доступно действие: только человеку из UI, только рантайму агента, либо обоим.
+// Владеет полем код (для системных действий — реестр server/system-actions), пользовательские
+// действия остаются "both". Нужно, чтобы системное действие можно было отдать пользователю,
+// не отдавая его модели как инструмент.
+export const actionInvocableBy = ["user", "agent", "both"] as const;
+export type ActionInvocableBy = (typeof actionInvocableBy)[number];
 
 export const actionLlmPolicyModes = ["action_managed", "inherit_binding", "inherit_legacy_assistant"] as const;
 export type ActionLlmPolicyMode = (typeof actionLlmPolicyModes)[number];
@@ -3828,6 +3852,7 @@ export const actionExecutionResourceTypes = [
   "knowledge_document",
   "chat_message",
   "selection",
+  "chat_attachment",
 ] as const;
 export type ActionExecutionResourceType = (typeof actionExecutionResourceTypes)[number];
 
@@ -3855,6 +3880,7 @@ export const actions = pgTable(
     inputType: text("input_type").$type<ActionInputType>().notNull().default("full_text"),
     outputMode: text("output_mode").$type<ActionOutputMode>().notNull().default("replace_text"),
     actionKind: text("action_kind").$type<ActionKind>().notNull().default("prompt"),
+    invocableBy: text("invocable_by").$type<ActionInvocableBy>().notNull().default("both"),
     toolName: text("tool_name"),
     toolConfig: jsonb("tool_config").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     llmPolicyMode: text("llm_policy_mode")
@@ -3980,7 +4006,8 @@ export const assistantActionRuns = pgTable(
     actionLabel: text("action_label"),
     placement: text("placement").notNull(),
     target: text("target").notNull(),
-    transcriptText: text("transcript_text").notNull(),
+    // NULL для ранов над вложением: текст живёт в chat_attachments, копировать документ в ран незачем.
+  transcriptText: text("transcript_text"),
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     status: text("status").$type<AssistantActionRunStatus>().notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
