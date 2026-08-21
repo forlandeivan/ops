@@ -3394,6 +3394,19 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   agentRoundMinRemainingSec: integer("agent_round_min_remaining_sec"),
   // Лимит эха предыдущего ответа в промпте guard-повтора (символов). 0 = не эхировать.
   agentRetryEchoMaxChars: integer("agent_retry_echo_max_chars"),
+  // --- Волна 4: исполнение прогона (run execution). Все поля NULL = «Авто» (env-дефолт реплики /
+  // документированный fallback). Триаж усилия и TTL продолжения применяет Node, режим мульти-tool-call
+  // и параметры стадии plan-and-execute уезжают per-request как runtimeExecution в Python. ---
+  // Триаж усилия: профиль бюджета по детерминированным сигналам запроса (потолок — лимиты узла).
+  agentEffortTriageEnabled: boolean("agent_effort_triage_enabled"),
+  // Режим обработки нескольких tool-call за один раунд: off | strict | read_parallel.
+  agentMultiToolMode: text("agent_multi_tool_mode"),
+  // Стадия «спланируй → исполни» для одной сложной многошаговой задачи и её параметры.
+  agentPlanExecuteEnabled: boolean("agent_plan_execute_enabled"),
+  agentPlanExecuteMaxReplans: integer("agent_plan_execute_max_replans"),
+  agentPlanExecuteMaxSteps: integer("agent_plan_execute_max_steps"),
+  // Сколько живёт состояние прерванного прогона, пригодное для продолжения (сек). 0 = выключено.
+  agentRunContinuationTtlSec: integer("agent_run_continuation_ttl_sec"),
   // --- Step-debug D6.4: устойчивость пошаговой отладки сценариев. NULL = «Авто» (env-дефолт
   // WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE → fallback); 0 = kill-switch (arm отклоняется).
   // Кап живых дебаг-сессий (armed/capturing/active) на пространство — дебаг не голодит прод-ёмкость. ---
