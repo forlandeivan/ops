@@ -496,21 +496,26 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultBatchSize: 100,
     intervalMinutes: 360,
   }),
+  // Волна 8 (E22): таблиц-владельцев старых импортов больше нет, поэтому уборка их
+  // файлов из уборки «по времени завершения задачи» становится реконсиляцией по
+  // префиксу — сравнением содержимого хранилища с базой, у которой этих строк уже нет.
   task({
-    key: "s3.json_imports.stale",
-    label: "Файлы JSON-импорта Базы Знаний",
+    key: "s3.legacy_imports.orphans",
+    label: "Остатки старых конвейеров импорта (json-imports/, archive-imports/, document-imports/)",
     description:
-      "Удаляет исходные файлы JSON/JSONL-импорта Базы Знаний из хранилища после завершения задачи импорта (finished_at) старше срока хранения. Адрес файла в строке обнуляется, строка задачи и её статистика сохраняются. Поглощает прежний фоновый джоб json-import-cleanup: тот был зарегистрирован, но не удалял ничего (пустая реализация), поэтому включённая по умолчанию уборка лишь достраивает задуманное изначально поведение.",
+      "Удаляет объекты под префиксами json-imports/, archive-imports/ и document-imports/ — исходные файлы трёх конвейеров импорта, снесённых волной 8. Строк-владельцев в базе не осталось (таблицы дропнуты миграцией 0320), поэтому уборка идёт реконсиляцией по префиксу, а не по времени завершения задачи. Включается администратором осознанно и разово: после того как реконсиляция отчиталась о нуле, префиксы уходят из белого списка хранилища.",
     category: "storage",
-    storage: "s3",
+    storage: "s3_reconcile",
     action: "delete_object",
-    table: "json_import_jobs",
-    timeColumn: "finished_at",
-    strippedColumns: ["source_file_key"],
-    defaultEnabled: true,
-    defaultRetentionDays: 7,
-    defaultBatchSize: 100,
-    intervalMinutes: 360,
+    table: "legacy_import_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    timeColumn: "first_seen_at",
+    defaultEnabled: false,
+    defaultRetentionDays: 7, // grace: объект держится неделю, случайные гонки не удаляются
+    defaultBatchSize: 200,
+    intervalMinutes: 1440,
+    sensitive: true,
+    cascadeNote:
+      "Удаляет исходные файлы прошлых импортов безвозвратно. Документы, созданные этими импортами, остаются: они хранят собственное содержимое, а не ссылку на исходник.",
   }),
 
   // ── Артефакты конвейера приёма (волна 4/E13) ────────────────────────────────
