@@ -3407,6 +3407,11 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   agentPlanExecuteMaxSteps: integer("agent_plan_execute_max_steps"),
   // Сколько живёт состояние прерванного прогона, пригодное для продолжения (сек). 0 = выключено.
   agentRunContinuationTtlSec: integer("agent_run_continuation_ttl_sec"),
+  // З-33: двухфазный lifecycle файловых артефактов — публикация карточки в чат откладывается до
+  // конца прогона и проходит только после проверок. NULL = «Авто» (выключено).
+  agentArtifactTwoPhaseEnabled: boolean("agent_artifact_two_phase_enabled"),
+  // Сколько живёт неопубликованный черновик до принудительного снятия reaper'ом (сек).
+  agentArtifactDraftTtlSec: integer("agent_artifact_draft_ttl_sec"),
   // --- Step-debug D6.4: устойчивость пошаговой отладки сценариев. NULL = «Авто» (env-дефолт
   // WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE → fallback); 0 = kill-switch (arm отклоняется).
   // Кап живых дебаг-сессий (armed/capturing/active) на пространство — дебаг не голодит прод-ёмкость. ---
@@ -7251,6 +7256,54 @@ export const assistantAgentArtifacts = pgTable(
 
 export type AssistantAgentArtifact = typeof assistantAgentArtifacts.$inferSelect;
 export type AssistantAgentArtifactInsert = typeof assistantAgentArtifacts.$inferInsert;
+
+// --- З-33 (волна 5): двухфазный lifecycle файловых артефактов агента (draft → commit) ---
+// Терминальная операция не только рендерит файл, но и сразу публикует карточку в чат. При
+// двухфазном режиме публикация откладывается: вложение создано, карточки нет — это и есть черновик.
+// Платформа публикует его САМА в конце прогона, после всех проверок; черновик проигравшей попытки
+// не публикуется вовсе (вместо плашки «заменено» на уже видимом файле).
+export const agentArtifactDraftStatuses = ["draft", "committed", "discarded"] as const;
+export type AgentArtifactDraftStatus = (typeof agentArtifactDraftStatuses)[number];
+
+export const agentArtifactDrafts = pgTable(
+  "agent_artifact_drafts",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    chatId: varchar("chat_id")
+      .notNull()
+      .references(() => chatSessions.id, { onDelete: "cascade" }),
+    // Вложение уже создано и лежит в хранилище — черновиком является именно НЕОПУБЛИКОВАННОСТЬ.
+    attachmentId: varchar("attachment_id").notNull(),
+    // Прогон-владелец. Без FK на assistant_workflow_runs: черновик обязан пережить удаление прогона,
+    // иначе reaper потеряет из виду файл, который так и не был опубликован.
+    runId: varchar("run_id", { length: 255 }),
+    stepId: varchar("step_id", { length: 255 }),
+    // Слот дедупликации З-31 = операция: две версии одного отчёта борются за один слот, PDF и XLSX —
+    // за разные. Имя инструмента в рантайме санитайзится, поэтому слотом служит ключ операции.
+    toolSlot: varchar("tool_slot", { length: 255 }),
+    systemOperation: varchar("system_operation", { length: 255 }).notNull(),
+    cardContent: text("card_content").notNull().default(""),
+    cardMetadataExtra: jsonb("card_metadata_extra").$type<Record<string, unknown>>().notNull().default({}),
+    status: varchar("status", { length: 32 }).$type<AgentArtifactDraftStatus>().notNull().default("draft"),
+    messageId: varchar("message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+    discardReason: varchar("discard_reason", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (table) => ({
+    runStatusIdx: index("agent_artifact_drafts_run_status_idx").on(table.runId, table.status),
+    statusCreatedIdx: index("agent_artifact_drafts_status_created_idx").on(table.status, table.createdAt),
+    attachmentIdx: index("agent_artifact_drafts_attachment_idx").on(table.attachmentId),
+    chatIdx: index("agent_artifact_drafts_chat_idx").on(table.chatId),
+    workspaceIdx: index("agent_artifact_drafts_workspace_idx").on(table.workspaceId),
+  }),
+);
+
+export type AgentArtifactDraft = typeof agentArtifactDrafts.$inferSelect;
+export type AgentArtifactDraftInsert = typeof agentArtifactDrafts.$inferInsert;
 
 export const assistantWorkflowApprovalRequests = pgTable(
   "assistant_workflow_approval_requests",
