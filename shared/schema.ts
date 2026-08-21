@@ -5785,6 +5785,13 @@ export const agentExecutions = pgTable(
     status: text("status").notNull(),
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
+    // З-08: причина остановки — колонками, а не находкой в metadata JSONB. stop_reason —
+    // физическая причина остановки цикла финальной попытки (брейкер; NULL при штатном финале),
+    // refusal_reason — причина честного отказа (abstention: брейкер или guard-фоллбэк),
+    // abstained — быстрый флаг для срезов.
+    stopReason: text("stop_reason"),
+    refusalReason: text("refusal_reason"),
+    abstained: boolean("abstained").notNull().default(false),
     providerAttempts: integer("provider_attempts").notNull().default(0),
     llmRounds: integer("llm_rounds").notNull().default(0),
     toolCalls: integer("tool_calls").notNull().default(0),
@@ -5807,6 +5814,8 @@ export const agentExecutions = pgTable(
     workspaceIdx: index("agent_executions_workspace_idx").on(table.workspaceId, table.startedAt),
     assistantIdx: index("agent_executions_assistant_idx").on(table.assistantId, table.startedAt),
     statusIdx: index("agent_executions_status_idx").on(table.status, table.startedAt),
+    // З-08: срез «как часто и почему агент отказывается» по времени.
+    refusalReasonIdx: index("agent_executions_refusal_reason_idx").on(table.refusalReason, table.startedAt),
     runIdx: index("agent_executions_run_idx").on(table.runId),
     chatIdx: index("agent_executions_chat_idx").on(table.chatId),
   }),
