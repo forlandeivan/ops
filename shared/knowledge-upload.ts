@@ -13,7 +13,9 @@ import type {
 export type PublicKnowledgeUploadSession = {
   id: string;
   workspaceId: string;
-  baseId: string;
+  // Сессия загрузки обслуживает и базу знаний, и постоянные файлы ассистента: у второго
+  // сценария базы нет, поэтому в схеме base_id стал nullable (scope + ровно один агрегат).
+  baseId: string | null;
   parentId: string | null;
   createdByUserId: string | null;
   clientSessionKey: string;
@@ -129,7 +131,7 @@ export function toPublicKnowledgeUploadSession(session: KnowledgeUploadSession):
   return {
     id: session.id,
     workspaceId: session.workspaceId,
-    baseId: session.baseId,
+    baseId: session.baseId ?? null,
     parentId: session.parentId ?? null,
     createdByUserId: session.createdByUserId ?? null,
     clientSessionKey: session.clientSessionKey,
