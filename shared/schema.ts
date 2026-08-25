@@ -477,7 +477,7 @@ export const workspaceMembers = pgTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.userId] }),
-    // 0337: обратный поиск «все пространства пользователя» — префикс PK его не покрывает.
+    // 0339: обратный поиск «все пространства пользователя» — префикс PK его не покрывает.
     userIdx: index("workspace_members_user_id_idx").on(table.userId),
   }),
 );
@@ -1454,6 +1454,13 @@ export const knowledgeUploadSourceKinds = [
 ] as const;
 export type KnowledgeUploadSourceKind = (typeof knowledgeUploadSourceKinds)[number];
 
+/**
+ * Физические `knowledge_upload_*` таблицы обслуживают транспорт загрузки и для БЗ,
+ * и для постоянных файлов ассистента. Имя сохраняем ради rolling compatibility;
+ * целевой домен задаётся явной парой scope + ссылкой на ровно один агрегат.
+ */
+export type KnowledgeUploadSessionScope = Extract<IngestScope, "kb" | "assistant">;
+
 export const knowledgeUploadSessionStatuses = [
   "pending",
   "uploading",
@@ -1515,9 +1522,10 @@ export const knowledgeUploadSessions = pgTable(
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<KnowledgeUploadSessionScope>().notNull().default("kb"),
     baseId: varchar("base_id")
-      .notNull()
       .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
     parentId: varchar("parent_id"),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     clientSessionKey: text("client_session_key").notNull(),
@@ -1540,10 +1548,23 @@ export const knowledgeUploadSessions = pgTable(
       table.baseId,
       table.updatedAt,
     ),
+    workspaceAssistantIdx: index("knowledge_upload_sessions_workspace_assistant_idx").on(
+      table.workspaceId,
+      table.assistantId,
+      table.updatedAt,
+    ),
     statusIdx: index("knowledge_upload_sessions_status_idx").on(table.status, table.updatedAt),
     clientSessionIdx: index("knowledge_upload_sessions_client_session_idx").on(
       table.workspaceId,
       table.clientSessionKey,
+    ),
+    assistantClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_assistant_client_session_unique_idx")
+      .on(table.workspaceId, table.assistantId, table.clientSessionKey)
+      .where(sql`${table.scope} = 'assistant'`),
+    targetCheck: check(
+      "knowledge_upload_sessions_target_check",
+      sql`(${table.scope} = 'kb' AND ${table.baseId} IS NOT NULL AND ${table.assistantId} IS NULL)
+          OR (${table.scope} = 'assistant' AND ${table.baseId} IS NULL AND ${table.assistantId} IS NOT NULL)`,
     ),
   }),
 );
@@ -4558,6 +4579,8 @@ export const assistantFiles = pgTable(
     version: integer("version").notNull().default(1),
     sourceChatAttachmentId: varchar("source_chat_attachment_id")
       .references(() => chatAttachments.id, { onDelete: "set null" }),
+    clientUploadKey: varchar("client_upload_key", { length: 255 }),
+    ingestSourceId: uuid("ingest_source_id").references(() => ingestSources.id, { onDelete: "set null" }),
     role: text("role").$type<AssistantFileRole>().notNull().default(ASSISTANT_FILE_ROLE_DEFAULT),
     status: text("status").$type<AssistantFileStatus>().notNull().default("uploaded"),
     processingStatus: text("processing_status").$type<AssistantFileStatus>().notNull().default("processing"),
@@ -4572,6 +4595,12 @@ export const assistantFiles = pgTable(
     sourceChatAttachmentUniqueIdx: uniqueIndex("assistant_files_source_chat_attachment_unique_idx")
       .on(table.assistantId, table.sourceChatAttachmentId)
       .where(sql`${table.sourceChatAttachmentId} IS NOT NULL`),
+    clientUploadKeyUniqueIdx: uniqueIndex("assistant_files_client_upload_key_unique_idx")
+      .on(table.workspaceId, table.assistantId, table.clientUploadKey)
+      .where(sql`${table.clientUploadKey} IS NOT NULL`),
+    ingestSourceUniqueIdx: uniqueIndex("assistant_files_ingest_source_id_unique_idx")
+      .on(table.ingestSourceId)
+      .where(sql`${table.ingestSourceId} IS NOT NULL`),
   }),
 );
 
@@ -4600,6 +4629,9 @@ export const assistantFileIngestionJobs = pgTable(
     attempts: integer("attempts").notNull().default(0),
     nextRetryAt: timestamp("next_retry_at"),
     lastError: text("last_error"),
+    workerId: text("worker_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     chunkCount: integer("chunk_count"),
     totalChars: integer("total_chars"),
     totalTokens: integer("total_tokens"),
@@ -4618,6 +4650,7 @@ export const assistantFileIngestionJobs = pgTable(
       table.nextRetryAt,
     ),
     assistantIdx: index("assistant_file_ingestion_jobs_assistant_idx").on(table.assistantId, table.status, table.nextRetryAt),
+    leaseIdx: index("assistant_file_ingestion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
   }),
 );
 
@@ -9544,10 +9577,49 @@ export const ingestSources = pgTable(
     ),
     uploadSessionItemIdx: index("ingest_sources_upload_session_item_idx").on(table.uploadSessionItemId),
     parentSourceIdx: index("ingest_sources_parent_source_idx").on(table.parentSourceId),
+    scopeRefStatusUpdatedIdx: index("ingest_sources_scope_ref_status_updated_idx").on(
+      table.scope,
+      table.scopeRefId,
+      table.status,
+      table.updatedAt,
+    ),
   }),
 );
 export type IngestSource = typeof ingestSources.$inferSelect;
 export type IngestSourceInsert = typeof ingestSources.$inferInsert;
+
+/**
+ * Канонические текстовые чанки источника независимо от доменного scope.
+ * Версия позволяет атомарно переключать переиндексацию, ordinal сохраняет
+ * детерминированный порядок и даёт устойчивый ключ для vector payload.
+ */
+export const ingestSourceChunks = pgTable(
+  "ingest_source_chunks",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    version: integer("version").notNull().default(1),
+    ordinal: integer("ordinal").notNull(),
+    content: text("content").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    sourceVersionOrdinalUniqueIdx: uniqueIndex("ingest_source_chunks_source_version_ordinal_unique_idx").on(
+      table.sourceId,
+      table.version,
+      table.ordinal,
+    ),
+    sourceVersionIdx: index("ingest_source_chunks_source_version_idx").on(table.sourceId, table.version),
+    versionCheck: check("ingest_source_chunks_version_check", sql`${table.version} >= 1`),
+    ordinalCheck: check("ingest_source_chunks_ordinal_check", sql`${table.ordinal} >= 0`),
+  }),
+);
+export type IngestSourceChunk = typeof ingestSourceChunks.$inferSelect;
+export type IngestSourceChunkInsert = typeof ingestSourceChunks.$inferInsert;
 
 /** Состояния URL во фронтире краула (волна 4/E7). */
 export const ingestCrawlFrontierStates = ["pending", "visiting", "visited", "skipped", "failed"] as const;
