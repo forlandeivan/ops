@@ -477,6 +477,8 @@ export const workspaceMembers = pgTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.userId] }),
+    // 0337: обратный поиск «все пространства пользователя» — префикс PK его не покрывает.
+    userIdx: index("workspace_members_user_id_idx").on(table.userId),
   }),
 );
 
