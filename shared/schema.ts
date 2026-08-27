@@ -934,6 +934,22 @@ export const authProviders = pgTable("auth_providers", {
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+// mirror-drift-allow:begin(auth-appearance-settings) — auth UI и публичные auth-роуты живут только в монолите
+/**
+ * Глобальное оформление публичного auth-контура. Singleton принадлежит всей
+ * инсталляции, а не отдельному workspace: экран входа показывается до выбора
+ * рабочего пространства.
+ */
+export const authAppearanceSettings = pgTable("auth_appearance_settings", {
+  id: varchar("id").primaryKey().default("auth_appearance_settings_singleton"),
+  useNeutralLayout: boolean("use_neutral_layout").notNull().default(false),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type AuthAppearanceSettings = typeof authAppearanceSettings.$inferSelect;
+export type AuthAppearanceSettingsInsert = typeof authAppearanceSettings.$inferInsert;
+// mirror-drift-allow:end
 
 export const smtpSettings = pgTable("smtp_settings", {
   id: varchar("id").primaryKey().default("smtp_singleton"),
@@ -1398,6 +1414,14 @@ export type KnowledgeBaseIndexingPolicyInsert = typeof knowledgeBaseIndexingPoli
 export const knowledgeBaseIndexingJobStatuses = ["pending", "processing", "completed", "failed", "paused", "canceled"] as const;
 export type KnowledgeBaseIndexingJobStatus = (typeof knowledgeBaseIndexingJobStatuses)[number];
 
+// Кто инициировал индексацию. `user` — работа пространства (загрузка документов, ручной запуск
+// индексации, автоиндексация): расход эмбеддингов тарифицируется пространству. `platform_admin` —
+// служебная операция платформы (миграция/переиндексация KB-коллекций из админки при смене
+// глобального embedding-провайдера): расход пишется в usage-леджер, но кредиты пространства не
+// списываются и нехватка баланса такую операцию не блокирует.
+export const knowledgeBaseIndexingJobOrigins = ["user", "platform_admin"] as const;
+export type KnowledgeBaseIndexingJobOrigin = (typeof knowledgeBaseIndexingJobOrigins)[number];
+
 export const archiveImportConflictPolicies = ["skip", "replace", "new_version"] as const;
 export type ArchiveImportConflictPolicy = (typeof archiveImportConflictPolicies)[number];
 
@@ -1667,6 +1691,8 @@ export const knowledgeBaseIndexingJobs = pgTable(
       .notNull()
       .references(() => knowledgeDocumentVersions.id, { onDelete: "cascade" }),
     status: text("status").$type<KnowledgeBaseIndexingJobStatus>().notNull().default("pending"),
+    // Инициатор работы: определяет, тарифицировать ли расход эмбеддингов пространству.
+    origin: text("origin").$type<KnowledgeBaseIndexingJobOrigin>().notNull().default("user"),
     attempts: integer("attempts").notNull().default(0),
     // Холостые переносы на занятом advisory-локе документа: не ошибка (в last_error не пишем)
     // и не попытка (attempts восстанавливается) — отдельный счётчик для диагностики (S16).
@@ -3789,6 +3815,42 @@ export type AssistantUserTranscriptionPreference =
 export type AssistantUserTranscriptionPreferenceInsert =
   typeof assistantUserTranscriptionPreferences.$inferInsert;
 
+export const assistantUserMenuPreferences = pgTable(
+  "assistant_user_menu_preferences",
+  {
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    assistantId: varchar("assistant_id")
+      .notNull()
+      .references(() => assistants.id, { onDelete: "cascade" }),
+    isPinned: boolean("is_pinned").notNull().default(false),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+    updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.userId, table.assistantId] }),
+    workspaceUserOrderIdx: index("assistant_user_menu_preferences_workspace_user_order_idx").on(
+      table.workspaceId,
+      table.userId,
+      table.isPinned,
+      table.sortOrder,
+    ),
+    assistantIdx: index("assistant_user_menu_preferences_assistant_idx").on(table.assistantId),
+    sortOrderCheck: check(
+      "assistant_user_menu_preferences_sort_order_check",
+      sql`${table.sortOrder} >= 0`,
+    ),
+  }),
+);
+
+export type AssistantUserMenuPreference = typeof assistantUserMenuPreferences.$inferSelect;
+export type AssistantUserMenuPreferenceInsert = typeof assistantUserMenuPreferences.$inferInsert;
+
 // Action scopes, targets, placements and modes
 // ---------------------------------------------------------------------------
 // Prompts — библиотека промптов и стартовые подсказки чата (Фазы 1–2).
@@ -4234,6 +4296,7 @@ export const chatSessions = pgTable(
     currentAssistantActionTriggerMessageId: text("current_assistant_action_trigger_message_id"),
     currentAssistantActionUpdatedAt: timestamp("current_assistant_action_updated_at"),
     metadata: jsonb("metadata").$type<ChatSessionMetadata>().notNull().default(sql`'{}'::jsonb`),
+    pinnedAt: timestamp("pinned_at"),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     deletedAt: timestamp("deleted_at"),
@@ -4245,6 +4308,14 @@ export const chatSessions = pgTable(
       table.userId,
       table.createdAt,
     ),
+    workspaceUserPinnedUpdatedIdx: index("chat_sessions_workspace_user_pinned_updated_idx")
+      .on(
+        table.workspaceId,
+        table.userId,
+        table.pinnedAt.desc().nullsLast(),
+        table.updatedAt.desc(),
+      )
+      .where(sql`"deleted_at" IS NULL`),
     // 0260: FK-индекс под каскад удаления ассистента (assistant_id).
     assistantIdx: index("chat_sessions_assistant_id_idx").on(table.assistantId),
   }),
@@ -6562,6 +6633,8 @@ export const knowledgeDocumentImages = pgTable(
     versionId: varchar("version_id")
       .notNull()
       .references(() => knowledgeDocumentVersions.id, { onDelete: "cascade" }),
+    // Общий ingest-asset объявлен ниже; FK создаётся миграцией, как у других forward refs.
+    sourceAssetId: uuid("source_asset_id"),
 
     contentHash: varchar("content_hash", { length: 64 }).notNull(),
     originalIndex: integer("original_index").notNull(),
@@ -6595,6 +6668,7 @@ export const knowledgeDocumentImages = pgTable(
     ),
     documentIdx: index("kdi_document_id_idx").on(table.documentId),
     baseIdx: index("kdi_base_id_idx").on(table.baseId),
+    sourceAssetIdx: index("kdi_source_asset_id_idx").on(table.sourceAssetId),
   }),
 );
 
@@ -9587,6 +9661,108 @@ export const ingestSources = pgTable(
 );
 export type IngestSource = typeof ingestSources.$inferSelect;
 export type IngestSourceInsert = typeof ingestSources.$inferInsert;
+
+/** Content-addressed bytes produced by ingestion. Dedupe is workspace-local only. */
+export const ingestAssetBlobs = pgTable(
+  "ingest_asset_blobs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    contentHash: varchar("content_hash", { length: 64 }).notNull(),
+    mimeType: varchar("mime_type", { length: 100 }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    storageBucket: varchar("storage_bucket", { length: 255 }).notNull(),
+    storageKey: varchar("storage_key", { length: 500 }).notNull(),
+    state: text("state").$type<"ready" | "deleting" | "failed">().notNull().default("ready"),
+    orphanedAt: timestamp("orphaned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceHashUnique: uniqueIndex("ingest_asset_blobs_workspace_hash_uq").on(
+      table.workspaceId,
+      table.contentHash,
+    ),
+    orphanIdx: index("ingest_asset_blobs_orphan_idx").on(table.state, table.orphanedAt),
+  }),
+);
+export type IngestAssetBlob = typeof ingestAssetBlobs.$inferSelect;
+export type IngestAssetBlobInsert = typeof ingestAssetBlobs.$inferInsert;
+
+/** One occurrence of a shared blob in a concrete source generation. */
+export const ingestSourceAssets = pgTable(
+  "ingest_source_assets",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    blobId: uuid("blob_id")
+      .notNull()
+      .references(() => ingestAssetBlobs.id, { onDelete: "restrict" }),
+    originalIndex: integer("original_index").notNull(),
+    pageNumber: integer("page_number"),
+    positionOffset: integer("position_offset"),
+    blockId: text("block_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    sourceIndexUnique: uniqueIndex("ingest_source_assets_source_index_uq").on(
+      table.sourceId,
+      table.originalIndex,
+    ),
+    sourceIdx: index("ingest_source_assets_source_idx").on(table.sourceId),
+    blobIdx: index("ingest_source_assets_blob_idx").on(table.blobId),
+  }),
+);
+export type IngestSourceAsset = typeof ingestSourceAssets.$inferSelect;
+export type IngestSourceAssetInsert = typeof ingestSourceAssets.$inferInsert;
+
+/** Versioned semantic analysis of a blob. Old model/prompt results remain reproducible. */
+export const ingestAssetAnalyses = pgTable(
+  "ingest_asset_analyses",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    blobId: uuid("blob_id")
+      .notNull()
+      .references(() => ingestAssetBlobs.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"document_vision">().notNull().default("document_vision"),
+    providerId: text("provider_id").notNull(),
+    llmProviderId: text("llm_provider_id").notNull(),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    status: text("status").$type<"succeeded" | "failed">().notNull(),
+    contentText: text("content_text"),
+    errorCode: text("error_code"),
+    usageTokens: integer("usage_tokens"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    configUnique: uniqueIndex("ingest_asset_analyses_config_uq").on(
+      table.blobId,
+      table.kind,
+      table.providerId,
+      table.llmProviderId,
+      table.model,
+      table.promptVersion,
+    ),
+    blobStatusIdx: index("ingest_asset_analyses_blob_status_idx").on(table.blobId, table.status),
+  }),
+);
+export type IngestAssetAnalysis = typeof ingestAssetAnalyses.$inferSelect;
+export type IngestAssetAnalysisInsert = typeof ingestAssetAnalyses.$inferInsert;
 
 /**
  * Канонические текстовые чанки источника независимо от доменного scope.
