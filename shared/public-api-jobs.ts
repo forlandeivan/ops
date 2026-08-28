@@ -26,6 +26,7 @@ export function isTerminalJobStatus(status: PublicJobStatus): boolean {
  */
 export const PUBLIC_JOB_KINDS = [
   "knowledge_indexing",
+  "knowledge_ingestion",
   "assistant_action",
   "transcription",
   "workflow_run",
@@ -79,8 +80,33 @@ const TRANSCRIPTION_STATUS_MAP: Record<string, PublicJobStatus> = {
   expired: "failed",
 };
 
+/**
+ * Приём файла в базу знаний: распознавание, разбор, нормализация, сохранение, нарезка и
+ * индексация. Все стадии для вызывающего означают одно — работа идёт.
+ *
+ * `needs_attention` — терминальный отказ, а не ожидание: конвейер остановился и ждёт человека
+ * в интерфейсе, автоматический путь на этом закончился. `superseded` — файл вытеснен более
+ * новым источником: собственного результата у него не будет.
+ */
+const KNOWLEDGE_INGESTION_STATUS_MAP: Record<string, PublicJobStatus> = {
+  received: "queued",
+  detecting: "running",
+  extracting: "running",
+  normalizing: "running",
+  persisting: "running",
+  chunking: "running",
+  indexing: "running",
+  ready: "succeeded",
+  ready_with_quality_notes: "succeeded",
+  needs_attention: "failed",
+  failed: "failed",
+  canceled: "cancelled",
+  superseded: "cancelled",
+};
+
 const STATUS_MAPS: Record<PublicJobKind, Record<string, PublicJobStatus>> = {
   knowledge_indexing: KNOWLEDGE_INDEXING_STATUS_MAP,
+  knowledge_ingestion: KNOWLEDGE_INGESTION_STATUS_MAP,
   assistant_action: ASSISTANT_ACTION_STATUS_MAP,
   transcription: TRANSCRIPTION_STATUS_MAP,
   workflow_run: WORKFLOW_RUN_STATUS_MAP,
