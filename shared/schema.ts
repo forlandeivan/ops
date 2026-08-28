@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { PublicJobKind, PublicJobStatus } from "./public-api-jobs";
 import {
   pgTable,
   text,
@@ -913,14 +914,95 @@ export const workspaceEmbedKeyDomains = pgTable(
   }),
 );
 
+/**
+ * Личные API-токены. Имя обязательно — иначе в списке из пяти токенов нельзя понять,
+ * какой отзывать. Срок необязателен: токены, выпущенные до К1, остались бессрочными,
+ * потому что обрывать работающую интеграцию обновлением версии нельзя.
+ */
+/**
+ * Реестр заданий публичного API (К3). Даёт вызывающему один идентификатор и одну модель
+ * состояния поверх четырёх разных подсистем. Состояние источника остаётся у подсистемы —
+ * здесь хранится ссылка и последнее известное отображение, иначе два состояния разойдутся.
+ */
+export const publicApiJobs = pgTable(
+  "public_api_jobs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdByUserId: varchar("created_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<PublicJobKind>().notNull(),
+    sourceId: uuid("source_id").notNull(),
+    status: text("status").$type<PublicJobStatus>().notNull().default("queued"),
+    stage: text("stage"),
+    result: jsonb("result").$type<Record<string, unknown> | null>(),
+    error: jsonb("error").$type<{ code: string; message: string } | null>(),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceCreatedIdx: index("public_api_jobs_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+    kindSourceIdx: uniqueIndex("public_api_jobs_kind_source_idx").on(table.kind, table.sourceId),
+  }),
+);
+
+/**
+ * Ключи идемпотентности публичного API (К4). Хранят ответ первого выполнения и отпечаток
+ * запроса: повтор с тем же ключом получает тот же ответ, повтор с изменёнными параметрами —
+ * отказ. Молча вернуть чужой ответ хуже, чем отказать.
+ */
+export const publicApiIdempotencyKeys = pgTable(
+  "public_api_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdByUserId: varchar("created_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    method: text("method").notNull(),
+    path: text("path").notNull(),
+    requestHash: text("request_hash").notNull(),
+    status: text("status").$type<"in_progress" | "completed">().notNull().default("in_progress"),
+    responseStatus: integer("response_status"),
+    responseBody: jsonb("response_body").$type<unknown>(),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: timestamp("completed_at"),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (table) => ({
+    workspaceKeyIdx: uniqueIndex("public_api_idempotency_workspace_key_idx").on(
+      table.workspaceId,
+      table.idempotencyKey,
+    ),
+    expiresIdx: index("public_api_idempotency_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export type PublicApiIdempotencyKey = typeof publicApiIdempotencyKeys.$inferSelect;
+
+export type PublicApiJob = typeof publicApiJobs.$inferSelect;
+export type InsertPublicApiJob = typeof publicApiJobs.$inferInsert;
+
 export const personalApiTokens = pgTable("personal_api_tokens", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
   tokenHash: text("token_hash").notNull(),
   lastFour: text("last_four").notNull(),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  expiresAt: timestamp("expires_at"),
+  lastUsedAt: timestamp("last_used_at"),
   revokedAt: timestamp("revoked_at"),
 });
 
