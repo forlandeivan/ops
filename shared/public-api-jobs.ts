@@ -28,6 +28,7 @@ export const PUBLIC_JOB_KINDS = [
   "knowledge_indexing",
   "knowledge_ingestion",
   "assistant_action",
+  "assistant_response",
   "transcription",
   "workflow_run",
 ] as const;
@@ -104,7 +105,23 @@ const KNOWLEDGE_INGESTION_STATUS_MAP: Record<string, PublicJobStatus> = {
   superseded: "cancelled",
 };
 
+/**
+ * Ответ ассистента, ушедший в фон.
+ *
+ * Единственный вид, у которого нет подсистемы-источника: работу выполняет сам публичный API,
+ * и состояние он пишет прямо в реестр. Поэтому внутренние состояния совпадают с публичными —
+ * переводить нечего.
+ */
+const ASSISTANT_RESPONSE_STATUS_MAP: Record<string, PublicJobStatus> = {
+  queued: "queued",
+  running: "running",
+  succeeded: "succeeded",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
 const STATUS_MAPS: Record<PublicJobKind, Record<string, PublicJobStatus>> = {
+  assistant_response: ASSISTANT_RESPONSE_STATUS_MAP,
   knowledge_indexing: KNOWLEDGE_INDEXING_STATUS_MAP,
   knowledge_ingestion: KNOWLEDGE_INGESTION_STATUS_MAP,
   assistant_action: ASSISTANT_ACTION_STATUS_MAP,
