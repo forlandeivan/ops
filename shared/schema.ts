@@ -1660,6 +1660,10 @@ export const knowledgeUploadSessions = pgTable(
       table.updatedAt,
     ),
     statusIdx: index("knowledge_upload_sessions_status_idx").on(table.status, table.updatedAt),
+    // 0351: FK-индекс под каскад purge архивных ассистентов; частичный — NULL каскаду не нужен.
+    assistantIdx: index("knowledge_upload_sessions_assistant_idx")
+      .on(table.assistantId)
+      .where(sql`${table.assistantId} IS NOT NULL`),
     clientSessionIdx: index("knowledge_upload_sessions_client_session_idx").on(
       table.workspaceId,
       table.clientSessionKey,
@@ -3859,6 +3863,8 @@ export const assistants = pgTable(
     llmProviderConfigIdx: index("assistants_llm_provider_config_idx").on(table.llmProviderConfigId),
     collectionIdx: index("assistants_collection_name_idx").on(table.collectionName),
     workflowDefinitionIdx: index("assistants_workflow_definition_idx").on(table.workflowDefinitionId),
+    // 0351: отбор кандидатов janitor pg.assistants.archived (status='archived' AND updated_at < cutoff).
+    statusUpdatedIdx: index("assistants_status_updated_idx").on(table.status, table.updatedAt),
     workspaceSystemKeyUnique: uniqueIndex("assistants_workspace_system_key_unique_idx").on(
       table.workspaceId,
       table.systemKey,
@@ -3889,6 +3895,8 @@ export const assistantUserTranscriptionPreferences = pgTable(
       table.workspaceId,
       table.userId,
     ),
+    // 0351: FK-индекс под каскад purge архивных ассистентов (в PK assistant_id не ведущая).
+    assistantIdx: index("assistant_user_transcription_preferences_assistant_idx").on(table.assistantId),
   }),
 );
 
@@ -4657,6 +4665,8 @@ export const chatAttachments = pgTable(
     chatIdx: index("chat_attachments_chat_idx").on(table.chatId, table.createdAt),
     messageIdx: index("chat_attachments_message_idx").on(table.messageId),
     fileIdx: index("chat_attachments_file_idx").on(table.fileId),
+    // 0351: отбор кандидатов s3-политик janitor по возрасту вложения.
+    createdAtIdx: index("chat_attachments_created_at_idx").on(table.createdAt),
   }),
 );
 
@@ -4760,6 +4770,10 @@ export const assistantFiles = pgTable(
     ingestSourceUniqueIdx: uniqueIndex("assistant_files_ingest_source_id_unique_idx")
       .on(table.ingestSourceId)
       .where(sql`${table.ingestSourceId} IS NOT NULL`),
+    // 0351: FK-индекс под SET NULL при уборке вложений чата (в unique выше колонка не ведущая).
+    sourceChatAttachmentIdx: index("assistant_files_source_chat_attachment_idx")
+      .on(table.sourceChatAttachmentId)
+      .where(sql`${table.sourceChatAttachmentId} IS NOT NULL`),
   }),
 );
 
@@ -4810,6 +4824,8 @@ export const assistantFileIngestionJobs = pgTable(
     ),
     assistantIdx: index("assistant_file_ingestion_jobs_assistant_idx").on(table.assistantId, table.status, table.nextRetryAt),
     leaseIdx: index("assistant_file_ingestion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
+    // 0351: FK-индекс под каскад удаления assistant_files (в unique выше file_id не ведущая).
+    fileIdx: index("assistant_file_ingestion_jobs_file_idx").on(table.fileId),
   }),
 );
 
@@ -4855,6 +4871,10 @@ export const canvasDocuments = pgTable(
     assistantIdx: index("canvas_documents_assistant_idx").on(table.assistantId),
     actionIdx: index("canvas_documents_action_idx").on(table.actionId),
     assistantActionRunIdx: index("canvas_documents_assistant_action_run_idx").on(table.assistantActionRunId),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата; в композите выше колонка не ведущая.
+    sourceMessageIdx: index("canvas_documents_source_message_idx")
+      .on(table.sourceMessageId)
+      .where(sql`${table.sourceMessageId} IS NOT NULL`),
   }),
 );
 
@@ -4974,6 +4994,13 @@ export const documentEditProposals = pgTable(
     statusIdx: index("document_edit_proposals_status_idx").on(table.status, table.createdAt),
     targetIdx: index("document_edit_proposals_target_idx").on(table.targetType, table.targetId),
     tabIdx: index("document_edit_proposals_tab_idx").on(table.tabType, table.tabId),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
+    userMessageIdx: index("document_edit_proposals_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
+    assistantMessageIdx: index("document_edit_proposals_assistant_message_idx")
+      .on(table.assistantMessageId)
+      .where(sql`${table.assistantMessageId} IS NOT NULL`),
   }),
 );
 
@@ -5954,6 +5981,10 @@ export const chatMessageFeedback = pgTable(
     ),
     userCreatedIdx: index("chat_message_feedback_user_created_idx").on(table.userId, table.createdAt),
     kindCreatedIdx: index("chat_message_feedback_kind_created_idx").on(table.kind, table.createdAt),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
+    userMessageIdx: index("chat_message_feedback_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
     // Один отзыв-оценка на (ответ ассистента, пользователь). general (без assistant_message_id) — без ограничения.
     answerUserUniq: uniqueIndex("chat_message_feedback_answer_user_uniq")
       .on(table.assistantMessageId, table.userId)
@@ -5992,6 +6023,8 @@ export const chatFeedbackAttachments = pgTable(
       table.uploaderUserId,
       table.createdAt,
     ),
+    // 0351: отбор кандидатов s3-политики janitor по возрасту скриншота.
+    createdAtIdx: index("chat_feedback_attachments_created_at_idx").on(table.createdAt),
   }),
 );
 
@@ -6368,6 +6401,10 @@ export const asrExecutions = pgTable(
     attachmentIdx: index("asr_executions_attachment_idx").on(table.attachmentId),
     // 0350: janitor при purge чатов сравнивает chat_id::text с chat_sessions.id (varchar) — нужен expression-индекс.
     chatTextIdx: index("asr_executions_chat_text_idx").on(sql`(${table.chatId}::text)`),
+    // 0351: анти-джойн janitor при purge архивных ассистентов (assistant_id = root.id).
+    assistantIdx: index("asr_executions_assistant_idx")
+      .on(table.assistantId)
+      .where(sql`${table.assistantId} IS NOT NULL`),
   }),
 );
 
@@ -6491,6 +6528,15 @@ export const asrCompletionJobs = pgTable(
       .where(sql`${table.requestOperationId} IS NOT NULL AND ${table.asrExecutionId} IS NOT NULL`),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_jobs_workspace_id_idx").on(table.workspaceId),
+    // 0351: FK-индекс под каскад purge архивных ассистентов (он же анти-джойн janitor).
+    assistantIdx: index("asr_completion_jobs_assistant_idx").on(table.assistantId),
+    // 0351: SET NULL от transcripts/chat_messages внутри каскада чата.
+    transcriptIdx: index("asr_completion_jobs_transcript_idx")
+      .on(table.transcriptId)
+      .where(sql`${table.transcriptId} IS NOT NULL`),
+    transcriptMessageIdx: index("asr_completion_jobs_transcript_message_idx")
+      .on(table.transcriptMessageId)
+      .where(sql`${table.transcriptMessageId} IS NOT NULL`),
   }),
 );
 
@@ -6543,6 +6589,15 @@ export const asrCompletionJobActions = pgTable(
     workspaceIdx: index("asr_completion_job_actions_workspace_id_idx").on(table.workspaceId),
     // 0350: FK-индекс под каскад удаления чата (chat_id).
     chatIdx: index("asr_completion_job_actions_chat_idx").on(table.chatId),
+    // 0351: FK-индекс под каскад purge архивных ассистентов.
+    assistantIdx: index("asr_completion_job_actions_assistant_idx").on(table.assistantId),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
+    statusMessageIdx: index("asr_completion_job_actions_status_message_idx")
+      .on(table.statusMessageId)
+      .where(sql`${table.statusMessageId} IS NOT NULL`),
+    transcriptMessageIdx: index("asr_completion_job_actions_transcript_message_idx")
+      .on(table.transcriptMessageId)
+      .where(sql`${table.transcriptMessageId} IS NOT NULL`),
   }),
 );
 
@@ -7065,6 +7120,10 @@ export const assistantWorkflowRuns = pgTable(
     assistantCreatedIdx: index("assistant_workflow_runs_assistant_created_idx").on(table.assistantId, table.createdAt),
     resolvedVersionIdx: index("assistant_workflow_runs_resolved_version_idx").on(table.resolvedWorkflowVersionId),
     queueKeyStatusIdx: index("assistant_workflow_runs_queue_key_status_idx").on(table.queueKey, table.status),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
+    userMessageIdx: index("assistant_workflow_runs_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
     // 0261: композит под листинг истории ранов определения (workspace_id + workflow_definition_id +
     // created_at DESC, listWorkflowRunsForDefinition). Ведущий workspace_id покрывает и FK-каскад
     // удаления пространства → заменяет одиночный workspace_id-индекс из 0260 (тот дропнут в 0261).
@@ -7255,6 +7314,11 @@ export const assistantWorkflowFormRequests = pgTable(
     ),
     runStatusIdx: index("assistant_workflow_forms_run_status_idx").on(table.runId, table.status),
     chatStatusIdx: index("assistant_workflow_forms_chat_status_idx").on(table.chatId, table.status),
+    // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
+    assistantIdx: index("assistant_workflow_forms_assistant_idx").on(table.assistantId),
+    userMessageIdx: index("assistant_workflow_forms_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
@@ -7310,6 +7374,11 @@ export const assistantWorkflowContextRequests = pgTable(
     ),
     runStatusIdx: index("assistant_workflow_context_run_status_idx").on(table.runId, table.status),
     chatStatusIdx: index("assistant_workflow_context_chat_status_idx").on(table.chatId, table.status),
+    // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
+    assistantIdx: index("assistant_workflow_context_assistant_idx").on(table.assistantId),
+    userMessageIdx: index("assistant_workflow_context_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
@@ -7500,6 +7569,10 @@ export const agentArtifactDrafts = pgTable(
     attachmentIdx: index("agent_artifact_drafts_attachment_idx").on(table.attachmentId),
     chatIdx: index("agent_artifact_drafts_chat_idx").on(table.chatId),
     workspaceIdx: index("agent_artifact_drafts_workspace_idx").on(table.workspaceId),
+    // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
+    messageIdx: index("agent_artifact_drafts_message_idx")
+      .on(table.messageId)
+      .where(sql`${table.messageId} IS NOT NULL`),
   }),
 );
 
@@ -7546,6 +7619,11 @@ export const assistantWorkflowApprovalRequests = pgTable(
     ),
     runStatusIdx: index("assistant_workflow_approvals_run_status_idx").on(table.runId, table.status),
     chatStatusIdx: index("assistant_workflow_approvals_chat_status_idx").on(table.chatId, table.status),
+    // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
+    assistantIdx: index("assistant_workflow_approvals_assistant_idx").on(table.assistantId),
+    userMessageIdx: index("assistant_workflow_approvals_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
@@ -7973,6 +8051,10 @@ export const installedBuilds = pgTable(
   (table) => ({
     workspaceBuildUniqueIdx: uniqueIndex("installed_builds_workspace_build_uq").on(table.workspaceId, table.buildId),
     workspaceIdx: index("installed_builds_workspace_idx").on(table.workspaceId, table.status, table.updatedAt),
+    // 0351: SET NULL при каскаде purge архивных ассистентов.
+    materializedAssistantIdx: index("installed_builds_materialized_assistant_idx")
+      .on(table.materializedAssistantId)
+      .where(sql`${table.materializedAssistantId} IS NOT NULL`),
   }),
 );
 
@@ -8100,6 +8182,8 @@ export const externalTriggerBindings = pgTable(
       table.isActive,
       table.updatedAt,
     ),
+    // 0351: FK-индекс под каскад purge архивных ассистентов.
+    assistantIdx: index("external_trigger_bindings_assistant_idx").on(table.assistantId),
     assistantConnectionTitleUniqueIdx: uniqueIndex("external_trigger_bindings_assistant_connection_title_uq").on(
       table.connectionId,
       table.assistantId,
@@ -8175,6 +8259,13 @@ export const externalTriggerReceipts = pgTable(
   },
   (table) => ({
     createdAtIdx: index("external_trigger_receipts_created_at_idx").on(table.createdAt),
+    // 0351: SET NULL от chat_messages (каскад чата) и assistant_workflow_runs (retention ранов).
+    userMessageIdx: index("external_trigger_receipts_user_message_idx")
+      .on(table.userMessageId)
+      .where(sql`${table.userMessageId} IS NOT NULL`),
+    workflowRunIdx: index("external_trigger_receipts_workflow_run_idx")
+      .on(table.workflowRunId)
+      .where(sql`${table.workflowRunId} IS NOT NULL`),
     unmatchedEventUniqueIdx: uniqueIndex("external_trigger_receipts_connection_provider_event_null_binding_uq")
       .on(table.connectionId, table.providerEventId)
       .where(sql`binding_id IS NULL`),
@@ -8303,6 +8394,10 @@ export const workflowWebhookTriggers = pgTable(
       table.nodeId,
     ),
     workspaceIdx: index("workflow_webhook_triggers_workspace_idx").on(table.workspaceId),
+    // 0351: FK-индекс под каскад purge архивных ассистентов.
+    assistantIdx: index("workflow_webhook_triggers_assistant_idx")
+      .on(table.assistantId)
+      .where(sql`${table.assistantId} IS NOT NULL`),
   }),
 );
 
@@ -8338,6 +8433,10 @@ export const workflowTriggerEvents = pgTable(
     chatIdx: index("workflow_trigger_events_chat_idx")
       .on(table.chatId)
       .where(sql`${table.chatId} IS NOT NULL`),
+    // 0351: SET NULL при retention-удалении assistant_workflow_runs.
+    workflowRunIdx: index("workflow_trigger_events_workflow_run_idx")
+      .on(table.workflowRunId)
+      .where(sql`${table.workflowRunId} IS NOT NULL`),
   }),
 );
 
@@ -9743,6 +9842,10 @@ export const ingestSources = pgTable(
       table.status,
       table.updatedAt,
     ),
+    // 0351: отбор кандидатов s3-политик janitor по времени терминализации источника.
+    terminalAtIdx: index("ingest_sources_terminal_at_idx")
+      .on(table.terminalAt)
+      .where(sql`${table.terminalAt} IS NOT NULL`),
     workspaceCanonicalKeyIdx: index("ingest_sources_workspace_canonical_key_idx").on(
       table.workspaceId,
       table.canonicalKey,
