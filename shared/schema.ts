@@ -4231,6 +4231,10 @@ export const assistantActionRuns = pgTable(
       table.status,
       table.leaseExpiresAt,
     ),
+    // 0350: FK-индекс под каскад удаления чата; частичный — NULL каскаду не нужен.
+    chatIdx: index("assistant_action_runs_chat_idx")
+      .on(table.chatId)
+      .where(sql`${table.chatId} IS NOT NULL`),
   }),
 );
 
@@ -4324,6 +4328,8 @@ export const botActions = pgTable(
   (table) => ({
     chatIdx: index("bot_actions_chat_idx").on(table.workspaceId, table.chatId, table.updatedAt),
     statusIdx: index("bot_actions_status_idx").on(table.workspaceId, table.chatId, table.status),
+    // 0350: FK-индекс под каскад удаления чата; составные с workspace_id первым каскад по chat_id не кроют.
+    chatIdIdx: index("bot_actions_chat_id_idx").on(table.chatId),
     uniqueAction: uniqueIndex("bot_actions_action_unique_idx").on(
       table.workspaceId,
       table.chatId,
@@ -6360,6 +6366,8 @@ export const asrExecutions = pgTable(
     operationIdx: index("asr_executions_operation_idx").on(table.operationId),
     taskIdx: index("asr_executions_task_idx").on(table.taskId),
     attachmentIdx: index("asr_executions_attachment_idx").on(table.attachmentId),
+    // 0350: janitor при purge чатов сравнивает chat_id::text с chat_sessions.id (varchar) — нужен expression-индекс.
+    chatTextIdx: index("asr_executions_chat_text_idx").on(sql`(${table.chatId}::text)`),
   }),
 );
 
@@ -6533,6 +6541,8 @@ export const asrCompletionJobActions = pgTable(
     transcriptIdx: index("asr_completion_job_actions_transcript_idx").on(table.transcriptId),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_job_actions_workspace_id_idx").on(table.workspaceId),
+    // 0350: FK-индекс под каскад удаления чата (chat_id).
+    chatIdx: index("asr_completion_job_actions_chat_idx").on(table.chatId),
   }),
 );
 
@@ -8132,6 +8142,8 @@ export const externalTriggerSessions = pgTable(
       table.externalConversationKey,
       table.updatedAt,
     ),
+    // 0350: FK-индекс под каскад удаления чата (internal_chat_id).
+    internalChatIdx: index("external_trigger_sessions_internal_chat_idx").on(table.internalChatId),
   }),
 );
 
@@ -8322,6 +8334,10 @@ export const workflowTriggerEvents = pgTable(
       table.eventId,
     ),
     triggerCreatedIdx: index("workflow_trigger_events_trigger_created_idx").on(table.triggerId, table.createdAt),
+    // 0350: индекс под SET NULL при удалении чата; частичный — событий без chat_id большинство.
+    chatIdx: index("workflow_trigger_events_chat_idx")
+      .on(table.chatId)
+      .where(sql`${table.chatId} IS NOT NULL`),
   }),
 );
 
