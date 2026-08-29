@@ -2295,11 +2295,17 @@ export const knowledgeDocuments = pgTable(
     versionTag: text("version_tag"),
     crawledAt: timestamp("crawled_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
+    // 0352 (Ц5 публичного API): ключ документа в системе интегратора. Синхронизация ведётся
+    // по нему без таблицы соответствий на стороне вызывающего; уникален в пределах базы.
+    externalId: varchar("external_id", { length: 255 }),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
     nodeUnique: uniqueIndex("knowledge_documents_node_id_key").on(table.nodeId),
+    externalIdPerBaseUnique: uniqueIndex("knowledge_documents_base_external_id_uq")
+      .on(table.baseId, table.externalId)
+      .where(sql`${table.externalId} IS NOT NULL`),
     currentRevisionIdx: index("knowledge_documents_current_revision_idx").on(
       table.currentRevisionId,
     ),
