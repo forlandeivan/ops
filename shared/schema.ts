@@ -6854,6 +6854,17 @@ export const workflowDefinitions = pgTable(
     systemTemplateKey: varchar("system_template_key", { length: 255 }),
     managedReleaseTag: varchar("managed_release_tag", { length: 255 }),
     managedByBundleVersion: varchar("managed_by_bundle_version", { length: 255 }),
+    // Провенанс сборки (Сборки v2, по образцу actions): сценарий материализован установкой
+    // сборки. originRef — логическая идентичность "build:<buildId>@workflow:main";
+    // originContentHash — sha256 поведенческого снимка версии автора; managedByBuild=true
+    // блокирует правки/публикацию у получателя (reference-режим, лок 423); locallyModified —
+    // защитный флаг на случай обхода лока (резолвер обновлений не затирает такие копии).
+    originRef: varchar("origin_ref", { length: 255 }),
+    originContentHash: varchar("origin_content_hash", { length: 128 }),
+    sourceBuildId: varchar("source_build_id", { length: 255 }),
+    sourceBuildVersion: varchar("source_build_version", { length: 100 }),
+    managedByBuild: boolean("managed_by_build").notNull().default(false),
+    locallyModified: boolean("locally_modified").notNull().default(false),
     archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -6872,6 +6883,10 @@ export const workflowDefinitions = pgTable(
     ),
     publishedVersionIdx: index("workflow_definitions_published_version_idx").on(table.currentPublishedVersionId),
     systemTemplateKeyUniqueIdx: uniqueIndex("workflow_definitions_system_template_key_uq").on(table.systemTemplateKey),
+    // Частичный индекс идентичности managed-сценариев: lookup резолвера сборок по (workspace, originRef).
+    originRefIdx: index("workflow_definitions_origin_ref_idx")
+      .on(table.workspaceId, table.originRef)
+      .where(sql`origin_ref IS NOT NULL`),
   }),
 );
 
