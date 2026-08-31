@@ -46,6 +46,13 @@ export interface RetentionStore {
   countMatches(params: CountMatchesParams): Promise<number>;
   deleteBatch(params: DeleteBatchParams): Promise<number>;
   stripBatch(params: StripBatchParams): Promise<number>;
+  /**
+   * Фаза A двухфазного purge (target.drainChildrenFirst): один стейтмент дренажа —
+   * удаляет до batchSize ДОЧЕРНИХ строк (chat_sessions) у корней-кандидатов, чтобы
+   * объём работы каждого стейтмента был ограничен независимо от размера корня.
+   * Возвращает число удалённых дочерних строк.
+   */
+  drainChildrenBatch?(params: DeleteBatchParams): Promise<number>;
 }
 
 export interface ResolvedRetention {
@@ -68,6 +75,8 @@ export interface RetentionResult {
   matched: number;
   deleted: number;
   batches: number;
+  /** Дочерние строки (чаты), удалённые дренажными стейтментами фазы A; в deleted не входят. */
+  drainedChildren: number;
   /** Прогон прерван shouldAbort до исчерпания кандидатов (хвост доберёт следующий тик). */
   aborted: boolean;
 }
@@ -84,6 +93,13 @@ function delay(ms: number): Promise<void> {
  * Прогон одной retention-задачи. В dry_run только считает кандидатов и НИЧЕГО не
  * меняет. В enforce удаляет/обнуляет батчами по первичному ключу до исчерпания или
  * до maxBatchesPerRun (ограничивает один прогон, чтобы не держать БД долго).
+ *
+ * Для целей с drainChildrenFirst (двухфазный purge) прогон начинается с фазы A:
+ * дренажные стейтменты удаляют дочерние chat_sessions кандидатов порциями по
+ * batchSize ЧАТОВ, и только когда дренаж исчерпан, фаза B удаляет сами корни
+ * порциями по batchSize КОРНЕЙ. Каждый стейтмент обеих фаз — отдельный батч
+ * (maxBatchesPerRun, pauseBetweenBatchesMs и shouldAbort действуют между ними);
+ * прерванный прогон оставляет консистентное состояние — хвост доберёт следующий тик.
  */
 export async function runRetentionTask(
   target: JanitorOperation,
@@ -107,46 +123,69 @@ export async function runRetentionTask(
       equalsFilter,
       cap: dryRunCap,
     });
-    return { matched, deleted: 0, batches: 0, aborted: false };
+    return { matched, deleted: 0, batches: 0, drainedChildren: 0, aborted: false };
   }
 
   let deleted = 0;
+  let drainedChildren = 0;
   let batches = 0;
   let aborted = false;
+  // Фаза A активна, пока дренажные стейтменты возвращают полный батч; неполный
+  // батч означает «дренировать больше нечего» — переключаемся на фазу B (корни).
+  let draining =
+    resolved.action === "delete_rows" &&
+    target.drainChildrenFirst === true &&
+    typeof store.drainChildrenBatch === "function";
   while (batches < maxBatches) {
     if (options.shouldAbort?.()) {
       aborted = true;
       break;
     }
-    const affected =
-      resolved.action === "delete_rows"
-        ? await store.deleteBatch({
-            table: target.table,
-            timeColumn: target.timeColumn,
-            pkColumn: target.pkColumn,
-            cutoff,
-            equalsFilter,
-            batchSize: resolved.batchSize,
-          })
-        : await store.stripBatch({
-            table: target.table,
-            timeColumn: target.timeColumn,
-            pkColumn: target.pkColumn,
-            columns: target.strippedColumns,
-            cutoff,
-            equalsFilter,
-            batchSize: resolved.batchSize,
-          });
-    deleted += affected;
-    batches += 1;
-    if (affected < resolved.batchSize) {
-      break;
+    if (draining && store.drainChildrenBatch) {
+      const drained = await store.drainChildrenBatch({
+        table: target.table,
+        timeColumn: target.timeColumn,
+        pkColumn: target.pkColumn,
+        cutoff,
+        equalsFilter,
+        batchSize: resolved.batchSize,
+      });
+      drainedChildren += drained;
+      batches += 1;
+      if (drained < resolved.batchSize) {
+        draining = false;
+      }
+    } else {
+      const affected =
+        resolved.action === "delete_rows"
+          ? await store.deleteBatch({
+              table: target.table,
+              timeColumn: target.timeColumn,
+              pkColumn: target.pkColumn,
+              cutoff,
+              equalsFilter,
+              batchSize: resolved.batchSize,
+            })
+          : await store.stripBatch({
+              table: target.table,
+              timeColumn: target.timeColumn,
+              pkColumn: target.pkColumn,
+              columns: target.strippedColumns,
+              cutoff,
+              equalsFilter,
+              batchSize: resolved.batchSize,
+            });
+      deleted += affected;
+      batches += 1;
+      if (affected < resolved.batchSize) {
+        break;
+      }
     }
     if (options.pauseBetweenBatchesMs && options.pauseBetweenBatchesMs > 0) {
       await delay(options.pauseBetweenBatchesMs);
     }
   }
-  return { matched: deleted, deleted, batches, aborted };
+  return { matched: deleted, deleted, batches, drainedChildren, aborted };
 }
 
 type RetentionExecutor = { execute(query: SQL): Promise<unknown> };
@@ -242,37 +281,12 @@ async function countCascadeSafeRoots(
 }
 
 /**
- * `chat_sessions` и `assistants` каскадят chat_attachments. Один data-modifying
- * CTE сначала фиксирует immutable snapshots в durable-очереди и только затем
- * удаляет корневые строки. Любая ошибка откатывает и enqueue, и DELETE.
+ * Общий хвост cascade-safe стейтментов: snapshots вложений кандидатов (+ адрес
+ * Files-копии) и атомарный enqueue в durable file-cleanup очередь. Барьер
+ * enqueue_barrier заставляет DELETE дождаться фиксации snapshots в том же CTE.
  */
-async function deleteCascadeSafeRoots(
-  database: RetentionExecutor,
-  params: DeleteBatchParams & { table: CascadeCleanupRoot },
-): Promise<number> {
-  const tableId = sql.identifier(params.table);
-  const timeId = sql.identifier(params.timeColumn);
-  const pkId = sql.identifier(params.pkColumn);
-  const equals = cascadeRootEqualsFragment(params.equalsFilter);
-  const noActiveAsr = rootHasNoActiveAsr(params.table);
-  const reason = params.table === "chat_sessions" ? "pg.chat_sessions" : "pg.assistants.archived";
-  const attachmentSource = params.table === "chat_sessions"
-    ? sql`chat_attachments AS attachment
-          JOIN candidates ON candidates.id = attachment.chat_id`
-    : sql`chat_attachments AS attachment
-          JOIN chat_sessions AS session ON session.id = attachment.chat_id
-          JOIN candidates ON candidates.id = session.assistant_id`;
-
-  const query = sql`
-    WITH candidates AS MATERIALIZED (
-      SELECT root.${pkId} AS id
-      FROM ${tableId} AS root
-      WHERE root.${timeId} < ${params.cutoff}${equals}
-        AND ${noActiveAsr}
-      ORDER BY root.${timeId}, root.${pkId}
-      FOR UPDATE OF root SKIP LOCKED
-      LIMIT ${params.batchSize}
-    ), snapshots AS MATERIALIZED (
+function attachmentCleanupCtes(attachmentSource: SQL, reason: string): SQL {
+  return sql`snapshots AS MATERIALIZED (
       SELECT
         attachment.id,
         attachment.workspace_id,
@@ -331,11 +345,97 @@ async function deleteCascadeSafeRoots(
       RETURNING id
     ), enqueue_barrier AS (
       SELECT count(*) AS inserted FROM enqueued
-    ), deleted AS (
+    )`;
+}
+
+/**
+ * `chat_sessions` и `assistants` каскадят chat_attachments. Один data-modifying
+ * CTE сначала фиксирует immutable snapshots в durable-очереди и только затем
+ * удаляет корневые строки. Любая ошибка откатывает и enqueue, и DELETE.
+ *
+ * Для `assistants` это фаза B двухфазного purge: удаляются только кандидаты,
+ * у которых уже НЕ осталось chat_sessions (их порциями снесла фаза A —
+ * drainAssistantChatSessions), поэтому snapshots здесь заведомо пустые, а каскад
+ * ограничен мелкими конфиг-таблицами самого ассистента.
+ */
+async function deleteCascadeSafeRoots(
+  database: RetentionExecutor,
+  params: DeleteBatchParams & { table: CascadeCleanupRoot },
+): Promise<number> {
+  const tableId = sql.identifier(params.table);
+  const timeId = sql.identifier(params.timeColumn);
+  const pkId = sql.identifier(params.pkColumn);
+  const equals = cascadeRootEqualsFragment(params.equalsFilter);
+  const noActiveAsr = rootHasNoActiveAsr(params.table);
+  const reason = params.table === "chat_sessions" ? "pg.chat_sessions" : "pg.assistants.archived";
+  const noRemainingChildren = params.table === "assistants"
+    ? sql`
+        AND NOT EXISTS (
+          SELECT 1 FROM chat_sessions AS child
+          WHERE child.assistant_id = root.id
+        )`
+    : sql``;
+  const attachmentSource = params.table === "chat_sessions"
+    ? sql`chat_attachments AS attachment
+          JOIN candidates ON candidates.id = attachment.chat_id`
+    : sql`chat_attachments AS attachment
+          JOIN chat_sessions AS session ON session.id = attachment.chat_id
+          JOIN candidates ON candidates.id = session.assistant_id`;
+
+  const query = sql`
+    WITH candidates AS MATERIALIZED (
+      SELECT root.${pkId} AS id
+      FROM ${tableId} AS root
+      WHERE root.${timeId} < ${params.cutoff}${equals}
+        AND ${noActiveAsr}${noRemainingChildren}
+      ORDER BY root.${timeId}, root.${pkId}
+      FOR UPDATE OF root SKIP LOCKED
+      LIMIT ${params.batchSize}
+    ), ${attachmentCleanupCtes(attachmentSource, reason)}, deleted AS (
       DELETE FROM ${tableId} AS root
       USING candidates, enqueue_barrier
       WHERE root.${pkId} = candidates.id
       RETURNING root.${pkId}
+    )
+    SELECT count(*)::int AS affected FROM deleted
+  `;
+  return firstAffected(await database.execute(query));
+}
+
+/**
+ * Фаза A двухфазного purge архивных ассистентов: удаляет порцию chat_sessions
+ * кандидатов (условия кандидата те же, что в фазе B, но БЕЗ требования «чатов не
+ * осталось»; deleted_at чата не учитывается — дренируются ВСЕ его чаты). Порция
+ * считается в ЧАТАХ, поэтому объём стейтмента ограничен batchSize независимо от
+ * размера ассистента. Snapshots вложений порции атомарно enqueue-ятся, как в
+ * политике pg.chat_sessions; idempotency_key делает повтор после отката безопасным.
+ */
+async function drainAssistantChatSessions(
+  database: RetentionExecutor,
+  params: DeleteBatchParams,
+): Promise<number> {
+  const timeId = sql.identifier(params.timeColumn);
+  const pkId = sql.identifier(params.pkColumn);
+  const equals = cascadeRootEqualsFragment(params.equalsFilter);
+  const noActiveAsr = rootHasNoActiveAsr("assistants");
+  const attachmentSource = sql`chat_attachments AS attachment
+          JOIN candidates ON candidates.id = attachment.chat_id`;
+
+  const query = sql`
+    WITH candidates AS MATERIALIZED (
+      SELECT chat.id AS id
+      FROM chat_sessions AS chat
+      JOIN assistants AS root ON root.id = chat.assistant_id
+      WHERE root.${timeId} < ${params.cutoff}${equals}
+        AND ${noActiveAsr}
+      ORDER BY root.${timeId}, root.${pkId}, chat.id
+      FOR UPDATE OF chat, root SKIP LOCKED
+      LIMIT ${params.batchSize}
+    ), ${attachmentCleanupCtes(attachmentSource, "pg.assistants.archived")}, deleted AS (
+      DELETE FROM chat_sessions AS chat
+      USING candidates, enqueue_barrier
+      WHERE chat.id = candidates.id
+      RETURNING chat.id
     )
     SELECT count(*)::int AS affected FROM deleted
   `;
@@ -377,6 +477,20 @@ export function createPgRetentionStore(
           : sql``;
       const query = sql`SELECT count(*)::int AS count FROM (SELECT 1 FROM ${tableId} WHERE ${timeId} < ${cutoff}${equals}${nonNull} LIMIT ${cap}) AS sub`;
       return firstCount(await database.execute(query));
+    },
+
+    async drainChildrenBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize }) {
+      if (table !== "assistants") {
+        throw new Error(`pg retention: drainChildrenBatch поддерживает только assistants, получена таблица "${table}"`);
+      }
+      return drainAssistantChatSessions(database, {
+        table,
+        timeColumn,
+        pkColumn,
+        cutoff,
+        equalsFilter,
+        batchSize,
+      });
     },
 
     async deleteBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize }) {

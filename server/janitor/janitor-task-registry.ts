@@ -24,6 +24,13 @@ export interface JanitorOperation {
   strippedColumns: string[];
   /** Доп. условие равенства (напр. source='autosave'); иначе null. */
   equalsFilter: { column: string; value: string } | null;
+  /**
+   * Двухфазный purge: перед удалением корней дренировать их дочерние chat_sessions
+   * порциями по batchSize чатов за стейтмент (фаза A), а корни удалять только когда
+   * чатов не осталось (фаза B, batchSize = корней за стейтмент). Ограничивает объём
+   * каждого стейтмента независимо от размера каскада одного корня.
+   */
+  drainChildrenFirst?: boolean;
 }
 
 export interface JanitorTaskDefinition {
@@ -50,6 +57,8 @@ export interface JanitorTaskDefinition {
   sensitive: boolean;
   /** Заметка о каскадных удалениях по FK, если применимо. */
   cascadeNote: string | null;
+  /** См. JanitorOperation.drainChildrenFirst (двухфазный purge основной операции). */
+  drainChildrenFirst?: boolean;
   /**
    * Хранилище-владелец данных: PostgreSQL (по умолчанию), объектное (S3/MinIO) или
    * векторное (Qdrant). Для "s3" оркестратор использует S3-исполнитель (tasks/s3-retention-task),
@@ -106,6 +115,7 @@ export function operationsOf(task: JanitorTaskDefinition): JanitorOperation[] {
     action: task.action,
     strippedColumns: task.strippedColumns,
     equalsFilter: task.equalsFilter,
+    drainChildrenFirst: task.drainChildrenFirst,
   };
   return [primary, ...task.extraOperations];
 }
@@ -610,19 +620,20 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     key: "pg.assistants.archived",
     label: "Архивные ассистенты (physical purge)",
     description:
-      "Физически удаляет ассистентов из архива (status='archived') старше срока хранения. Активные и системные ассистенты не трогаются. Перед каскадом вложения всех чатов атомарно ставятся в durable file-cleanup очередь; ассистент с активной ASR откладывается. Выключена по умолчанию.",
+      "Физически удаляет ассистентов из архива (status='archived') старше срока хранения — в два шага: сначала чаты кандидата дренируются порциями (вложения каждой порции атомарно ставятся в durable file-cleanup очередь), затем удаляется сам ассистент, когда чатов не осталось. Активные и системные ассистенты не трогаются; ассистент с активной ASR откладывается. Выключена по умолчанию.",
     category: "assistants",
     action: "delete_rows",
     table: "assistants",
     timeColumn: "updated_at",
     equalsFilter: { column: "status", value: "archived" },
+    drainChildrenFirst: true,
     defaultEnabled: false,
     defaultRetentionDays: 90,
     defaultBatchSize: 50,
     intervalMinutes: 1440,
     sensitive: true,
     cascadeNote:
-      "Каскадно удаляет ВСЕ данные ассистента. Chat-вложения сначала фиксируются в durable cleanup-очереди; активная ASR блокирует purge кандидата. Коллекция Qdrant остаётся до профильного GC. Действие необратимо.",
+      "Двухфазный purge: сначала порциями удаляются ВСЕ чаты ассистента (размер батча = чатов за стейтмент; их вложения фиксируются в durable cleanup-очереди), затем каскадно удаляется сам ассистент, оставшийся без чатов (размер батча = ассистентов за стейтмент). Активная ASR блокирует purge кандидата. Коллекция Qdrant остаётся до профильного GC. Действие необратимо.",
   }),
   task({
     key: "pg.chat_sessions",

@@ -148,6 +148,8 @@ export async function runPolicy(
   let matched = 0;
   let deleted = 0;
   let freedBytes = 0;
+  // Чаты, удалённые дренажной фазой двухфазного purge; в deleted (корни) не входят.
+  let drainedChats = 0;
   let aborted = false;
 
   try {
@@ -222,6 +224,7 @@ export async function runPolicy(
         );
         matched += result.matched;
         deleted += result.deleted;
+        drainedChats += result.drainedChildren;
         aborted = aborted || result.aborted;
       }
     }
@@ -286,6 +289,7 @@ export async function runPolicy(
       status,
       matched,
       deleted,
+      drained_chats: drainedChats,
       freed_bytes: freedBytes,
       duration_ms: durationMs,
     },
