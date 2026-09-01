@@ -4367,6 +4367,16 @@ export type PackageBuilderStage = (typeof packageBuilderStageValues)[number];
 export const chatOutputChannels = ["web", "external"] as const;
 export type ChatOutputChannel = (typeof chatOutputChannels)[number];
 
+/**
+ * Откуда взялся чат.
+ *
+ * `public_api` — служебный контейнер, заведённый вызовом публичного API: прогоном сценария,
+ * запуском действия или расшифровкой. Человек его не создавал и в своём списке видеть не
+ * должен — иначе каждый вызов интегратора засоряет ленту заказчика. Отсутствие поля
+ * означает обычный пользовательский чат.
+ */
+export const CHAT_SESSION_ORIGIN_PUBLIC_API = "public_api" as const;
+
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
   activeDraftId?: string;
@@ -4375,6 +4385,8 @@ export type ChatSessionMetadata = {
   /** Явно выбранная пользователем модель этого чата (models.id).
    * null/отсутствует = «По умолчанию» — следует за моделью ассистента/политикой. */
   selectedLlmModelId?: string | null;
+  /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API;
   [key: string]: unknown;
 };
 
