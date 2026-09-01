@@ -363,6 +363,35 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     equalsFilter: { column: "source", value: "autosave" },
   }),
 
+  // ── Публичный API ─────────────────────────────────────────────────────────
+  // Реестр заданий и ключи повтора росли бессрочно: ни одна политика на эти таблицы
+  // не ссылалась. У интегратора с постоянной нагрузкой рост линейный и ничем не
+  // ограниченный, а в ключах лежат ещё и сохранённые тела ответов.
+  task({
+    key: "pg.public_api_jobs",
+    label: "Задания публичного API (public_api_jobs)",
+    description:
+      "Удаляет записи реестра заданий публичного API старше срока хранения. Задание нужно вызывающему, пока он опрашивает его состояние; дальше это след вызова.",
+    category: "logs",
+    action: "delete_rows",
+    table: "public_api_jobs",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+  }),
+  task({
+    key: "pg.public_api_idempotency_keys",
+    label: "Ключи идемпотентности публичного API (public_api_idempotency_keys)",
+    description:
+      "Удаляет истёкшие ключи повтора вместе с сохранёнными телами ответов — отбор по сроку годности, старше N дней после истечения.",
+    category: "tokens",
+    action: "delete_rows",
+    table: "public_api_idempotency_keys",
+    timeColumn: "expires_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 7,
+  }),
+
   // ── Токены / сессии (отбор по сроку годности) ──────────────────────────────
   task({
     key: "pg.expired_tokens_sessions",
