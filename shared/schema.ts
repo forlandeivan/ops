@@ -949,6 +949,9 @@ export const publicApiJobs = pgTable(
       table.createdAt,
     ),
     kindSourceIdx: uniqueIndex("public_api_jobs_kind_source_idx").on(table.kind, table.sourceId),
+    // 0355: уборка janitor отбирает кандидатов по одному created_at, без пространства, и
+    // составной индекс её не обслуживает — ведущая колонка там workspace_id.
+    createdAtIdx: index("public_api_jobs_created_at_idx").on(table.createdAt),
   }),
 );
 
@@ -1346,6 +1349,37 @@ export const fileUploadLimits = pgTable("file_upload_limits", {
 });
 export type FileUploadLimits = typeof fileUploadLimits.$inferSelect;
 export type FileUploadLimitsInsert = typeof fileUploadLimits.$inferInsert;
+
+/**
+ * Политики публичного API (0354): потолки, которыми администратор защищает экземпляр от
+ * того, чтобы его положили неаккуратным обращением к `/api/public/v1`.
+ *
+ * Одна строка на установку, все колонки nullable: `NULL` = «админ не переопределял», берётся
+ * код-дефолт из `shared/public-api-policies.ts`. Ноль в числовой ручке — «ограничение
+ * выключено», а не «запретить всё».
+ */
+export const publicApiPolicies = pgTable("public_api_policies", {
+  id: varchar("id").primaryKey().default("public_api_policies_singleton"),
+  // Параллельные операции
+  expensiveConcurrencyPerUser: integer("expensive_concurrency_per_user"),
+  expensiveConcurrencyPerWorkspace: integer("expensive_concurrency_per_workspace"),
+  eventStreamsPerUser: integer("event_streams_per_user"),
+  // Загрузка файлов
+  fileUploadsPerMinutePerUser: integer("file_uploads_per_minute_per_user"),
+  fileUploadConcurrencyPerWorkspace: integer("file_upload_concurrency_per_workspace"),
+  fileUploadConcurrencyTotal: integer("file_upload_concurrency_total"),
+  fileUploadBufferCeilingMb: integer("file_upload_buffer_ceiling_mb"),
+  // Суточная квота
+  dailyRequestsPerWorkspace: integer("daily_requests_per_workspace"),
+  dailyRequestsPerUser: integer("daily_requests_per_user"),
+  // Режим наблюдения: потолки считаются и попадают в метрику, но не отказывают.
+  observationMode: boolean("observation_mode").notNull().default(false),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type PublicApiPolicies = typeof publicApiPolicies.$inferSelect;
+export type PublicApiPoliciesInsert = typeof publicApiPolicies.$inferInsert;
 
 export const indexingArenaRuns = pgTable(
   "indexing_arena_runs",
