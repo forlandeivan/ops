@@ -380,6 +380,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 90,
   }),
   task({
+    key: "pg.public_api_usage_day",
+    label: "Учёт активности публичного API (public_api_usage_day)",
+    description:
+      "Удаляет суточные вёдра учёта вызовов публичного API старше срока хранения. Год с запасом закрывает вопрос «кто ходил прошлой осенью»; дальше это балласт, восстановить его неоткуда и незачем.",
+    category: "logs",
+    action: "delete_rows",
+    table: "public_api_usage_day",
+    timeColumn: "day",
+    defaultEnabled: true,
+    defaultRetentionDays: 400,
+  }),
+  task({
     key: "pg.public_api_idempotency_keys",
     label: "Ключи идемпотентности публичного API (public_api_idempotency_keys)",
     description:

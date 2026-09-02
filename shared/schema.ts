@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { PublicJobKind, PublicJobStatus } from "./public-api-jobs";
+import type { PublicApiUsageOutcome } from "./public-api-usage";
 import {
   pgTable,
   text,
@@ -1380,6 +1381,60 @@ export const publicApiPolicies = pgTable("public_api_policies", {
 });
 export type PublicApiPolicies = typeof publicApiPolicies.$inferSelect;
 export type PublicApiPoliciesInsert = typeof publicApiPolicies.$inferInsert;
+
+/**
+ * Суточный учёт вызовов публичного API.
+ *
+ * Ведро — «сутки × пространство × токен × маршрут × исход». Ключ включает токен, а не
+ * только пользователя: администратора интересует не человек, а интеграция, и у одного
+ * человека их бывает несколько. Пользователь хранится рядом отдельной колонкой, потому
+ * что токен его однозначно определяет, а сводка по людям не должна ходить в join.
+ *
+ * Ссылки на токен намеренно нет. Строка описывает случившийся факт, а не действующую
+ * запись: отзыв или удаление токена не должны стирать историю его обращений — это
+ * ровно та история, ради которой таблица заведена. Пространство и пользователь
+ * ссылаются как во всех остальных суточных агрегатах: их удаление обесценивает срез.
+ *
+ * Суррогатный `id` нужен уборщику: он отбирает кандидатов пачками по одной колонке
+ * первичного ключа, и составной ключ его контракт не обслуживает. Настоящая
+ * уникальность держится отдельным индексом — он же цель `ON CONFLICT`.
+ */
+export const publicApiUsageDay = pgTable(
+  "public_api_usage_day",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    day: date("day").notNull(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenId: varchar("token_id").notNull(),
+    route: text("route").notNull(),
+    outcome: text("outcome").$type<PublicApiUsageOutcome>().notNull(),
+    calls: integer("calls").notNull().default(0),
+    // Сумма, а не среднее: средние по вёдрам нельзя складывать, суммы можно.
+    durationMsTotal: bigint("duration_ms_total", { mode: "number" }).notNull().default(0),
+    lastCalledAt: timestamp("last_called_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    bucketIdx: uniqueIndex("public_api_usage_day_bucket_idx").on(
+      table.day,
+      table.workspaceId,
+      table.tokenId,
+      table.route,
+      table.outcome,
+    ),
+    dayIdx: index("public_api_usage_day_day_idx").on(table.day),
+    workspaceDayIdx: index("public_api_usage_day_workspace_day_idx").on(table.workspaceId, table.day),
+    tokenDayIdx: index("public_api_usage_day_token_day_idx").on(table.tokenId, table.day),
+  }),
+);
+export type PublicApiUsageDayRow = typeof publicApiUsageDay.$inferSelect;
+export type PublicApiUsageDayInsert = typeof publicApiUsageDay.$inferInsert;
 
 export const indexingArenaRuns = pgTable(
   "indexing_arena_runs",
