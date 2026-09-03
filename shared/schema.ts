@@ -1654,7 +1654,7 @@ export type KnowledgeUploadSourceKind = (typeof knowledgeUploadSourceKinds)[numb
  * и для постоянных файлов ассистента. Имя сохраняем ради rolling compatibility;
  * целевой домен задаётся явной парой scope + ссылкой на ровно один агрегат.
  */
-export type KnowledgeUploadSessionScope = Extract<IngestScope, "kb" | "assistant">;
+export type KnowledgeUploadSessionScope = Extract<IngestScope, "kb" | "assistant" | "chat">;
 
 export const knowledgeUploadSessionStatuses = [
   "pending",
@@ -1721,6 +1721,8 @@ export const knowledgeUploadSessions = pgTable(
     baseId: varchar("base_id")
       .references(() => knowledgeBases.id, { onDelete: "cascade" }),
     assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    // Назначение "chat" (0358): медиа чата грузится тем же транспортом частями.
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
     parentId: varchar("parent_id"),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     clientSessionKey: text("client_session_key").notNull(),
@@ -1753,6 +1755,13 @@ export const knowledgeUploadSessions = pgTable(
     assistantIdx: index("knowledge_upload_sessions_assistant_idx")
       .on(table.assistantId)
       .where(sql`${table.assistantId} IS NOT NULL`),
+    // 0358: то же для каскада удаления чата.
+    chatIdx: index("knowledge_upload_sessions_chat_idx")
+      .on(table.chatId)
+      .where(sql`${table.chatId} IS NOT NULL`),
+    workspaceChatIdx: index("knowledge_upload_sessions_workspace_chat_idx")
+      .on(table.workspaceId, table.chatId, table.updatedAt)
+      .where(sql`${table.chatId} IS NOT NULL`),
     clientSessionIdx: index("knowledge_upload_sessions_client_session_idx").on(
       table.workspaceId,
       table.clientSessionKey,
@@ -1760,10 +1769,15 @@ export const knowledgeUploadSessions = pgTable(
     assistantClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_assistant_client_session_unique_idx")
       .on(table.workspaceId, table.assistantId, table.clientSessionKey)
       .where(sql`${table.scope} = 'assistant'`),
+    // 0358: та же идемпотентность создания сессии, что у ассистента, — по чату.
+    chatClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_chat_client_session_unique_idx")
+      .on(table.workspaceId, table.chatId, table.clientSessionKey)
+      .where(sql`${table.scope} = 'chat'`),
     targetCheck: check(
       "knowledge_upload_sessions_target_check",
-      sql`(${table.scope} = 'kb' AND ${table.baseId} IS NOT NULL AND ${table.assistantId} IS NULL)
-          OR (${table.scope} = 'assistant' AND ${table.baseId} IS NULL AND ${table.assistantId} IS NOT NULL)`,
+      sql`(${table.scope} = 'kb' AND ${table.baseId} IS NOT NULL AND ${table.assistantId} IS NULL AND ${table.chatId} IS NULL)
+          OR (${table.scope} = 'assistant' AND ${table.baseId} IS NULL AND ${table.assistantId} IS NOT NULL AND ${table.chatId} IS NULL)
+          OR (${table.scope} = 'chat' AND ${table.baseId} IS NULL AND ${table.chatId} IS NOT NULL)`,
     ),
   }),
 );
