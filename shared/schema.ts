@@ -133,6 +133,7 @@ import type {
   PlatformFeatureKey,
 } from "./feature-access";
 import type { KnowledgeBaseIndexingOverride } from "./knowledge-base-indexing";
+import type { ChatRequestMode } from "./chat-mode";
 import type {
   ChatFeedbackKind,
   ChatFeedbackReasonCode,
@@ -180,7 +181,9 @@ export const users = pgTable("users", {
   yandexEmailVerified: boolean("yandex_email_verified").notNull().default(false),
   avatarKey: text("avatar_key"),
   avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
-});
+}, (table) => ({
+  createdAtIdx: index("users_created_at_idx").on(table.createdAt),
+}));
 
 export const docsArticleProgress = pgTable(
   "docs_article_progress",
@@ -453,11 +456,23 @@ export const workspaces = pgTable("workspaces", {
   defaultFileStorageProviderId: varchar("default_file_storage_provider_id").references(() => fileStorageProviders.id, {
     onDelete: "set null",
   }),
+  /**
+   * Служебное пространство инстанса «Системные базы знаний» (0361): одно на инсталляцию (partial
+   * unique index). Его базы — системные: их создаёт и ведёт администратор платформы классическим
+   * экраном «Базы знаний», читает вся инсталляция через Уника AI (волна С2). Видно только
+   * администраторам, не выбирается активным по умолчанию, не удаляется обычными путями.
+   * Резолв — server/system-knowledge/system-workspace-lookup.ts.
+   */
+  isSystem: boolean("is_system").notNull().default(false),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (table) => ({
+    createdAtIdx: index("workspaces_created_at_idx").on(table.createdAt),
   // 0261: hot WHERE owner_id=$1 (листинг/счётчики пространств владельца, ACL break-glass) + FK→users CASCADE.
   ownerIdx: index("workspaces_owner_id_idx").on(table.ownerId),
+  singleSystemIdx: uniqueIndex("workspaces_single_system_idx")
+    .on(table.isSystem)
+    .where(sql`${table.isSystem}`),
 }));
 
 export const workspaceMemberRoles = ["owner", "manager", "user"] as const;
@@ -565,6 +580,19 @@ export const adminAnalyticsEntityTypes = [
   "transcript",
 ] as const;
 export type AdminAnalyticsEntityType = (typeof adminAnalyticsEntityTypes)[number];
+
+/**
+ * Сутки, для которых ролл-апы действительно построены.
+ *
+ * Отдельная таблица, а не пара границ в `admin_analytics_rollup_state`: границы описывают
+ * отрезок, а реальное покрытие — множество. Пересобрали январь, потом свежую неделю — между
+ * ними дыра, которую отрезок «январь…сегодня» скрывает, и экран отдаёт по этим дням нули,
+ * не пытаясь их досчитать.
+ */
+export const adminAnalyticsRollupDay = pgTable("admin_analytics_rollup_day", {
+  day: date("day").primaryKey(),
+  builtAt: timestamp("built_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+});
 
 export const adminAnalyticsRollupState = pgTable(
   "admin_analytics_rollup_state",
@@ -829,6 +857,7 @@ export const workspaceAsrUsageLedger = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    occurredAtIdx: index("workspace_asr_usage_ledger_occurred_at_idx").on(table.occurredAt),
     uniqueJob: uniqueIndex("workspace_asr_usage_ledger_job_idx").on(table.workspaceId, table.asrJobId),
     periodIdx: index("workspace_asr_usage_ledger_period_idx").on(table.workspaceId, table.periodCode),
     occurredIdx: index("workspace_asr_usage_ledger_occurred_idx").on(table.workspaceId, table.occurredAt),
@@ -1214,6 +1243,14 @@ export const searchProfiles = pgTable(
     rerankModel: text("rerank_model"),
     rerankPrompt: text("rerank_prompt"),
     rerankCandidateCount: integer("rerank_candidate_count").notNull().default(12),
+    // Выбор баз знаний под вопрос («RAG перед RAG», docs/system-knowledge-catalog-routing-strategy-2026-09.md §5.3):
+    // единственный переключатель и потолки стадии kb_routing; число тематических центров портрета читает
+    // сборщик портретов. Значения по умолчанию — рабочие для инсталляции.
+    routingEnabled: boolean("routing_enabled").notNull().default(true),
+    routingCandidates: integer("routing_candidates").notNull().default(15),
+    routingMaxBases: integer("routing_max_bases").notNull().default(8),
+    routingFallbackMaxBases: integer("routing_fallback_max_bases").notNull().default(20),
+    routingCentroidsPerBase: integer("routing_centroids_per_base").notNull().default(16),
     createdByAdminId: varchar("created_by_admin_id").references(() => users.id, { onDelete: "set null" }),
     updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -2137,6 +2174,68 @@ export const knowledgeBaseIndexState = pgTable(
 export type KnowledgeBaseIndexStateRecord = typeof knowledgeBaseIndexState.$inferSelect;
 export type KnowledgeBaseIndexStateInsert = typeof knowledgeBaseIndexState.$inferInsert;
 
+/**
+ * Статусы портрета базы знаний: `pending` — ждёт сборки (новая база, событие изменения, сев
+ * миграции), `ready` — портрет построен, `error` — сборка упала (повтор по `next_attempt_at`),
+ * `empty` — в базе нет проиндексированных документов, портрет появится по событию индексации.
+ */
+export const knowledgeBaseCardStatuses = ["pending", "ready", "error", "empty"] as const;
+export type KnowledgeBaseCardStatus = (typeof knowledgeBaseCardStatuses)[number];
+
+/**
+ * Портрет базы знаний («RAG перед RAG», docs/system-knowledge-catalog-routing-strategy-2026-09.md §5.2):
+ * описание моделью по содержимому (summary/answers/not_included/also_known_as/topics), текст для
+ * эмбеддинга и учёт тематических центров, лежащих точками в коллекции каталога Qdrant
+ * `ws_<ws>__proj_kbcard__coll_<provider>_d<dim>`. 1:1 к базе, для любой базы без порогов. Строка
+ * создаётся вместе с базой (`pending`), события изменения базы возвращают её в `pending`, воркер
+ * `kb-card-refresh` читает только эту очередь. Каскад: база удалена → карточка удалена.
+ */
+export const knowledgeBaseCards = pgTable(
+  "knowledge_base_cards",
+  {
+    baseId: varchar("base_id")
+      .primaryKey()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    summary: text("summary").notNull().default(""),
+    answers: text("answers").notNull().default(""),
+    notIncluded: text("not_included").notNull().default(""),
+    alsoKnownAs: text("also_known_as").array().notNull().default(sql`'{}'::text[]`),
+    topics: text("topics").array().notNull().default(sql`'{}'::text[]`),
+    cardText: text("card_text").notNull().default(""),
+    cardVectorId: text("card_vector_id"),
+    centroidCount: integer("centroid_count").notNull().default(0),
+    embeddingProviderId: varchar("embedding_provider_id", { length: 255 }),
+    embeddingModel: text("embedding_model"),
+    contentFingerprint: text("content_fingerprint"),
+    computedAt: timestamp("computed_at"),
+    computedStatus: text("computed_status").$type<KnowledgeBaseCardStatus>().notNull().default("pending"),
+    pendingReason: text("pending_reason"),
+    errorMessage: text("error_message"),
+    cardVersion: integer("card_version").notNull().default(0),
+    modelId: varchar("model_id", { length: 255 }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at"),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    // Очередь воркера: только строки, ждущие сборки.
+    pendingIdx: index("knowledge_base_cards_pending_idx")
+      .on(table.updatedAt)
+      .where(sql`${table.computedStatus} = 'pending'`),
+    // Повтор после ошибки — по наступлению next_attempt_at.
+    errorRetryIdx: index("knowledge_base_cards_error_retry_idx")
+      .on(table.nextAttemptAt)
+      .where(sql`${table.computedStatus} = 'error'`),
+    workspaceIdx: index("knowledge_base_cards_workspace_idx").on(table.workspaceId, table.computedStatus),
+  }),
+);
+export type KnowledgeBaseCardRecord = typeof knowledgeBaseCards.$inferSelect;
+export type KnowledgeBaseCardInsert = typeof knowledgeBaseCards.$inferInsert;
+
 export const indexingStages = [
   "initializing",
   "creating_collection",
@@ -2319,7 +2418,9 @@ export const knowledgeBases = pgTable("knowledge_bases", {
   indexingConfigOverride: jsonb("indexing_config_override").$type<KnowledgeBaseIndexingOverride | null>(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
-});
+}, (table) => ({
+  createdAtIdx: index("knowledge_bases_created_at_idx").on(table.createdAt),
+}));
 
 export const knowledgeNodeTypeEnum = pgEnum("knowledge_node_type", ["folder", "document"]);
 export const knowledgeNodes = pgTable(
@@ -2405,6 +2506,7 @@ export const knowledgeDocuments = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    createdAtIdx: index("knowledge_documents_created_at_idx").on(table.createdAt),
     nodeUnique: uniqueIndex("knowledge_documents_node_id_key").on(table.nodeId),
     externalIdPerBaseUnique: uniqueIndex("knowledge_documents_base_external_id_uq")
       .on(table.baseId, table.externalId)
@@ -2441,6 +2543,7 @@ export const knowledgeDocumentVersions = pgTable(
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    createdAtIdx: index("knowledge_document_versions_created_at_idx").on(table.createdAt),
     documentVersionUnique: uniqueIndex(
       "knowledge_document_versions_document_version_idx",
     ).on(table.documentId, table.versionNo),
@@ -2708,6 +2811,18 @@ export interface ImageRef {
   caption?: string;
 }
 
+/**
+ * Д-58 (миграция 0368): хранимый полнотекстовый образ чанка. PostgreSQL считает его при вставке из
+ * заголовка, первого предложения и текста функцией public.knowledge_chunk_search_vector; ранжирование
+ * и предикат `@@` читают колонку. Функции создаёт миграция; для db:push их заранее создаёт
+ * server/scripts/prepare-drizzle-push.ts.
+ */
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
+
 export const knowledgeDocumentChunkItems = pgTable(
   "knowledge_document_chunks",
   {
@@ -2743,6 +2858,16 @@ export const knowledgeDocumentChunkItems = pgTable(
     vectorId: text("vector_id"),
     vectorRecordId: text("vector_record_id"),
     imageRefs: jsonb("image_refs").$type<ImageRef[]>().default(sql`'[]'::jsonb`),
+    // Д-58 (0368): поисковый образ считается один раз при вставке; выражение — зеркало миграции.
+    searchVector: tsvector("search_vector").generatedAlwaysAs(sql`
+      public.knowledge_chunk_search_vector(
+        (CASE WHEN "metadata"->>'heading' IS NULL THEN '' ELSE "metadata"->>'heading' END) ||
+        E'\\x1F' ||
+        (CASE WHEN "metadata"->>'firstSentence' IS NULL THEN '' ELSE "metadata"->>'firstSentence' END) ||
+        E'\\x1F' ||
+        (CASE WHEN "text" IS NULL THEN '' ELSE "text" END)
+      )
+    `),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
@@ -2755,17 +2880,7 @@ export const knowledgeDocumentChunkItems = pgTable(
       table.documentId,
       table.chunkIndex,
     ),
-    textSearchIndex: index("knowledge_document_chunks_search_vector_idx").using("gin", sql`
-      (
-        public.knowledge_chunk_search_vector(
-          (CASE WHEN "metadata"->>'heading' IS NULL THEN '' ELSE "metadata"->>'heading' END) ||
-          E'\\x1F' ||
-          (CASE WHEN "metadata"->>'firstSentence' IS NULL THEN '' ELSE "metadata"->>'firstSentence' END) ||
-          E'\\x1F' ||
-          (CASE WHEN "text" IS NULL THEN '' ELSE "text" END)
-        )
-      )
-    `),
+    textSearchIndex: index("knowledge_document_chunks_search_vector_idx").using("gin", table.searchVector),
     vectorIdIndex: index("knowledge_document_chunks_vector_id_idx").on(table.vectorId),
     revisionHashOrdinalIndex: uniqueIndex("knowledge_document_chunks_revision_hash_ordinal_idx").on(
       table.documentId,
@@ -3361,6 +3476,8 @@ export const knowledgeBaseRagRequests = pgTable("knowledge_base_rag_requests", {
   knowledgeBaseId: varchar("knowledge_base_id")
     .notNull()
     .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+  /** «RAG перед RAG» (0366): весь набор баз, по которому шёл поиск; knowledge_base_id — первая из них. */
+  knowledgeBaseIds: text("knowledge_base_ids").array(),
   topK: integer("top_k"),
   bm25Weight: doublePrecision("bm25_weight"),
   bm25Limit: integer("bm25_limit"),
@@ -3696,6 +3813,25 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   agentKbPrefetchCharLimit: integer("agent_kb_prefetch_char_limit"),
   // Максимум документов, инлайнящихся в контекст.
   agentKbPrefetchMaxDocs: integer("agent_kb_prefetch_max_docs"),
+  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md,
+  // миграция 0360). Все поля NULL = «Авто» (дефолт кода, env-фолбэка нет намеренно); значение —
+  // явный админ-override. Роутер (chat_router_*): kill-switch LLM-слоя, отдельная модель (NULL =
+  // fast-path модель агента), таймаут решения и порог уверенности для эскалации в агента. Гейт
+  // честности: директивы «только с опорой на источники / источников нет — скажи прямо» и
+  // детерминированная пост-проверка чисел и цитат. ---
+  chatRouterEnabled: boolean("chat_router_enabled"),
+  chatRouterModelId: text("chat_router_model_id"),
+  chatRouterTimeoutMs: integer("chat_router_timeout_ms"),
+  // Д-57 (0367): пауза модели после транспортного сбоя, с; NULL = «Авто» (дефолт кода), 0 = выключено.
+  chatRouterCooldownSec: integer("chat_router_cooldown_sec"),
+  chatRouterAgentConfidenceThresholdPct: integer("chat_router_agent_confidence_threshold_pct"),
+  chatAnswerGroundingGateEnabled: boolean("chat_answer_grounding_gate_enabled"),
+  chatAnswerGroundingPostcheckEnabled: boolean("chat_answer_grounding_postcheck_enabled"),
+  /**
+   * Системные базы знаний (служебное пространство `workspaces.is_system`) участвуют в ответах Уники AI
+   * (0362, волна С2). NULL = «Авто» = включено, когда такие базы есть; false — явное отключение.
+   */
+  systemKnowledgeEnabled: boolean("system_knowledge_enabled"),
   // --- Блок 8, задача 8.1: Tool-RAG (поиск по инструментам), Phase A. Все поля NULL = «Авто» (env-дефолт/
   // документированный fallback), значение — явный админ-override. Сужают ВНЕШНИЙ хвост (mcpTools/actions/
   // operations) ретривалом перед показом модели; ниже порога промоции ретривал — no-op (нулевой регресс). ---
@@ -4052,23 +4188,26 @@ export type AssistantUserMenuPreferenceInsert = typeof assistantUserMenuPreferen
 
 // Action scopes, targets, placements and modes
 // ---------------------------------------------------------------------------
-// Prompts — библиотека промптов и стартовые подсказки чата (Фазы 1–2).
-// Скоупы: system — вендорский сид (редактируется только видимость),
-// instance — промпты организации (админ-консоль), workspace — промпты пространства,
-// assistant — starters конкретного ассистента (правит владелец, показываются
-// ВМЕСТО общей агрегации в пустом чате ассистента, порядок без ротации),
-// personal — личные промпты пользователя (живут внутри workspace, видны только
-// владельцу; owner_user_id заполнен ⇔ scope=personal, уходят вместе с пользователем).
-// Скоупы независимы и агрегируются (не наследуются); стартовая страница
-// берёт 4 слота с приоритетом workspace → instance → system и ротацией внутри уровня
-// (personal в выдачу стартовой страницы не входит — решение Фазы 2B, волна 2).
+// Prompts — библиотека промптов и стартовые подсказки чата.
+// Скоупы: system — вендорский сид, instance — промпты организации (админ-консоль),
+// workspace — промпты пространства, assistant — legacy-записи (в выдаче не участвуют,
+// сохранены ради совместимости данных), personal — личные промпты пользователя
+// (живут внутри workspace, видны только владельцу; owner_user_id заполнен ⇔ scope=personal,
+// уходят вместе с пользователем). Скоупы независимы и агрегируются (не наследуются).
+//
+// У промпта НЕТ пользовательских настроек показа: любой промпт доступен в меню «/»,
+// а состав стартового экрана определяет рекомендательная выдача
+// (server/prompts-start-selection.ts, раздел 20 docs/prompt-library-strategy.md).
+// «Спрятать» промпт означает удалить его — в том числе системный.
+//
+// ИНВАРИАНТ: системный набор сеется один раз установкой (снимок 0335). Миграции не имеют
+// права вставлять строки prompts с ранее существовавшими id — иначе удалённый администратором
+// промпт вернётся при обновлении релиза. Новый вендорский набор доставляется импортом бандла.
+// Держится гардом scripts/verify-no-prompt-reseed.cjs.
 // ---------------------------------------------------------------------------
 
 export const promptScopes = ["system", "instance", "workspace", "assistant", "personal"] as const;
 export type PromptScope = (typeof promptScopes)[number];
-
-export const promptPlacements = ["start_screen", "composer_menu"] as const;
-export type PromptPlacement = (typeof promptPlacements)[number];
 
 export const prompts = pgTable(
   "prompts",
@@ -4084,9 +4223,6 @@ export const prompts = pgTable(
     body: text("body").notNull(),
     description: text("description"),
     category: text("category"),
-    placement: text("placement").array().notNull().default(sql`'{start_screen}'::text[]`),
-    isActive: boolean("is_active").notNull().default(true),
-    sortOrder: integer("sort_order").notNull().default(0),
     // Счётчик использований (Фаза 3): инкремент при вставке промпта в композер (чип
     // стартовой, библиотека, слэш-меню, starter). Кэш кандидатов инкрементом не сбрасывается.
     usageCount: integer("usage_count").notNull().default(0),
@@ -4097,7 +4233,7 @@ export const prompts = pgTable(
   },
   (table) => ({
     workspaceIdx: index("prompts_workspace_idx").on(table.workspaceId),
-    scopeActiveIdx: index("prompts_scope_active_idx").on(table.scope, table.isActive),
+    scopeIdx: index("prompts_scope_idx").on(table.scope),
     assistantIdx: index("prompts_assistant_idx").on(table.assistantId),
     ownerIdx: index("prompts_owner_idx").on(table.ownerUserId),
   }),
@@ -4488,6 +4624,8 @@ export type ChatSessionMetadata = {
   /** Явно выбранная пользователем модель этого чата (models.id).
    * null/отсутствует = «По умолчанию» — следует за моделью ассистента/политикой. */
   selectedLlmModelId?: string | null;
+  /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
+  selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
   origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API;
   [key: string]: unknown;
@@ -4519,6 +4657,7 @@ export const chatSessions = pgTable(
     deletedAt: timestamp("deleted_at"),
   },
   (table) => ({
+    createdAtIdx: index("chat_sessions_created_at_idx").on(table.createdAt).where(sql`"deleted_at" IS NULL`),
     deletedAtIdx: index("chat_sessions_deleted_at_idx").on(table.deletedAt).where(sql`"deleted_at" IS NOT NULL`),
     workspaceUserIdx: index("chat_sessions_workspace_user_idx").on(
       table.workspaceId,
@@ -4584,6 +4723,7 @@ export const chatMessages = pgTable(
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    createdAtIdx: index("chat_messages_created_at_idx").on(table.createdAt),
     chatIdx: index("chat_messages_chat_idx").on(table.chatId, table.createdAt),
     // 0260: FK-индекс под SET NULL при удалении карточки (card_id).
     cardIdx: index("chat_messages_card_id_idx").on(table.cardId),
@@ -4625,6 +4765,48 @@ export type TranscriptAudioSourceDto = {
   waveformPeaks: number[] | null;
 };
 
+/**
+ * Гейт честности (Г1, docs/system-knowledge-bases-auto-route-strategy-2026-09.md): факты заземления
+ * ответа ассистента — детерминированный статус для UI («без подключённых источников», «запрошенный
+ * номер не найден») и срезы аналитики. Пишется в каждое сообщение при включённом гейте (Д-57): решение
+ * «источники не нужны» и его происхождение видны так же, как решение «нужны».
+ */
+export type ChatMessageGroundingMetadata = {
+  citationRequired: boolean;
+  /**
+   * Что дало вердикт: llm (слово модели) | fallback_grounding (модель недоступна, вложение или явная
+   * отсылка к базе) | fallback_safe (модель недоступна, источники настроены — ищем) | none | disabled.
+   */
+  verdictSource: string;
+  /** Статус LLM-вердикта: ok | timeout | error | no_model | disabled | skipped. */
+  llmStatus?: string;
+  /** У ассистента настроены источники (БЗ/файлы) — независимо от того, нашлось ли что-то. */
+  sourcesConfigured: boolean;
+  /** В вызов модели были подшиты источники (RAG-фрагменты или текст вложений); null = неизвестно. */
+  sourcesAttached: boolean | null;
+  /** Точные номера из запроса («16.5.1»), которые искали в выдаче. */
+  requestedIdentifiers?: string[];
+  /** Нашёлся ли хотя бы один запрошенный номер в выданном контексте; null = не проверялось. */
+  requestedIdentifiersFound?: boolean | null;
+  /** id применённых платформенных директив (тексты в metadata не едут). */
+  directiveIds?: string[];
+  /** С2: сколько фрагментов системных баз знаний подшито в ответ Уники AI; нет поля = поиск не выполнялся. */
+  systemSourcesCount?: number;
+  /**
+   * «RAG перед RAG» (этап C): как стадия kb_routing выбрала базы под вопрос. Нет поля — стадия не
+   * включалась (баз не больше потолка). При shadow поиск шёл по всему скоупу, а выбор записан для замера.
+   */
+  routing?: {
+    mode: "scope_within_limit" | "preselected" | "auto" | "shadow";
+    selectedBy: "llm" | "embedding" | "all" | "none";
+    scopeCount: number;
+    candidateCount: number;
+    selectedCount: number;
+    selectedKnowledgeBaseIds: string[];
+    degraded?: string;
+  };
+};
+
 export type ChatMessageMetadata = {
   transcriptId?: string;
   transcriptStatus?: TranscriptStatus;
@@ -4635,6 +4817,7 @@ export type ChatMessageMetadata = {
   generationStatus?: "stopped" | string;
   stopReason?: string | null;
   stoppedAt?: string | null;
+  grounding?: ChatMessageGroundingMetadata;
   reasoning?: {
     text?: string;
     mode?: ReasoningMode | string;
@@ -4691,6 +4874,7 @@ export const transcripts = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    createdAtIdx: index("transcripts_created_at_idx").on(table.createdAt),
     workspaceIdx: index("transcripts_workspace_idx").on(table.workspaceId),
     chatIdx: index("transcripts_chat_idx").on(table.chatId),
     statusIdx: index("transcripts_status_idx").on(table.status),
@@ -4985,6 +5169,7 @@ export const canvasDocuments = pgTable(
     deletedAt: timestamp("deleted_at"),
   },
   (table) => ({
+    createdAtIdx: index("canvas_documents_created_at_idx").on(table.createdAt).where(sql`"deleted_at" IS NULL`),
     workspaceIdx: index("canvas_documents_workspace_idx").on(table.workspaceId),
     chatIdx: index("canvas_documents_chat_idx").on(table.chatId),
     chatSourceMessageIdx: index("canvas_documents_chat_source_message_idx").on(table.chatId, table.sourceMessageId),
@@ -5052,6 +5237,7 @@ export const documentRevisions = pgTable(
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
+    canvasCreatedAtIdx: index("document_revisions_canvas_created_at_idx").on(table.createdAt).where(sql`"target_type" = 'canvas_document'`),
     workspaceIdx: index("document_revisions_workspace_idx").on(table.workspaceId),
     chatIdx: index("document_revisions_chat_idx").on(table.chatId),
     transcriptIdx: index("document_revisions_transcript_idx").on(table.transcriptId),
@@ -5352,6 +5538,8 @@ export const knowledgeBaseAskAiRuns = pgTable("knowledge_base_ask_ai_runs", {
   knowledgeBaseId: varchar("knowledge_base_id")
     .notNull()
     .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+  /** «RAG перед RAG» (0366): базы, по которым фактически шёл поиск после стадии kb_routing. */
+  knowledgeBaseIds: text("knowledge_base_ids").array(),
   prompt: text("prompt").notNull(),
   normalizedQuery: text("normalized_query"),
   status: text("status").notNull().default("success"),
@@ -5413,7 +5601,9 @@ export const knowledgeBaseAskAiRuns = pgTable("knowledge_base_ask_ai_runs", {
   searchConfigSnapshot: jsonb("search_config_snapshot"),
   pipelineLog: jsonb("pipeline_log").$type<KnowledgeBaseAskAiPipelineStepLog[] | null>(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
-});
+}, (table) => ({
+  createdAtIdx: index("knowledge_base_ask_ai_runs_created_at_idx").on(table.createdAt),
+}));
 
 export const ragArenaExperimentResults = pgTable(
   "rag_arena_experiment_results",
@@ -9901,6 +10091,7 @@ export const ingestBatches = pgTable(
     closedAt: timestamp("closed_at", { withTimezone: true }),
   },
   (table) => ({
+    createdAtIdx: index("ingest_batches_created_at_idx").on(table.createdAt),
     workspaceStatusCreatedIdx: index("ingest_batches_workspace_status_created_idx").on(
       table.workspaceId,
       table.status,
@@ -9972,6 +10163,7 @@ export const ingestSources = pgTable(
     terminalAt: timestamp("terminal_at", { withTimezone: true }),
   },
   (table) => ({
+    rootCreatedAtIdx: index("ingest_sources_root_created_at_idx").on(table.createdAt).where(sql`"parent_source_id" IS NULL`),
     batchStatusIdx: index("ingest_sources_batch_status_idx").on(table.batchId, table.status),
     workspaceStatusUpdatedIdx: index("ingest_sources_workspace_status_updated_idx").on(
       table.workspaceId,
