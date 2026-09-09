@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { promptPlacements, promptScopes, type PromptPlacement, type PromptScope } from "./schema";
+import { PROMPT_TEXT_MAX, promptLengthErrorParams } from "./prompt-limits";
+import { promptScopes, type PromptScope } from "./schema";
 
 /**
  * Библиотека промптов и стартовые подсказки чата (Фаза 1, docs/prompt-library-strategy.md).
@@ -7,7 +8,13 @@ import { promptPlacements, promptScopes, type PromptPlacement, type PromptScope 
  */
 
 export const PROMPT_TITLE_MAX = 200;
-export const PROMPT_BODY_MAX = 4000;
+
+/**
+ * Тело промпта живёт по общему потолку длинных промптов (shared/prompt-limits.ts):
+ * библиотека промптов и инструкция ассистента — одна и та же сущность для пользователя,
+ * и разный предел у них означал только то, что в одном месте текст молча терялся.
+ */
+export const PROMPT_BODY_MAX = PROMPT_TEXT_MAX;
 export const PROMPT_DESCRIPTION_MAX = 500;
 export const PROMPT_CATEGORY_MAX = 100;
 
@@ -22,10 +29,7 @@ export interface PromptDto {
   body: string;
   description: string | null;
   category: string | null;
-  placement: PromptPlacement[];
-  isActive: boolean;
-  sortOrder: number;
-  /** Счётчик вставок в композер (Фаза 3); в кэшированных списках может отставать на TTL кэша. */
+  /** Счётчик выборов промпта (Фаза 3); в кэшированных списках может отставать на TTL кэша. */
   usageCount: number;
   lastUsedAt: string | null;
   createdAt: string;
@@ -40,39 +44,19 @@ export interface StartPromptDto {
   body: string;
 }
 
-/** Ответ GET /api/start-prompts: с assistantId — starters ассистента + его автосенд-флаг. */
-export interface StartPromptsResponse {
-  prompts: StartPromptDto[];
-  autoSend?: boolean;
-}
-
-// --- Starters ассистента (Фаза 2A) ---
-
-export const ASSISTANT_STARTER_PROMPTS_MAX = 6;
-export const ASSISTANT_STARTER_TEXT_MAX = 400;
-
-/** Редактор starters сохраняет список целиком (порядок = порядок показа, без ротации). */
-export const assistantStarterPromptsInputSchema = z.object({
-  autoSend: z.boolean().default(false),
-  prompts: z
-    .array(
-      z.object({
-        text: z.string().trim().min(1, "Текст подсказки обязателен").max(ASSISTANT_STARTER_TEXT_MAX),
-      }),
-    )
-    .max(ASSISTANT_STARTER_PROMPTS_MAX, `Не больше ${ASSISTANT_STARTER_PROMPTS_MAX} подсказок`),
-});
-export type AssistantStarterPromptsInput = z.infer<typeof assistantStarterPromptsInputSchema>;
-
-export interface AssistantStarterPromptsPayload {
-  prompts: StartPromptDto[];
-  autoSend: boolean;
-}
-
 // --- Слэш-меню композера (Фаза 2B) ---
 
-/** Сколько пунктов показывает слэш-меню; остальное — за кнопкой «Показать все». */
-export const SLASH_MENU_LIMIT = 8;
+/**
+ * Верхняя граница рендера слэш-меню. Отбором занимается не она, а поиск по вводу после «/»
+ * (rankSlashPrompts): в меню попадают все промпты доступных скоупов, потому что настройки
+ * размещения больше нет. Список не виртуализирован, поэтому потолок нужен как защита DOM;
+ * значение обязано превышать реальную библиотеку инсталляции, иначе промпт молча пропадёт
+ * из меню — ровно тот дефект, ради которого размещение и убирали. Остальное — «Показать все».
+ */
+export const SLASH_MENU_LIMIT = 40;
+
+/** Потолок ответа сервера для слэш-меню: строго больше клиентского, чтобы клиент резал полный список. */
+export const SLASH_MENU_FETCH_LIMIT = 200;
 
 /** Компактная форма пункта меню: тела достаточно для вставки, превью строит клиент. */
 export interface SlashPromptDto {
@@ -84,15 +68,16 @@ export interface SlashPromptDto {
 
 /**
  * Приоритет владельца: чем ближе скоуп к пользователю, тем выше пункт при равной
- * релевантности. Личное выше workspace (ближе к пользователю), но ниже starters
- * ассистента: их владелец завёл именно под контекст открытого чата.
+ * релевантности. Личное выше workspace, поскольку находится ближе к пользователю.
+ * Legacy-скоуп assistant оставлен в типе данных для чтения старых записей, но в
+ * пользовательские списки больше не включается.
  */
 const SLASH_SCOPE_RANK: Record<PromptScope, number> = {
-  assistant: 0,
-  personal: 1,
-  workspace: 2,
-  instance: 3,
-  system: 4,
+  personal: 0,
+  workspace: 1,
+  instance: 2,
+  system: 3,
+  assistant: 4,
 };
 
 /**
@@ -170,40 +155,27 @@ export function applyPromptVariables(body: string, values: Record<string, string
   });
 }
 
-const placementEnum = z.enum(promptPlacements as unknown as [PromptPlacement, ...PromptPlacement[]]);
-
 /**
- * База без дефолтов: в zod 4 `.default()` срабатывает и внутри `.partial()`,
- * поэтому patch-схема, производная от схемы создания, молча подставляла бы
- * placement/isActive/sortOrder в не переданные поля (PATCH {isActive} сбрасывал
- * размещение и порядок). Дефолты навешиваются только на схему создания.
+ * База без дефолтов, и заводить их здесь нельзя: в zod 4 `.default()` срабатывает и внутри
+ * `.partial()`, поэтому patch-схема молча подставляла бы дефолты создания в не переданные
+ * поля — частичное сохранение затирало бы соседние.
  */
 const promptInputBaseSchema = z.object({
   title: z.string().trim().min(1, "Название обязательно").max(PROMPT_TITLE_MAX),
-  body: z.string().trim().min(1, "Текст промпта обязателен").max(PROMPT_BODY_MAX),
+  body: z
+    .string()
+    .trim()
+    .min(1, "Текст промпта обязателен")
+    .max(PROMPT_BODY_MAX, promptLengthErrorParams("Текст промпта", PROMPT_BODY_MAX)),
   description: z.string().trim().max(PROMPT_DESCRIPTION_MAX).nullish(),
   category: z.string().trim().max(PROMPT_CATEGORY_MAX).nullish(),
-  placement: z.array(placementEnum).min(1),
-  isActive: z.boolean(),
-  sortOrder: z.number().int().min(0).max(100_000),
 });
 
-export const promptCreateInputSchema = promptInputBaseSchema.extend({
-  placement: promptInputBaseSchema.shape.placement.default(["start_screen"]),
-  isActive: promptInputBaseSchema.shape.isActive.default(true),
-  sortOrder: promptInputBaseSchema.shape.sortOrder.default(0),
-});
+export const promptCreateInputSchema = promptInputBaseSchema;
 export type PromptCreateInput = z.infer<typeof promptCreateInputSchema>;
 
 export const promptPatchInputSchema = promptInputBaseSchema.partial();
 export type PromptPatchInput = z.infer<typeof promptPatchInputSchema>;
-
-/** Патч системного промпта: у вендорского сида правится только видимость и порядок. */
-export const systemPromptPatchInputSchema = z.object({
-  isActive: z.boolean().optional(),
-  sortOrder: z.number().int().min(0).max(100_000).optional(),
-});
-export type SystemPromptPatchInput = z.infer<typeof systemPromptPatchInputSchema>;
 
 // --- Импорт/экспорт JSON-набора (Фаза 3) ---
 
@@ -211,16 +183,37 @@ export const PROMPT_BUNDLE_VERSION = 1;
 export const PROMPT_BUNDLE_MAX_ITEMS = 2000;
 export const PROMPT_BUNDLE_ID_MAX = 200;
 
+/** Поля, которые набор нёс до отказа от настроек показа (раздел 20 стратегии). */
+const LEGACY_BUNDLE_FIELDS = ["placement", "isActive", "sortOrder"] as const;
+
 /**
- * Элемент набора: поля сида миграции 0293 (id + scope + контент) — один и тот же bundle
- * можно доставить и миграцией-сидом, и админ-импортом (паттерн workflow starter bundles).
- * Переносимы только глобальные скоупы: workspace/personal/assistant привязаны к локальным
- * сущностям инстанса и в набор не входят.
+ * Элемент набора: id + scope + контент — один и тот же bundle можно доставить и миграцией-сидом,
+ * и админ-импортом (паттерн workflow starter bundles). Переносимы только глобальные скоупы:
+ * workspace/personal/assistant привязаны к локальным сущностям инстанса и в набор не входят.
+ *
+ * Схема строгая, в отличие от create/patch: файл набора пишут и правят руками, и молча
+ * потерянное поле здесь опаснее отказа. Именно строгость отвергает наборы прежней версии
+ * с placement/is_active/sort_order — zod по умолчанию такие ключи просто отбрасывает.
  */
-export const promptBundleItemSchema = promptCreateInputSchema.extend({
-  id: z.string().trim().min(1, "Идентификатор промпта обязателен").max(PROMPT_BUNDLE_ID_MAX),
-  scope: z.enum(["system", "instance"]),
-});
+export const promptBundleItemSchema = z.strictObject(
+  {
+    ...promptCreateInputSchema.shape,
+    id: z.string().trim().min(1, "Идентификатор промпта обязателен").max(PROMPT_BUNDLE_ID_MAX),
+    scope: z.enum(["system", "instance"]),
+  },
+  {
+    error: (issue) => {
+      if (issue.code !== "unrecognized_keys") {
+        return undefined;
+      }
+      const keys = (issue as { keys?: string[] }).keys ?? [];
+      const legacy = keys.filter((key) => (LEGACY_BUNDLE_FIELDS as readonly string[]).includes(key));
+      return legacy.length > 0
+        ? `Набор создан прежней версией платформы: поля ${legacy.join(", ")} больше не поддерживаются — выгрузите набор заново кнопкой «Экспортировать»`
+        : `Неизвестные поля в промпте набора: ${keys.join(", ")}`;
+    },
+  },
+);
 export type PromptBundleItem = z.infer<typeof promptBundleItemSchema>;
 
 export const promptBundleSchema = z
@@ -271,5 +264,5 @@ export interface PromptsAdminSettingsDto {
   usedCount: number;
 }
 
-export { promptPlacements, promptScopes };
-export type { PromptPlacement, PromptScope };
+export { promptScopes };
+export type { PromptScope };
