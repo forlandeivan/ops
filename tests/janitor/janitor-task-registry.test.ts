@@ -37,17 +37,27 @@ describe("janitor task registry", () => {
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
         "s3.chat_attachments.drafts",
-        // E15 монолита: поглощённый json-import-cleanup — джоб был зарегистрирован, но с пустым
-        // телом; включённая политика достраивает задуманное изначально поведение (7 дней).
-        "s3.json_imports.stale",
-        // C12 монолита: рабочие файлы конвейера приёма (ingest/), префикс-гард в сторе.
+        // C12: рабочие файлы конвейера приёма (ingest/) — новые объекты, чистятся из коробки;
+        // оригиналы и canonical/ политика не затрагивает (префикс-гард в ops-сторе).
         "s3.ingest_sources.workdir",
+        // E13: кадры видео (frames/) — 30 дней с автоудалением, пересчёт из оригинала
+        // по требованию; сироты ingest/ и canonical/ остаются opt-in (sensitive).
+        "s3.ingest_frames",
         // журнал запусков агента (eec6aabb): новые таблицы, но включены по умолчанию намеренно —
         // debug-трейс содержит тексты документов пользователей (strip через 7д = privacy-by-default),
         // а строки запуска удаляются через 90д, чтобы журнал не рос неограниченно. summary-логи
         // (pg.agent_execution_events.logs) оставлены opt-in.
         "pg.agent_execution_events.debug_payloads",
         "pg.agent_executions",
+        // Следы публичного API: до 1.1.0 их не чистила ни одна политика, поэтому реестр
+        // заданий и ключи повтора росли бессрочно. Включены из коробки — удаляются только
+        // задания старше 90 дней (вызывающий их уже не опрашивает) и УЖЕ истёкшие ключи
+        // повтора вместе с сохранёнными телами ответов.
+        "pg.public_api_jobs",
+        "pg.public_api_idempotency_keys",
+        // Суточные вёдра учёта вызовов (a7bf4731): агрегат, а не сырой лог, поэтому срок
+        // длинный — 400 дней закрывают вопрос «кто ходил прошлой осенью» с запасом на год.
+        "pg.public_api_usage_day",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
@@ -93,6 +103,60 @@ describe("janitor task registry", () => {
     const autosave = getJanitorTask("pg.document_revisions.autosave");
     expect(autosave?.action).toBe("delete_rows");
     expect(autosave?.equalsFilter).toEqual({ column: "source", value: "autosave" });
+  });
+
+  it("registers ingest artifact retention policies (E13): orphans opt-in+sensitive, frames enabled", () => {
+    const ingestOrphans = getJanitorTask("s3.ingest.orphans");
+    const canonicalOrphans = getJanitorTask("s3.canonical.orphans");
+    for (const policy of [ingestOrphans, canonicalOrphans]) {
+      expect(policy?.storage).toBe("s3_reconcile");
+      expect(policy?.defaultEnabled).toBe(false);
+      expect(policy?.sensitive).toBe(true);
+      expect(policy?.cascadeNote).toBeTruthy();
+      // сирота определяется содержимым бакета, строки-владельца у неё нет: `table` —
+      // синтетический идентификатор набора объектов, миграции под него не заводятся.
+      expect(policy?.virtualTable).toBe(true);
+    }
+    const frames = getJanitorTask("s3.ingest_frames");
+    expect(frames?.storage).toBe("s3");
+    expect(frames?.table).toBe("ingest_sources");
+    expect(frames?.timeColumn).toBe("terminal_at");
+    expect(frames?.defaultEnabled).toBe(true);
+    expect(frames?.defaultRetentionDays).toBe(30);
+  });
+
+  // Волна 8 (E22): таблицы-владельца json_import_jobs больше нет, уборка её файлов
+  // стала реконсиляцией по префиксу и по умолчанию выключена — удаление чужих
+  // объектов из хранилища включает администратор осознанно.
+  it("registers legacy-import orphan reconcile by prefix (E22, opt-in, sensitive)", () => {
+    expect(getJanitorTask("s3.json_imports.stale")).toBeUndefined();
+
+    const orphans = getJanitorTask("s3.legacy_imports.orphans");
+    expect(orphans?.storage).toBe("s3_reconcile");
+    expect(orphans?.action).toBe("delete_object");
+    expect(orphans?.table).toBe("legacy_import_orphan_objects");
+    expect(orphans?.virtualTable).toBe(true);
+    expect(orphans?.timeColumn).toBe("first_seen_at");
+    expect(orphans?.defaultEnabled).toBe(false);
+    expect(orphans?.sensitive).toBe(true);
+    expect(orphans?.defaultRetentionDays).toBe(7);
+    expect(orphans?.description).toContain("json-imports/");
+    expect(orphans?.description).toContain("archive-imports/");
+    expect(orphans?.description).toContain("document-imports/");
+  });
+
+  // Флаг synthetic-имени не должен стать лазейкой «пометил и не думаю»: им закрываются
+  // только реконсиляции без строки-владельца. У задач с живой таблицей флага нет —
+  // иначе контракт «реестр ↔ shared/schema» перестанет ловить у них переименование колонок.
+  it("marks a synthetic table only for storage reconcile without an owner row", () => {
+    for (const task of JANITOR_TASKS) {
+      if (!task.virtualTable) {
+        continue;
+      }
+      expect(task.storage).toBe("s3_reconcile");
+    }
+    expect(getJanitorTask("s3.chat_feedback_attachments.orphans")?.virtualTable).toBe(false);
+    expect(getJanitorTask("qdrant.orphaned_collections")?.virtualTable).toBe(false);
   });
 
   it("covers knowledge-base indexing history (knowledge category, disabled by default)", () => {

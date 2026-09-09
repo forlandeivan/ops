@@ -20,7 +20,12 @@ import {
   type S3RetentionStore,
 } from "./tasks/s3-retention-task";
 import { runQdrantOrphanGcTask } from "./tasks/qdrant-orphan-gc-task";
-import { runFeedbackAttachmentOrphanTask } from "./tasks/s3-feedback-attachment-orphan-task";
+import {
+  runFeedbackAttachmentOrphanTask,
+  type FeedbackAttachmentOrphanOptions,
+  type FeedbackAttachmentOrphanResolvedRetention,
+  type FeedbackAttachmentOrphanResult,
+} from "./tasks/s3-feedback-attachment-orphan-task";
 
 // Тип сторов живёт в default-stores; реэкспорт сохраняет прежние импорты потребителей.
 export type { JanitorStores } from "./default-stores";
@@ -73,6 +78,40 @@ const MAX_BATCHES_PER_RUN = parsePositiveInt(
   DEFAULT_MAX_BATCHES_PER_RUN,
 );
 const BATCH_PAUSE_MS = parseNonNegativeInt(process.env.JANITOR_BATCH_PAUSE_MS, 0);
+
+/**
+ * Исполнители реконсиляции по содержимому хранилища. У каждой такой политики свой стор и свой
+ * критерий сиротства (префикс, владелец строки, grace), общего движка нет — поэтому адрес
+ * исполнителя один: ключ политики.
+ *
+ * Отсутствие записи здесь означает, что метаданные политики в реестре уже есть, а исполнителя в
+ * сервисе ещё нет (E13/E22: префиксы ingest/, canonical/ и старых импортов). Такой прогон обязан
+ * падать: до правки ветка `s3_reconcile` уводила ЛЮБУЮ такую политику в уборку скриншотов отзывов —
+ * включив «Осиротевшие объекты приёма», администратор удалил бы вложения отзывов под чужим ключом.
+ */
+const S3_RECONCILE_RUNNERS: Record<
+  string,
+  (
+    resolved: FeedbackAttachmentOrphanResolvedRetention,
+    stores: JanitorStores,
+    options: FeedbackAttachmentOrphanOptions,
+  ) => Promise<FeedbackAttachmentOrphanResult>
+> = {
+  "s3.chat_feedback_attachments.orphans": (resolved, stores, options) =>
+    runFeedbackAttachmentOrphanTask(resolved, stores.feedbackAttachmentOrphans, options),
+};
+
+function resolveReconcileRunner(
+  task: JanitorTaskDefinition,
+): (typeof S3_RECONCILE_RUNNERS)[string] {
+  const runner = S3_RECONCILE_RUNNERS[task.key];
+  if (!runner) {
+    throw new Error(
+      `janitor: no storage reconcile executor registered for policy "${task.key}"; run refused`,
+    );
+  }
+  return runner;
+}
 
 function resolveS3Store(stores: JanitorStores, task: JanitorTaskDefinition): S3RetentionStore {
   const store = stores.s3[task.table];
@@ -169,9 +208,9 @@ export async function runPolicy(
       freedBytes += result.freedBytes;
       aborted = aborted || result.aborted;
     } else if (storageOf(task) === "s3_reconcile") {
-      const result = await runFeedbackAttachmentOrphanTask(
+      const result = await resolveReconcileRunner(task)(
         { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-        stores.feedbackAttachmentOrphans,
+        stores,
         { now: startedAt, maxBatchesPerRun: MAX_BATCHES_PER_RUN, shouldAbort },
       );
       matched += result.matched;
@@ -335,9 +374,9 @@ export async function previewPolicy(
   }
 
   if (storageOf(taskDef) === "s3_reconcile") {
-    const result = await runFeedbackAttachmentOrphanTask(
+    const result = await resolveReconcileRunner(taskDef)(
       { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-      stores.feedbackAttachmentOrphans,
+      stores,
       { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
     );
     return { matched: result.matched };

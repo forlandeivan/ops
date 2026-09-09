@@ -84,6 +84,18 @@ describe("janitor registry ↔ shared/schema contract", () => {
       if (storageOf(task) === "postgres") {
         continue;
       }
+      if (task.virtualTable) {
+        // Реконсиляция по префиксу без строки-владельца: `table` — синтетический
+        // идентификатор набора объектов, миграции под него не заводятся. Проверяем
+        // обратное: такой таблицы в схеме БЫТЬ не должно, иначе имя занято реальной
+        // сущностью и флаг прячет живую зависимость.
+        if (tables.get(task.table)) {
+          errors.push(
+            `${task.key}: "${task.table}" помечена virtualTable, но таблица с таким именем есть в shared/schema.ts`,
+          );
+        }
+        continue;
+      }
       const columns = tables.get(task.table);
       if (!columns) {
         errors.push(`${task.key}: таблица "${task.table}" отсутствует в shared/schema.ts`);
@@ -101,5 +113,7 @@ describe("janitor registry ↔ shared/schema contract", () => {
   it("санити: контракт реально сверяет все 30 задач против непустой схемы", () => {
     expect(JANITOR_TASKS.length).toBeGreaterThanOrEqual(30);
     expect(tables.size).toBeGreaterThan(100);
+    // Флагом закрыты единицы, а не половина реестра: иначе контракт сверяет пустоту.
+    expect(JANITOR_TASKS.filter((task) => task.virtualTable).length).toBeLessThanOrEqual(5);
   });
 });

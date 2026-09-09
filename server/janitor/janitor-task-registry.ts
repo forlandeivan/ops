@@ -73,6 +73,17 @@ export interface JanitorTaskDefinition {
   mimePrefixExclude?: boolean;
   /** S3: колонка, которая должна быть NULL для отбора (напр. message_id для неотправленных черновиков). */
   isNullColumn?: string | null;
+  /**
+   * `table` — синтетический идентификатор набора объектов в хранилище, а НЕ таблица БД.
+   * Ставится только для storage-driven задач (`s3_reconcile`), у которых строки-владельца
+   * в базе не осталось или отбор идёт целиком по содержимому хранилища: реконсиляция по
+   * префиксу сравнивает бакет сам с собой, PG по этому имени не читается и не пишется.
+   * Такие имена не участвуют в контракте «реестр ↔ shared/schema»: миграции под них не
+   * заводятся, и таблицы с таким именем в схеме быть не должно. Задачи с реальной
+   * таблицей-владельцем (напр. s3.chat_feedback_attachments.orphans) флаг НЕ ставят —
+   * контракт обязан ловить у них переименование колонок.
+   */
+  virtualTable?: boolean;
 }
 
 const DEFAULT_BATCH_SIZE = 500;
@@ -97,6 +108,7 @@ function task(
     mimePrefixes: [],
     mimePrefixExclude: false,
     isNullColumn: null,
+    virtualTable: false,
     ...definition,
   };
 }
@@ -558,7 +570,8 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     category: "storage",
     storage: "s3_reconcile",
     action: "delete_object",
-    table: "legacy_import_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    table: "legacy_import_orphan_objects", // синтетический идентификатор набора объектов: строк-владельцев нет, резолв стора в ops идёт по этому имени
+    virtualTable: true,
     timeColumn: "first_seen_at",
     defaultEnabled: false,
     defaultRetentionDays: 7, // grace: объект держится неделю, случайные гонки не удаляются
@@ -583,7 +596,8 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     category: "storage",
     storage: "s3_reconcile",
     action: "delete_object",
-    table: "ingest_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    table: "ingest_orphan_objects", // синтетический идентификатор набора объектов: сирота — это объект без строки, резолв стора в ops идёт по этому имени
+    virtualTable: true,
     timeColumn: "first_seen_at",
     defaultEnabled: false,
     defaultRetentionDays: 7, // grace: сирота должна продержаться неделю, случайные гонки не удаляются
@@ -601,7 +615,8 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     category: "storage",
     storage: "s3_reconcile",
     action: "delete_object",
-    table: "canonical_orphan_objects", // для валидации реестра; резолв стора в ops идёт по этому имени
+    table: "canonical_orphan_objects", // синтетический идентификатор набора объектов: сирота — это объект без ссылки, резолв стора в ops идёт по этому имени
+    virtualTable: true,
     timeColumn: "first_seen_at",
     defaultEnabled: false,
     defaultRetentionDays: 7,
