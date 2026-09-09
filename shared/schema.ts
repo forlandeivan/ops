@@ -33,6 +33,7 @@ import {
   workflowDefinitionStatuses,
   workflowTemplateSources,
 } from "./workflows";
+import { PROMPT_TEXT_MAX, promptLengthErrorParams } from "./prompt-limits";
 import { workflowNodeKinds } from "./workflow-compiler";
 import type { GlobalVariableValueType } from "./global-variables";
 import type { ReasoningProgressItem } from "./reasoning-progress";
@@ -3247,7 +3248,7 @@ export const llmRequestConfigSchema = z
     systemPrompt: z
       .string()
       .trim()
-      .max(4000, "Слишком длинный системный промпт")
+      .max(PROMPT_TEXT_MAX, promptLengthErrorParams("Системный промпт", PROMPT_TEXT_MAX))
       .optional()
       .nullable(),
     temperature: z.number().min(0).max(2).optional(),
