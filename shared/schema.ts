@@ -4795,14 +4795,17 @@ export type ChatMessageGroundingMetadata = {
   /**
    * «RAG перед RAG» (этап C): как стадия kb_routing выбрала базы под вопрос. Нет поля — стадия не
    * включалась (баз не больше потолка). При shadow поиск шёл по всему скоупу, а выбор записан для замера.
+   * `user` — набор баз задал пользователь явно (упоминание «@база» в композере): стадия не сужала.
    */
   routing?: {
-    mode: "scope_within_limit" | "preselected" | "auto" | "shadow";
-    selectedBy: "llm" | "embedding" | "all" | "none";
+    mode: "scope_within_limit" | "preselected" | "auto" | "shadow" | "user";
+    selectedBy: "llm" | "embedding" | "all" | "none" | "user";
     scopeCount: number;
     candidateCount: number;
     selectedCount: number;
     selectedKnowledgeBaseIds: string[];
+    /** Названия выбранных баз для клиента («Искали в: …», шторка «Источники»); порядок = selectedKnowledgeBaseIds. */
+    selectedKnowledgeBases?: Array<{ id: string; name: string }>;
     degraded?: string;
   };
 };
@@ -4833,6 +4836,12 @@ export type ChatMessageMetadata = {
   contextRefs?: ContextRef[];
   composerParts?: ComposerPart[];
   resolvedContextRefs?: ResolvedContextRef[];
+  /**
+   * Точный per-chat выбор источников на момент сообщения (панель «Источники»); null/нет поля = все источники.
+   * Структурно равен `ChatSourceScope` из `shared/chat-source-scope.ts`; тип повторён на месте, чтобы зеркала
+   * schema.ts в соседних репозиториях оставались самодостаточными.
+   */
+  sourceScope?: { knowledgeBaseIds: string[]; assistantFileIds: string[]; excludedChatAttachmentIds?: string[] } | null;
   workflowContextRequest?: WorkflowContextRequestChatMetadata;
   attachments?: ChatMessageAttachmentMetadata[];
   file?: {
@@ -4880,6 +4889,44 @@ export const transcripts = pgTable(
     statusIdx: index("transcripts_status_idx").on(table.status),
     defaultViewIdx: index("transcripts_default_view_idx").on(table.defaultViewId),
     defaultViewActionIdx: index("transcripts_default_view_action_idx").on(table.defaultViewActionId),
+  }),
+);
+
+export const transcriptCorrections = pgTable(
+  "transcript_corrections",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    batchId: uuid("batch_id").notNull(),
+    transcriptId: varchar("transcript_id")
+      .notNull()
+      .references(() => transcripts.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    scope: text("scope").notNull(),
+    targetKey: text("target_key").notNull(),
+    sourceText: text("source_text").notNull(),
+    replacementText: text("replacement_text").notNull(),
+    targetJson: jsonb("target_json").notNull().default(sql`'{}'::jsonb`),
+    anchorsJson: jsonb("anchors_json").notNull().default(sql`'[]'::jsonb`),
+    baseRevision: integer("base_revision").notNull(),
+    appliedRevision: integer("applied_revision").notNull(),
+    createdByUserId: varchar("created_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+    revertedAt: timestamp("reverted_at"),
+  },
+  (table) => ({
+    transcriptCreatedIdx: index("transcript_corrections_transcript_created_idx").on(
+      table.transcriptId,
+      table.createdAt,
+    ),
+    transcriptTargetIdx: index("transcript_corrections_transcript_target_idx").on(
+      table.transcriptId,
+      table.targetKey,
+      table.createdAt,
+    ),
+    batchIdx: index("transcript_corrections_batch_idx").on(table.batchId),
+    createdByIdx: index("transcript_corrections_created_by_idx").on(table.createdByUserId),
   }),
 );
 
@@ -6617,6 +6664,8 @@ export type ChatFeedbackAttachment = typeof chatFeedbackAttachments.$inferSelect
 export type ChatFeedbackAttachmentInsert = typeof chatFeedbackAttachments.$inferInsert;
 export type Transcript = typeof transcripts.$inferSelect;
 export type TranscriptInsert = typeof transcripts.$inferInsert;
+export type TranscriptCorrection = typeof transcriptCorrections.$inferSelect;
+export type TranscriptCorrectionInsert = typeof transcriptCorrections.$inferInsert;
 export type TranscriptView = typeof transcriptViews.$inferSelect;
 export type TranscriptViewInsert = typeof transcriptViews.$inferInsert;
 export type TranscriptAudioSource = typeof transcriptAudioSources.$inferSelect;
