@@ -1,4 +1,4 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 
 import { db } from "../db";
 import {
@@ -14,6 +14,7 @@ import {
   type CleanupMode,
   type CleanupPolicyDto,
   type CleanupRunJournalEntryDto,
+  type CleanupRunReportDto,
   type CleanupRunStatus,
   type CleanupRunSummaryDto,
   type CleanupRunTrigger,
@@ -55,6 +56,27 @@ function toNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** Отчёт из jsonb журнала: принимается только известный вид, остальное — null. */
+function toReport(value: unknown): CleanupRunReportDto | null {
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (raw && typeof raw === "object" && (raw as { kind?: unknown }).kind === "storage_orphans") {
+    return raw as CleanupRunReportDto;
+  }
+  return null;
+}
+
+/** Колонка `report` типизирована как jsonb-объект; DTO отчёта кладётся в неё как есть. */
+function toReportColumn(report: CleanupRunReportDto | null): Record<string, unknown> | null {
+  return report as unknown as Record<string, unknown> | null;
+}
+
 /** Чистый мёрж: дефолты реестра ⊕ override из БД (+ сводка последнего прогона). */
 export function resolvePolicy(
   task: JanitorTaskDefinition,
@@ -74,6 +96,7 @@ export function resolvePolicy(
     table: task.table,
     strippedColumns: task.strippedColumns,
     cascadeNote: task.cascadeNote,
+    ...(task.backgroundRun ? { runsInBackground: true } : {}),
     lastRun,
   };
 }
@@ -86,7 +109,8 @@ async function loadOverrides(): Promise<Map<string, CleanupPolicyRow>> {
 async function loadLatestRuns(): Promise<Map<string, CleanupRunSummaryDto>> {
   const result = await (db as unknown as { execute(query: unknown): Promise<unknown> }).execute(
     sql`SELECT DISTINCT ON (resource_key)
-          resource_key, mode, status, matched_count, deleted_count, freed_bytes, duration_ms, error_message, started_at, finished_at
+          resource_key, mode, status, matched_count, deleted_count, freed_bytes, duration_ms, error_message,
+          started_at, finished_at, report
         FROM cleanup_run_log
         ORDER BY resource_key, started_at DESC`,
   );
@@ -96,6 +120,7 @@ async function loadLatestRuns(): Promise<Map<string, CleanupRunSummaryDto>> {
   const map = new Map<string, CleanupRunSummaryDto>();
   for (const row of rows) {
     const key = String(row.resource_key);
+    const report = toReport(row.report);
     map.set(key, {
       mode: coerceMode(row.mode as string, "dry_run"),
       status: String(row.status) as CleanupRunStatus,
@@ -106,6 +131,7 @@ async function loadLatestRuns(): Promise<Map<string, CleanupRunSummaryDto>> {
       errorMessage: row.error_message == null ? null : String(row.error_message),
       startedAt: toIso(row.started_at) ?? new Date(0).toISOString(),
       finishedAt: toIso(row.finished_at),
+      ...(report ? { report } : {}),
     });
   }
   return map;
@@ -204,6 +230,8 @@ export interface CleanupRunRecord {
   triggeredBy: CleanupRunTrigger;
   /** id администратора при ручном запуске; null для автоматического прогона. */
   triggeredByAdminId: string | null;
+  /** Отчёт прогона, если политика его ведёт. */
+  report?: CleanupRunReportDto | null;
 }
 
 export async function recordRun(entry: CleanupRunRecord): Promise<void> {
@@ -220,7 +248,100 @@ export async function recordRun(entry: CleanupRunRecord): Promise<void> {
     finishedAt: entry.finishedAt,
     triggeredBy: entry.triggeredBy,
     triggeredByAdminId: entry.triggeredByAdminId,
+    report: toReportColumn(entry.report ?? null),
   });
+}
+
+export interface CleanupRunStartRecord {
+  resourceKey: string;
+  mode: CleanupMode;
+  startedAt: Date;
+  triggeredBy: CleanupRunTrigger;
+  triggeredByAdminId: string | null;
+  report?: CleanupRunReportDto | null;
+}
+
+/** Строка журнала фонового прогона: статус running, итог допишет recordRunFinish. */
+export async function recordRunStart(entry: CleanupRunStartRecord): Promise<string> {
+  const [row] = await db
+    .insert(cleanupRunLog)
+    .values({
+      resourceKey: entry.resourceKey,
+      mode: entry.mode,
+      status: "running",
+      startedAt: entry.startedAt,
+      triggeredBy: entry.triggeredBy,
+      triggeredByAdminId: entry.triggeredByAdminId,
+      report: toReportColumn(entry.report ?? null),
+    })
+    .returning({ id: cleanupRunLog.id });
+  return row.id;
+}
+
+/** Промежуточный отчёт фонового прогона: админка показывает по нему прогресс. */
+export async function recordRunProgress(
+  runId: string,
+  patch: { matchedCount?: number; report?: CleanupRunReportDto | null },
+): Promise<void> {
+  const values = {
+    ...(patch.matchedCount !== undefined ? { matchedCount: patch.matchedCount } : {}),
+    ...(patch.report !== undefined ? { report: toReportColumn(patch.report) } : {}),
+  };
+  if (Object.keys(values).length === 0) {
+    return;
+  }
+  await db
+    .update(cleanupRunLog)
+    .set(values)
+    .where(and(eq(cleanupRunLog.id, runId), eq(cleanupRunLog.status, "running")));
+}
+
+export interface CleanupRunFinishRecord {
+  status: CleanupRunStatus;
+  matchedCount: number;
+  deletedCount: number;
+  freedBytes: number;
+  durationMs: number;
+  errorMessage: string | null;
+  finishedAt: Date;
+  report?: CleanupRunReportDto | null;
+}
+
+export async function recordRunFinish(runId: string, entry: CleanupRunFinishRecord): Promise<void> {
+  await db
+    .update(cleanupRunLog)
+    .set({
+      status: entry.status,
+      matchedCount: entry.matchedCount,
+      deletedCount: entry.deletedCount,
+      freedBytes: entry.freedBytes,
+      durationMs: entry.durationMs,
+      errorMessage: entry.errorMessage,
+      finishedAt: entry.finishedAt,
+      ...(entry.report !== undefined ? { report: toReportColumn(entry.report) } : {}),
+    })
+    .where(eq(cleanupRunLog.id, runId));
+}
+
+/**
+ * Фоновые прогоны, оборванные перезапуском сервиса уборки: без этого строка висела бы в
+ * журнале со статусом «идёт» вечно.
+ */
+export async function failStaleRunningRuns(params: {
+  resourceKey?: string | null;
+  startedBefore: Date;
+  message: string;
+}): Promise<number> {
+  const conditions = [eq(cleanupRunLog.status, "running"), lt(cleanupRunLog.startedAt, params.startedBefore)];
+  if (params.resourceKey) {
+    conditions.push(eq(cleanupRunLog.resourceKey, params.resourceKey));
+  }
+  const rows = await db
+    .update(cleanupRunLog)
+    .set({ status: "failed", errorMessage: params.message, finishedAt: sql`now()` })
+    .where(and(...conditions))
+    .returning({ id: cleanupRunLog.id });
+  return rows.length;
 }
 
 /** Сырые поля строки журнала (из БД); маппятся в DTO чистой функцией ниже. */
@@ -282,15 +403,19 @@ export async function listRuns(resourceKey: string, limit = 20): Promise<Cleanup
     .where(eq(cleanupRunLog.resourceKey, resourceKey))
     .orderBy(desc(cleanupRunLog.startedAt))
     .limit(Math.max(1, Math.min(limit, 100)));
-  return rows.map((row) => ({
-    mode: coerceMode(row.mode, "dry_run"),
-    status: row.status as CleanupRunStatus,
-    matchedCount: row.matchedCount,
-    deletedCount: row.deletedCount,
-    freedBytes: toNumber(row.freedBytes),
-    durationMs: row.durationMs,
-    errorMessage: row.errorMessage ?? null,
-    startedAt: toIso(row.startedAt) ?? new Date(0).toISOString(),
-    finishedAt: toIso(row.finishedAt),
-  }));
+  return rows.map((row) => {
+    const report = toReport(row.report);
+    return {
+      mode: coerceMode(row.mode, "dry_run"),
+      status: row.status as CleanupRunStatus,
+      matchedCount: row.matchedCount,
+      deletedCount: row.deletedCount,
+      freedBytes: toNumber(row.freedBytes),
+      durationMs: row.durationMs,
+      errorMessage: row.errorMessage ?? null,
+      startedAt: toIso(row.startedAt) ?? new Date(0).toISOString(),
+      finishedAt: toIso(row.finishedAt),
+      ...(report ? { report } : {}),
+    };
+  });
 }

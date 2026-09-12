@@ -138,6 +138,48 @@ describe("file artifact cleanup job store", () => {
     expect(queryParams).toContain(300_000);
   });
 
+  it("задание очистки хранилища ставится по явному ключу и оживляется после завершения", async () => {
+    const dialect = new PgDialect();
+    let querySql = "";
+    let queryParams: unknown[] = [];
+    const database = {
+      execute: vi.fn(async (query: unknown) => {
+        const compiled = dialect.sqlToQuery(query as never);
+        querySql = compiled.sql;
+        queryParams = compiled.params;
+        return { rows: [{ id: "00000000-0000-0000-0000-000000000001" }] };
+      }),
+    };
+    const store = createFileArtifactCleanupJobStore(database);
+    const payload = {
+      kind: "storage_objects" as const,
+      bucket: "ws-ws-1",
+      keys: ["json-imports/a.json"],
+      usageAccounting: true,
+      orphanCheck: { modifiedBefore: "2026-09-04T00:00:00.000Z" },
+    };
+
+    await expect(store.enqueueStorageJob({
+      idempotencyKey: "storage-orphans:ws-ws-1:abc",
+      workspaceId: "ws-1",
+      resourceType: "workspace_storage",
+      resourceId: "ws-1",
+      reason: "storage_orphans",
+      payload,
+    })).resolves.toBe(true);
+
+    expect(queryParams).toContain("storage-orphans:ws-ws-1:abc");
+    expect(queryParams).toContain(JSON.stringify(payload));
+    const conflictClause = querySql.slice(querySql.indexOf("ON CONFLICT"));
+    expect(conflictClause).toContain("payload = EXCLUDED.payload");
+    expect(conflictClause).toMatch(/attempts = 0/);
+    expect(conflictClause).toContain("file_artifact_cleanup_jobs.status = 'success'");
+    expect(conflictClause).toContain(
+      "file_artifact_cleanup_jobs.status = 'error' AND file_artifact_cleanup_jobs.next_retry_at IS NULL",
+    );
+    expect(conflictClause).not.toContain("'pending' OR");
+  });
+
   it("stats разделяет retryable error и terminal dead", async () => {
     const dialect = new PgDialect();
     let querySql = "";

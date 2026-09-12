@@ -3,30 +3,23 @@
  *
  * Отличие от монорепного предка: доменных импортов НЕТ вовсе. Операции, владелец
  * которых монолит (удаление вложения чата с производными, удаление workspace-файла
- * с метерингом, reconcile Qdrant-usage), исполняются ТОЛЬКО через callback-gateway
- * `/api/internal/janitor` — см. docs/gateway-contract.md §3.1. Всё остальное
- * (PG-retention, скан S3-сирот, скан/удаление коллекций Qdrant, ledger) janitor
+ * с метерингом, reconcile Qdrant-usage, удаление файлов-сирот), исполняются ТОЛЬКО через
+ * callback-gateway `/api/internal/janitor` — см. docs/gateway-contract.md §3.1. Всё остальное
+ * (PG-retention, сверка хранилища с базой, скан/удаление коллекций Qdrant, ledger) janitor
  * делает сам по общим БД/MinIO/Qdrant.
  */
 import { eq } from "drizzle-orm";
-import { ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 import { db } from "../db";
 import { cacheKeys, getCache } from "../cache";
 import { createLogger } from "../lib/logger";
-import { minioClient } from "../minio-client";
 import { getQdrantClient, QdrantConfigurationError } from "../qdrant";
 import {
   buildAssistantFileCollectionName,
   computeOrphans,
   isManagedCollectionName,
 } from "../qdrant-collection-names";
-import {
-  embeddingProviders,
-  workspaces,
-  workspaceVectorCollections,
-} from "@shared/schema";
-import { workspaceBucketName } from "@shared/storage-naming";
+import { embeddingProviders, workspaceVectorCollections } from "@shared/schema";
 
 import {
   createHttpJanitorDomainGateway,
@@ -49,12 +42,7 @@ import {
   removeLedgerRow,
   type QdrantOrphanStore,
 } from "./tasks/qdrant-orphan-gc-task";
-import {
-  createFeedbackAttachmentOrphanStore,
-  FEEDBACK_ATTACHMENT_PREFIX,
-  findKnownKeysInDb,
-  type FeedbackAttachmentOrphanStore,
-} from "./tasks/s3-feedback-attachment-orphan-task";
+import { createStorageOrphanDeps, type StorageOrphanDeps } from "./tasks/storage-orphan-task";
 import { createFileArtifactCleanupJobStore } from "./file-artifact-cleanup-job-store";
 
 const logger = createLogger("janitor-default-stores");
@@ -63,7 +51,7 @@ export interface JanitorStores {
   pg: RetentionStore;
   s3: Record<string, S3RetentionStore>;
   qdrant: QdrantOrphanStore;
-  feedbackAttachmentOrphans: FeedbackAttachmentOrphanStore;
+  storageOrphans: StorageOrphanDeps;
 }
 
 /**
@@ -174,30 +162,6 @@ async function computeCurrentOrphans(): Promise<string[]> {
   return computeOrphans(existing, expected);
 }
 
-/** Полный список S3-объектов с префиксом фидбек-вложений (пагинация по токену). */
-async function listFeedbackS3Objects(
-  bucket: string,
-): Promise<Array<{ key: string; lastModified: Date; size: number }>> {
-  const objects: Array<{ key: string; lastModified: Date; size: number }> = [];
-  let token: string | undefined;
-  do {
-    const response = await minioClient.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: FEEDBACK_ATTACHMENT_PREFIX,
-        ContinuationToken: token,
-      }),
-    );
-    for (const item of response.Contents ?? []) {
-      if (item.Key && item.LastModified) {
-        objects.push({ key: item.Key, lastModified: item.LastModified, size: item.Size ?? 0 });
-      }
-    }
-    token = response.IsTruncated ? response.NextContinuationToken : undefined;
-  } while (token);
-  return objects;
-}
-
 export function defaultStores(): JanitorStores {
   const gateway = requireDomainGateway();
   const cleanupJobs = createFileArtifactCleanupJobStore();
@@ -233,13 +197,7 @@ export function defaultStores(): JanitorStores {
       removeLedgerRow,
       reconcileUsage: () => gateway.reconcileQdrantUsage(),
     }),
-    feedbackAttachmentOrphans: createFeedbackAttachmentOrphanStore({
-      listWorkspaces: () =>
-        db.select({ id: workspaces.id, storageBucket: workspaces.storageBucket }).from(workspaces),
-      listS3Objects: listFeedbackS3Objects,
-      findKnownKeys: findKnownKeysInDb,
-      deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),
-      defaultBucketName: workspaceBucketName,
-    }),
+    // Сверка хранилища: найденное уходит в очередь удаления, файлы удаляет монолит после перепроверки.
+    storageOrphans: createStorageOrphanDeps((job) => cleanupJobs.enqueueStorageJob(job)),
   };
 }

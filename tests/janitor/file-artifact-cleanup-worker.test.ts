@@ -39,6 +39,7 @@ function store(activeAsr = false): FileArtifactCleanupJobStore {
     complete: vi.fn(async () => true),
     fail: vi.fn(async () => true),
     enqueue: vi.fn(async () => true),
+    enqueueStorageJob: vi.fn(async () => true),
     stats: vi.fn(async () => ({ pending: 0, processing: 0, error: 0, dead: 0, oldestReadyAgeSeconds: 0 })),
   };
 }

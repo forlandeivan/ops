@@ -57,9 +57,15 @@ function makeStores(pg: RetentionStore): JanitorStores {
       deleteCollection: vi.fn(async () => false),
       reconcileUsage: vi.fn(async () => undefined),
     },
-    feedbackAttachmentOrphans: {
-      countOrphans: vi.fn(async () => 0),
-      sweep: vi.fn(async () => ({ deleted: 0, freedBytes: 0 })),
+    storageOrphans: {
+      bucketPrefix: () => "ws-",
+      defaultBucketName: (id) => `ws-${id}`,
+      listLiveWorkspaces: vi.fn(async () => []),
+      listBuckets: vi.fn(async () => []),
+      listObjectsPage: vi.fn(async () => ({ objects: [], nextToken: null })),
+      loadReferencedKeys: vi.fn(async () => new Set<string>()),
+      loadOwnerIds: vi.fn(async () => new Set<string>()),
+      enqueue: vi.fn(async () => true),
     },
   };
 }

@@ -111,6 +111,33 @@ export async function tryAcquireLock(
   }
 }
 
+const EXTEND_LOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("pexpire", KEYS[1], ARGV[2])
+end
+return 0
+`;
+
+/**
+ * Продлевает лок, пока им владеет этот держатель. Долгий фоновый прогон держит короткий TTL и
+ * продлевает его по ходу: после падения процесса лок освобождается за один TTL, а не за часы.
+ * Без Redis продлевать нечего — true, как у no-op лока.
+ */
+export async function extendLock(lock: RedisLockHandle, ttlMs: number): Promise<boolean> {
+  const client = getClient();
+  if (!client) {
+    return true;
+  }
+
+  try {
+    const result = await client.eval(EXTEND_LOCK_SCRIPT, 1, `${LOCK_KEY_PREFIX}${lock.key}`, lock.token, String(ttlMs));
+    return result === 1;
+  } catch (err) {
+    logger.warn({ err, key: lock.key }, 'redis-lock: extendLock failed');
+    return false;
+  }
+}
+
 /**
  * Release a previously acquired lock.
  * Errors are swallowed - the TTL acts as a safety net if release fails.

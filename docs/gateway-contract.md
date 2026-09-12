@@ -58,10 +58,15 @@ Durable-очередь ручной и плановой очистки опис�
 ### Runtime-RPC (`JANITOR_RUNTIME_PORT`, bearer `UNICA_JANITOR_RUNTIME_TOKEN`, timingSafeEqual)
 
 - `GET /v1/health` — без токена; `{status, tokenConfigured}`.
-- `POST /v1/cleanup-policies/:key/preview` — dry-run; `200 {matched}`.
+- `POST /v1/cleanup-policies/:key/preview` — body `{actorId?: string}`; dry-run; `200 {matched}`.
+  Фоновая политика (`backgroundRun` в реестре, сейчас только `s3.storage.orphans`) запускает
+  проверку и отвечает сразу: `200 {matched, started, reason?}`. `matched` — число из последнего
+  прогона; `started=false` с `reason` ∈ already_running|locked — проверка уже идёт здесь или в
+  другом экземпляре. Отчёт и итог пишутся в `cleanup_run_log`, `actorId` — инициатор в журнале.
 - `POST /v1/cleanup-policies/:key/run-now` — body `{actorId?: string}`; синхронно до конца
   прогона; `200 {status, matched, deleted, freedBytes}` (`status` ∈ success|partial|failed|
-  skipped_locked|skipped_disabled).
+  skipped_locked|skipped_disabled). Фоновая политика отвечает сразу `status: running`, при занятом
+  локе — `skipped_locked` с `reason`.
 - Ошибки: токен не задан → `503 JANITOR_RUNTIME_TOKEN_NOT_CONFIGURED`; неверный →
   `401 JANITOR_RUNTIME_UNAUTHORIZED`; неизвестный ключ → `404 CLEANUP_POLICY_ERROR`.
 
@@ -84,8 +89,25 @@ URL или токен пуст → ops завершается с понятно�
 - `POST /v1/file-artifacts/cleanup` — единая версия для durable-очереди. Body
   `{version:1, jobId, workerId}`. `workspaceId` и snapshot артефакта не передаются как
   authority: монолит загружает каноническую job из общей `file_artifact_cleanup_jobs` по
-  `jobId` и проверяет текущего lease-владельца по `workerId`. Затем он идемпотентно удаляет
-  канонические и производные MinIO-объекты и Files-копию, после чего очищает ссылки.
+  `jobId` и проверяет текущего lease-владельца по `workerId`. Вид работы задаёт
+  `payload.kind`; исполнитель ops его не интерпретирует.
+  - Без `kind` — snapshot вложения чата. Монолит идемпотентно удаляет канонические и
+    производные MinIO-объекты и Files-копию, после чего очищает ссылки. Необязательное поле
+    `bucket` — имя бакета на момент постановки: если строки пространства уже нет, удаление идёт
+    по нему или по конвенции `ws-<id>`, без учёта квоты.
+  - `storage_objects` — `{bucket, keys (до 1000), usageAccounting, orphanCheck?}`: перечисленные
+    объекты — картинки `kb-images/` и оригиналы удалённых документов базы знаний, файлы-сироты из
+    сверки хранилища. У сирот `orphanCheck: {modifiedBefore}`: монолит перед удалением заново
+    проверяет каждый ключ по карте владения `shared/storage-ownership.ts` и по времени записи
+    объекта. Ключ, на который снова ссылается строка, и файл новее среза остаются; бакет, в
+    который пишут несколько пространств, не трогается. Ответ `{ok, deleted, skipped, kept}`.
+  - `storage_prefix` — `{bucket, prefix, removeBucket, round}`: порционная очистка бакета
+    удалённого пространства. Незаконченная порция ставит продолжение новой job
+    `<idempotency_key>:r<N>` и отвечает `2xx`, опустевший бакет удаляется. Живое пространство
+    даёт `409 FILE_ARTIFACT_CLEANUP_WORKSPACE_ALIVE`; бакет без id пространства в имени или
+    бакет, на который ссылается живое пространство, — `409 FILE_ARTIFACT_CLEANUP_BUCKET_GUARD`.
+    Обе ошибки `retryable:false`.
+
   `2xx` — успех; `409 FILE_ARTIFACT_CLEANUP_ACTIVE_ASR` — отложить без attempts;
   остальные ошибки содержат `code` и `retryable`.
 - `POST /workspace-files/delete` — body `{workspaceId, storageKey}`; удаляет workspace-файл
@@ -95,8 +117,9 @@ URL или токен пуст → ops завершается с понятно�
 - Ошибки: нет токена → `503 JANITOR_GATEWAY_NOT_CONFIGURED`; неверный → `401
   JANITOR_GATEWAY_UNAUTHORIZED`; невалидное тело → `400 JANITOR_GATEWAY_BAD_REQUEST`.
 
-Всё остальное (24 PG-задачи, S3-скан фидбек-сирот, Qdrant-скан/удаление коллекций,
+Всё остальное (PG-задачи, сверка хранилища с базой, Qdrant-скан/удаление коллекций,
 ledger, журнал, локи) janitor исполняет сам по общей БД/MinIO/Qdrant — gateway не нужен.
+Удаление найденных сверкой файлов идёт через очередь и `POST /v1/file-artifacts/cleanup`.
 
 ## 4. Семантика исполнения
 
@@ -115,6 +138,9 @@ ledger, журнал, локи) janitor исполняет сам по обще�
   исходных строк. Для двух PG-политик enqueue snapshots и каскадный DELETE выполняются
   одним data-modifying CTE; активная ASR исключает chat/assistant из батча.
   Политика `s3.chat_attachments.audio_video` выключена по умолчанию.
+- Удаление пространства, пользователя, документа или базы знаний в монолите ставит в той же
+  транзакции ещё и `storage_prefix` (бакет удалённого пространства) и `storage_objects`
+  (картинки и оригиналы документов). Для ops это обычные jobs очереди.
 - Перед enqueue и непосредственно перед gateway проверяется активная ASR по `fileId`,
   `attachmentId` и `externalUri`. Для execution эффективный статус вычисляется как
   `COALESCE(lifecycle_status, status, 'accepted')`, поэтому legacy-строка с пустым
@@ -128,6 +154,22 @@ ledger, журнал, локи) janitor исполняет сам по обще�
   S3-кандидат подавляется только уже живой job; terminal job разрешено requeue-ить.
 - `JANITOR_ENABLED=false` останавливает только плановые политики: очередь ручных удалений
   продолжает обрабатываться.
+- Фоновый прогон (`backgroundRun`): строка журнала со статусом `running` пишется в начале,
+  отчёт обновляется по ходу (`recordRunProgress`), итог — в конце. Лок `janitor:<resourceKey>`
+  берётся на 10 минут и продлевается каждые 3 минуты, поэтому после падения процесса политика
+  освобождается за один TTL. Строку `running` без живого прогона закрывает статусом `failed`
+  следующий тик, если лок политики свободен, или следующий старт этой политики. SIGTERM
+  прерывает фоновый прогон, итог пишется как `partial`; новые фоновые прогоны процесс уже не
+  стартует. Плановый проход фоновую политику только запускает и не ждёт.
+- Сверка хранилища (`s3.storage.orphans`) обходит бакеты с префиксом `WORKSPACE_BUCKET_PREFIX` и
+  бакеты живых пространств. Объект сверяется с картой владения `shared/storage-ownership.ts`:
+  ссылки грузятся постранично по id и хранятся хешами, только для встретившихся папок. Найденное
+  ставится в очередь заданиями `storage_objects` с `orphanCheck` (ключ идемпотентности
+  `storage-orphans:<bucket>:<md5 ключей>`) и `storage_prefix` для бакета удалённого пространства
+  (`storage-orphans-bucket:<bucket>`). Повторная постановка оживляет завершившееся задание. Бакет
+  удалённого пространства чистится, только если в него ничего не писали дольше срока политики.
+  Бакет, в который пишут несколько пространств, и бакет, в имени которого id живого пространства,
+  пропускаются с записью в отчёт. За прогон ставится не больше 200 000 файлов.
 
 ## 5. Владение данными
 
@@ -137,7 +179,7 @@ ledger, журнал, локи) janitor исполняет сам по обще�
 `file_artifact_cleanup_jobs` — общая durable-очередь удаления файловых артефактов;
 producer-ы живут в монолите и retention-движке ops, consumer — постоянный worker ops.
 
-Каталог задач (30 шт.: 24 pg / 4 s3 / 1 s3_reconcile / 1 qdrant) — декларативный реестр
+Каталог задач (35 шт.: 27 pg / 6 s3 / 1 s3_reconcile / 1 qdrant) — декларативный реестр
 в коде; консистентность со схемой стережёт контракт-тест
 `tests/janitor/janitor-registry-schema-contract.test.ts` в CI монорепы.
 

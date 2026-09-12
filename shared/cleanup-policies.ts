@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { StorageOrphanCategory } from "./storage-ownership";
+
 /**
  * Контракт политик уборки (janitor). Общий для сервера и админ-клиента.
  *
@@ -31,7 +33,9 @@ export const cleanupCategories = [
 ] as const;
 export type CleanupCategory = (typeof cleanupCategories)[number];
 
+/** `running` — фоновый прогон ещё идёт: журнал получает строку в начале и обновляет её по ходу. */
 export const cleanupRunStatuses = [
+  "running",
   "success",
   "partial",
   "failed",
@@ -49,6 +53,50 @@ export const RETENTION_DAYS_MAX = 3650;
 export const BATCH_SIZE_MIN = 1;
 export const BATCH_SIZE_MAX = 100_000;
 
+/** Единая политика поиска файлов-сирот в хранилище. */
+export const STORAGE_ORPHANS_POLICY_KEY = "s3.storage.orphans";
+
+/**
+ * Строки отчёта сверки хранилища: категории сирот по карте владения и служебные строки.
+ * `deleted_workspaces` — бакеты пространств, которых больше нет; `unrecognized` — папки вне
+ * карты владения; `protected` — защищённые папки. Последние две не удаляются никогда.
+ */
+export type StorageOrphanReportCategory =
+  | StorageOrphanCategory
+  | "deleted_workspaces"
+  | "unrecognized"
+  | "protected";
+
+export interface StorageOrphanCategoryStatsDto {
+  category: StorageOrphanReportCategory;
+  objects: number;
+  bytes: number;
+  /** Старше срока политики — к удалению. */
+  maturedObjects: number;
+  maturedBytes: number;
+  /** Только у бакетов удалённых пространств: сколько бакетов найдено и сколько из них к удалению. */
+  buckets?: number;
+  maturedBuckets?: number;
+  /** Несколько примеров путей; для бакетов удалённых пространств — имена бакетов. */
+  samples: string[];
+}
+
+/** Отчёт сверки хранилища на сирот: пишется в журнал прогона и обновляется по ходу проверки. */
+export interface StorageOrphanReportDto {
+  kind: "storage_orphans";
+  version: 1;
+  retentionDays: number;
+  progress: { bucketsTotal: number; bucketsScanned: number; objectsScanned: number };
+  categories: StorageOrphanCategoryStatsDto[];
+  /** Поставлено на удаление этим прогоном; у проверки без удаления — нули. */
+  queued: { objects: number; bytes: number; buckets: number; jobs: number };
+  /** Прогон упёрся в предел объектов за раз — остаток уйдёт следующим прогоном. */
+  limitReached: boolean;
+  errors: Array<{ bucket: string; message: string }>;
+}
+
+export type CleanupRunReportDto = StorageOrphanReportDto;
+
 /** Сводка последнего прогона задачи уборки. */
 export interface CleanupRunSummaryDto {
   mode: CleanupMode;
@@ -61,6 +109,8 @@ export interface CleanupRunSummaryDto {
   errorMessage: string | null;
   startedAt: string;
   finishedAt: string | null;
+  /** Отчёт прогона, если политика его ведёт (сверка хранилища на сирот). */
+  report?: CleanupRunReportDto | null;
 }
 
 /** Строка журнала очистки: один прогон любой политики (плоский список по всем). */
@@ -95,7 +145,32 @@ export interface CleanupPolicyDto {
   strippedColumns: string[];
   /** Поясняет каскадные удаления по FK, если есть. */
   cascadeNote: string | null;
+  /** Предпросмотр и ручной запуск идут в фоне: ответ приходит сразу, итог — в журнале. */
+  runsInBackground?: boolean;
   lastRun: CleanupRunSummaryDto | null;
+}
+
+/**
+ * Ответ предпросмотра. У фоновой политики `started` сообщает, что проверка запущена, а
+ * `reason` — почему не запущена (уже идёт или занята другим экземпляром уборщика).
+ */
+export interface CleanupPreviewResultDto {
+  matched: number;
+  started?: boolean;
+  reason?: "already_running" | "locked";
+}
+
+/** Очередь удаления файлов `file_artifact_cleanup_jobs` глазами администратора. */
+export interface FileCleanupQueueStatsDto {
+  /** Ждут исполнителя, включая отложенные на время. */
+  pending: number;
+  processing: number;
+  /** Упали, повтор уже запланирован. */
+  retrying: number;
+  /** Упали окончательно: без ручного повтора файлы не удалятся. */
+  failed: number;
+  oldestPendingAt: string | null;
+  recentErrors: Array<{ message: string; count: number; lastAt: string }>;
 }
 
 export const updateCleanupPolicySchema = z

@@ -7,7 +7,11 @@ import { getAppProcessRole, isJanitorProcessRole } from "./config/process-role";
 import { db } from "./db";
 import { createLogger } from "./lib/logger";
 import { startJanitorHealthServer, type JanitorHealthState } from "./janitor/health-server";
-import { startJanitorOrchestrator, type JanitorOrchestratorHandle } from "./janitor/janitor-orchestrator";
+import {
+  startJanitorOrchestrator,
+  stopBackgroundRuns,
+  type JanitorOrchestratorHandle,
+} from "./janitor/janitor-orchestrator";
 import { startJanitorRuntimeApiServer } from "./janitor/runtime-api-server";
 import { createHttpJanitorDomainGateway, gatewayToken, gatewayUrl } from "./janitor/domain-gateway-client";
 import {
@@ -127,6 +131,8 @@ async function bootstrapRuntime(): Promise<void> {
       // stop() прерывает текущий проход между батчами и дожидается его завершения,
       // чтобы pool.end() не оборвал бегущий SQL на полуслове.
       await orchestrator?.stop();
+      // Фоновые прогоны из админки идут и при выключенном плановом тике (JANITOR_ENABLED=false).
+      await stopBackgroundRuns();
       await cleanupWorker?.stop();
 
       const { pool } = await import("./db");

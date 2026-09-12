@@ -41,7 +41,7 @@ describe("janitor task registry", () => {
         // оригиналы и canonical/ политика не затрагивает (префикс-гард в ops-сторе).
         "s3.ingest_sources.workdir",
         // E13: кадры видео (frames/) — 30 дней с автоудалением, пересчёт из оригинала
-        // по требованию; сироты ingest/ и canonical/ остаются opt-in (sensitive).
+        // по требованию; сверка файлов-сирот остаётся opt-in (sensitive).
         "s3.ingest_frames",
         // журнал запусков агента (eec6aabb): новые таблицы, но включены по умолчанию намеренно —
         // debug-трейс содержит тексты документов пользователей (strip через 7д = privacy-by-default),
@@ -105,18 +105,7 @@ describe("janitor task registry", () => {
     expect(autosave?.equalsFilter).toEqual({ column: "source", value: "autosave" });
   });
 
-  it("registers ingest artifact retention policies (E13): orphans opt-in+sensitive, frames enabled", () => {
-    const ingestOrphans = getJanitorTask("s3.ingest.orphans");
-    const canonicalOrphans = getJanitorTask("s3.canonical.orphans");
-    for (const policy of [ingestOrphans, canonicalOrphans]) {
-      expect(policy?.storage).toBe("s3_reconcile");
-      expect(policy?.defaultEnabled).toBe(false);
-      expect(policy?.sensitive).toBe(true);
-      expect(policy?.cascadeNote).toBeTruthy();
-      // сирота определяется содержимым бакета, строки-владельца у неё нет: `table` —
-      // синтетический идентификатор набора объектов, миграции под него не заводятся.
-      expect(policy?.virtualTable).toBe(true);
-    }
+  it("keeps video frames retention (E13) enabled by default", () => {
     const frames = getJanitorTask("s3.ingest_frames");
     expect(frames?.storage).toBe("s3");
     expect(frames?.table).toBe("ingest_sources");
@@ -125,24 +114,40 @@ describe("janitor task registry", () => {
     expect(frames?.defaultRetentionDays).toBe(30);
   });
 
-  // Волна 8 (E22): таблицы-владельца json_import_jobs больше нет, уборка её файлов
-  // стала реконсиляцией по префиксу и по умолчанию выключена — удаление чужих
-  // объектов из хранилища включает администратор осознанно.
-  it("registers legacy-import orphan reconcile by prefix (E22, opt-in, sensitive)", () => {
-    expect(getJanitorTask("s3.json_imports.stale")).toBeUndefined();
+  // Одна сверка хранилища с базой заменила четыре сверки по отдельным папкам: карта
+  // владения (shared/storage-ownership.ts) описывает все папки бакета пространства.
+  it("registers a single storage orphan reconcile instead of per-prefix reconciles", () => {
+    for (const legacyKey of [
+      "s3.json_imports.stale",
+      "s3.legacy_imports.orphans",
+      "s3.ingest.orphans",
+      "s3.canonical.orphans",
+      "s3.chat_feedback_attachments.orphans",
+    ]) {
+      expect(getJanitorTask(legacyKey)).toBeUndefined();
+    }
 
-    const orphans = getJanitorTask("s3.legacy_imports.orphans");
+    const orphans = getJanitorTask("s3.storage.orphans");
+    expect(orphans?.category).toBe("storage");
     expect(orphans?.storage).toBe("s3_reconcile");
     expect(orphans?.action).toBe("delete_object");
-    expect(orphans?.table).toBe("legacy_import_orphan_objects");
+    expect(orphans?.table).toBe("storage_orphan_objects");
     expect(orphans?.virtualTable).toBe(true);
-    expect(orphans?.timeColumn).toBe("first_seen_at");
+    expect(orphans?.timeColumn).toBe("last_modified");
     expect(orphans?.defaultEnabled).toBe(false);
     expect(orphans?.sensitive).toBe(true);
     expect(orphans?.defaultRetentionDays).toBe(7);
-    expect(orphans?.description).toContain("json-imports/");
-    expect(orphans?.description).toContain("archive-imports/");
-    expect(orphans?.description).toContain("document-imports/");
+    expect(orphans?.defaultBatchSize).toBeLessThanOrEqual(1000);
+    expect(orphans?.backgroundRun).toBe(true);
+    expect(orphans?.cascadeNote).toBeTruthy();
+
+    const reconciles = JANITOR_TASKS.filter((task) => task.storage === "s3_reconcile").map((task) => task.key);
+    expect(reconciles).toEqual(["s3.storage.orphans"]);
+  });
+
+  it("runs only the storage reconcile in background", () => {
+    const background = JANITOR_TASKS.filter((task) => task.backgroundRun).map((task) => task.key);
+    expect(background).toEqual(["s3.storage.orphans"]);
   });
 
   // Флаг synthetic-имени не должен стать лазейкой «пометил и не думаю»: им закрываются
@@ -155,7 +160,7 @@ describe("janitor task registry", () => {
       }
       expect(task.storage).toBe("s3_reconcile");
     }
-    expect(getJanitorTask("s3.chat_feedback_attachments.orphans")?.virtualTable).toBe(false);
+    expect(getJanitorTask("s3.chat_attachments.other")?.virtualTable).toBe(false);
     expect(getJanitorTask("qdrant.orphaned_collections")?.virtualTable).toBe(false);
   });
 

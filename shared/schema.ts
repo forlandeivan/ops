@@ -9783,6 +9783,8 @@ export const cleanupRunLog = pgTable(
     // Инициатор прогона: 'auto' (по расписанию) или 'manual' (ручной запуск из админки).
     triggeredBy: varchar("triggered_by", { length: 16 }).notNull().default("auto"),
     triggeredByAdminId: varchar("triggered_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+    // Отчёт прогона (0370): сверка хранилища на сирот пишет категории, объёмы и прогресс.
+    report: jsonb("report").$type<Record<string, unknown> | null>(),
   },
   (table) => ({
     startedAtIdx: index("cleanup_run_log_started_at_idx").on(table.startedAt),

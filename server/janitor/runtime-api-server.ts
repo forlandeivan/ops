@@ -9,6 +9,8 @@
 import crypto from "crypto";
 import http from "http";
 
+import type { CleanupPreviewResultDto } from "@shared/cleanup-policies";
+
 import { createLogger } from "../lib/logger";
 import { CleanupPolicyError, getResolvedPolicy } from "./janitor-policy-service";
 import { previewPolicy, runPolicyNow, type RunPolicyOutcome } from "./janitor-orchestrator";
@@ -21,14 +23,15 @@ const ROUTE_RE = /^\/v1\/cleanup-policies\/([^/]+)\/(preview|run-now)$/;
 /** Инъекция исполнителей для юнит-тестов; боевые дефолты — оркестратор и policy-service. */
 export interface JanitorRuntimeApiDeps {
   getResolvedPolicy: (key: string) => Promise<unknown>;
-  previewPolicy: (key: string) => Promise<{ matched: number }>;
+  /** Фоновая политика отвечает сразу: `started` — проверка запущена, отчёт появится в журнале. */
+  previewPolicy: (key: string, actorId: string | null) => Promise<CleanupPreviewResultDto>;
   runPolicyNow: (key: string, actorId: string | null) => Promise<RunPolicyOutcome>;
 }
 
 function defaultDeps(): JanitorRuntimeApiDeps {
   return {
     getResolvedPolicy: (key) => getResolvedPolicy(key),
-    previewPolicy: (key) => previewPolicy(key),
+    previewPolicy: (key, actorId) => previewPolicy(key, undefined, actorId),
     runPolicyNow: (key, actorId) => runPolicyNow(key, undefined, actorId),
   };
 }
@@ -153,14 +156,14 @@ export async function startJanitorRuntimeApiServer(params: {
       // Валидация ключа тем же слоем, что и в админ-роуте: неизвестная политика → 404.
       await handlers.getResolvedPolicy(key);
 
+      const body = await readJsonBody(req);
+      const actorId = typeof body.actorId === "string" && body.actorId.trim().length > 0 ? body.actorId : null;
       if (action === "preview") {
-        const result = await handlers.previewPolicy(key);
+        const result = await handlers.previewPolicy(key, actorId);
         sendJson(res, 200, result);
         return;
       }
 
-      const body = await readJsonBody(req);
-      const actorId = typeof body.actorId === "string" && body.actorId.trim().length > 0 ? body.actorId : null;
       const result = await handlers.runPolicyNow(key, actorId);
       sendJson(res, 200, result);
     } catch (error) {

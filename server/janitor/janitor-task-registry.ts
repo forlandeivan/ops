@@ -63,7 +63,7 @@ export interface JanitorTaskDefinition {
    * Хранилище-владелец данных: PostgreSQL (по умолчанию), объектное (S3/MinIO) или
    * векторное (Qdrant). Для "s3" оркестратор использует S3-исполнитель (tasks/s3-retention-task),
    * для "qdrant" — GC осиротевших коллекций (tasks/qdrant-orphan-gc-task),
-   * для "s3_reconcile" — storage-driven reconcile (tasks/s3-feedback-attachment-orphan-task),
+   * для "s3_reconcile" — сверку содержимого бакетов с базой (tasks/storage-orphan-task),
    * а не PG-движок.
    */
   storage?: "postgres" | "s3" | "qdrant" | "s3_reconcile";
@@ -80,10 +80,16 @@ export interface JanitorTaskDefinition {
    * префиксу сравнивает бакет сам с собой, PG по этому имени не читается и не пишется.
    * Такие имена не участвуют в контракте «реестр ↔ shared/schema»: миграции под них не
    * заводятся, и таблицы с таким именем в схеме быть не должно. Задачи с реальной
-   * таблицей-владельцем (напр. s3.chat_feedback_attachments.orphans) флаг НЕ ставят —
+   * таблицей-владельцем (напр. s3.chat_attachments.other) флаг НЕ ставят —
    * контракт обязан ловить у них переименование колонок.
    */
   virtualTable?: boolean;
+  /**
+   * Прогон идёт в фоне: предпросмотр и ручной запуск отвечают сразу, журнал получает строку
+   * со статусом running и обновляет отчёт по ходу. Для долгой сверки хранилища, которая не
+   * укладывается в синхронный вызов из админки.
+   */
+  backgroundRun?: boolean;
 }
 
 const DEFAULT_BATCH_SIZE = 500;
@@ -109,6 +115,7 @@ function task(
     mimePrefixExclude: false,
     isNullColumn: null,
     virtualTable: false,
+    backgroundRun: false,
     ...definition,
   };
 }
@@ -530,20 +537,6 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 360,
   }),
   task({
-    key: "s3.chat_feedback_attachments.orphans",
-    label: "Осиротевшие скриншоты отзывов (без строки в БД)",
-    description:
-      "Удаляет объекты MinIO с префиксом `feedback-attachments/`, у которых нет соответствующей строки в `chat_feedback_attachments`. Такие объекты остаются после каскадного удаления пользователя-загрузчика (uploader_user_id CASCADE). Объекты удаляются только если LastModified старше grace-периода (поле «Срок, дней»); `dry_run` считает без удаления. Черновики с living DB-строкой не затрагиваются.",
-    category: "storage",
-    storage: "s3_reconcile",
-    action: "delete_object",
-    table: "chat_feedback_attachments",
-    timeColumn: "created_at",
-    defaultRetentionDays: 7,
-    defaultBatchSize: 200,
-    intervalMinutes: 1440,
-  }),
-  task({
     key: "s3.ingest_sources.workdir",
     label: "Рабочие файлы конвейера приёма (ingest/)",
     description:
@@ -559,73 +552,33 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultBatchSize: 100,
     intervalMinutes: 360,
   }),
-  // Волна 8 (E22): таблиц-владельцев старых импортов больше нет, поэтому уборка их
-  // файлов из уборки «по времени завершения задачи» становится реконсиляцией по
-  // префиксу — сравнением содержимого хранилища с базой, у которой этих строк уже нет.
+  // ── Файлы-сироты: единая сверка хранилища с базой ─────────────────────────────
+  // Заменила четыре сверки по отдельным папкам (скриншоты отзывов, ingest/, canonical/,
+  // старые импорты). Какие колонки базы владеют файлами каждой папки, описывает
+  // shared/storage-ownership.ts; исполнитель в ops сравнивает с этой картой все бакеты
+  // пространств. Прогон идёт в фоне: сверка терабайтного хранилища занимает минуты.
   task({
-    key: "s3.legacy_imports.orphans",
-    label: "Остатки старых конвейеров импорта (json-imports/, archive-imports/, document-imports/)",
+    key: "s3.storage.orphans",
+    label: "Файлы-сироты в хранилище",
     description:
-      "Удаляет объекты под префиксами json-imports/, archive-imports/ и document-imports/ — исходные файлы трёх конвейеров импорта, снесённых волной 8. Строк-владельцев в базе не осталось (таблицы дропнуты миграцией 0320), поэтому уборка идёт реконсиляцией по префиксу, а не по времени завершения задачи. Включается администратором осознанно и разово: после того как реконсиляция отчиталась о нуле, префиксы уходят из белого списка хранилища.",
+      "Сравнивает содержимое бакетов всех пространств с базой и удаляет файлы, на которые не ссылается ни одна запись, если они старше срока (поле «Срок, дней» — возраст файла). Бакеты удалённых пространств очищаются целиком. Незнакомые и защищённые папки попадают только в отчёт. Проверка идёт в фоне и собирает отчёт по категориям.",
     category: "storage",
     storage: "s3_reconcile",
     action: "delete_object",
-    table: "legacy_import_orphan_objects", // синтетический идентификатор набора объектов: строк-владельцев нет, резолв стора в ops идёт по этому имени
+    table: "storage_orphan_objects", // синтетический идентификатор набора объектов: сирота — объект без строки-владельца
     virtualTable: true,
-    timeColumn: "first_seen_at",
+    timeColumn: "last_modified",
     defaultEnabled: false,
-    defaultRetentionDays: 7, // grace: объект держится неделю, случайные гонки не удаляются
-    defaultBatchSize: 200,
+    defaultRetentionDays: 7, // возраст файла: свежий объект мог ещё не получить свою строку в базе
+    defaultBatchSize: 500, // ключей в одном задании удаления; больше 1000 исполнитель не принимает
     intervalMinutes: 1440,
     sensitive: true,
+    backgroundRun: true,
     cascadeNote:
-      "Удаляет исходные файлы прошлых импортов безвозвратно. Документы, созданные этими импортами, остаются: они хранят собственное содержимое, а не ссылку на исходник.",
+      "Удаляет файлы безвозвратно. Файлы моложе срока, незнакомые папки, кэш разбора canonical/ и шаблоны workflow не удаляются никогда.",
   }),
 
   // ── Артефакты конвейера приёма (волна 4/E13) ────────────────────────────────
-  // Осиротевшие объекты под ingest/ и canonical/ и кадры видео под frames/.
-  // Оригиналы источников по ВРЕМЕНИ не удаляются (Р2: срок задаёт политика, а кэш
-  // canonical живёт, пока жив исходник) — только сироты без строки-владельца.
-  // Исполнитель s3_reconcile для этих префиксов живёт в ops-репозитории; здесь —
-  // только метаданные политики (verify:janitor-import-surface).
-  task({
-    key: "s3.ingest.orphans",
-    label: "Осиротевшие объекты приёма (ingest/)",
-    description:
-      "Удаляет объекты под префиксом ingest/, у которых больше нет строки ingest_sources (источник удалён каскадом базы или пространства, а объект остался). По времени НЕ удаляет ничего: живые источники и их рабочие файлы не затрагиваются. Включается администратором осознанно.",
-    category: "storage",
-    storage: "s3_reconcile",
-    action: "delete_object",
-    table: "ingest_orphan_objects", // синтетический идентификатор набора объектов: сирота — это объект без строки, резолв стора в ops идёт по этому имени
-    virtualTable: true,
-    timeColumn: "first_seen_at",
-    defaultEnabled: false,
-    defaultRetentionDays: 7, // grace: сирота должна продержаться неделю, случайные гонки не удаляются
-    defaultBatchSize: 200,
-    intervalMinutes: 1440,
-    sensitive: true,
-    cascadeNote:
-      "Удаляет оригиналы файлов безвозвратно. Документ, чей оригинал удалён, нельзя перечитать другим парсером — только реиндекс со стадии чанкинга.",
-  }),
-  task({
-    key: "s3.canonical.orphans",
-    label: "Осиротевший кэш разбора (canonical/)",
-    description:
-      "Удаляет артефакты канонического разбора под canonical/, на которые не ссылается ни один источник. Живой кэш по возрасту не удаляется: он адресуется содержимым, и его потеря означает повторный разбор (для сканов — повторный платный OCR) при следующем реиндексе. Включается администратором осознанно.",
-    category: "storage",
-    storage: "s3_reconcile",
-    action: "delete_object",
-    table: "canonical_orphan_objects", // синтетический идентификатор набора объектов: сирота — это объект без ссылки, резолв стора в ops идёт по этому имени
-    virtualTable: true,
-    timeColumn: "first_seen_at",
-    defaultEnabled: false,
-    defaultRetentionDays: 7,
-    defaultBatchSize: 200,
-    intervalMinutes: 1440,
-    sensitive: true,
-    cascadeNote:
-      "Удаление кэша разбора означает повторный парсинг (и повторный OCR для сканов) при следующем реиндексе затронутых документов.",
-  }),
   task({
     key: "s3.ingest_frames",
     label: "Ключевые кадры видео (frames/)",

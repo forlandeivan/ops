@@ -46,6 +46,19 @@ export interface ScheduledFileArtifactCleanupInput {
   payload: FileArtifactCleanupSnapshot;
 }
 
+/**
+ * Задание очистки хранилища (`storage_objects` / `storage_prefix`) с явным ключом
+ * идемпотентности. Постановщик сам решает, что считать одним и тем же заданием.
+ */
+export interface StorageCleanupJobInput {
+  idempotencyKey: string;
+  workspaceId: string;
+  resourceType: string;
+  resourceId: string;
+  reason: string;
+  payload: Record<string, unknown> & { kind: "storage_objects" | "storage_prefix" };
+}
+
 export interface FileArtifactCleanupQueueStats {
   pending: number;
   processing: number;
@@ -120,6 +133,12 @@ export interface FileArtifactCleanupJobStore {
     params: { attempts: number; nextRetryAt: Date | null; error: string },
   ): Promise<boolean>;
   enqueue(input: ScheduledFileArtifactCleanupInput): Promise<boolean>;
+  /**
+   * Ставит задание очистки хранилища. Повторная постановка того же ключа оживляет задание,
+   * если оно уже завершилось (успехом или окончательной ошибкой): сверка снова нашла те же
+   * файлы, значит, их нужно удалить ещё раз. Ждущее или идущее задание не трогается.
+   */
+  enqueueStorageJob(input: StorageCleanupJobInput): Promise<boolean>;
   stats(): Promise<FileArtifactCleanupQueueStats>;
 }
 
@@ -266,6 +285,32 @@ export function createFileArtifactCleanupJobStore(
             updated_at = NOW()
         WHERE file_artifact_cleanup_jobs.status = 'error'
           AND file_artifact_cleanup_jobs.next_retry_at IS NULL
+        RETURNING id
+      `);
+      return rowsOf(result).length === 1;
+    },
+
+    async enqueueStorageJob(input) {
+      const result = await database.execute(sql`
+        INSERT INTO file_artifact_cleanup_jobs (
+          idempotency_key, workspace_id, resource_type, resource_id, reason,
+          payload_version, payload, status, attempts, created_at, updated_at
+        ) VALUES (
+          ${input.idempotencyKey}, ${input.workspaceId}, ${input.resourceType}, ${input.resourceId}, ${input.reason},
+          ${FILE_ARTIFACT_CLEANUP_PAYLOAD_VERSION}, ${JSON.stringify(input.payload)}::jsonb,
+          'pending', 0, NOW(), NOW()
+        )
+        ON CONFLICT (idempotency_key) DO UPDATE
+        SET status = 'pending',
+            attempts = 0,
+            payload = EXCLUDED.payload,
+            worker_id = NULL,
+            lease_expires_at = NULL,
+            next_retry_at = NOW(),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE file_artifact_cleanup_jobs.status = 'success'
+           OR (file_artifact_cleanup_jobs.status = 'error' AND file_artifact_cleanup_jobs.next_retry_at IS NULL)
         RETURNING id
       `);
       return rowsOf(result).length === 1;
