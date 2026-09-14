@@ -22,6 +22,7 @@ export const storageOrphanCategories = [
   "feedback_screenshots",
   "workspace_icons",
   "legacy_imports",
+  "knowledge_transfer",
 ] as const;
 export type StorageOrphanCategory = (typeof storageOrphanCategories)[number];
 
@@ -86,6 +87,10 @@ export const WORKSPACE_STORAGE_WRITABLE_PREFIXES = [
   // frames/<sourceId>/<tMs>.jpg — ключевые кадры видео (волна 6/M13); политика уборки —
   // janitor s3.ingest_frames (E13), 30 дней с автоудалением, пересчёт из оригинала.
   "frames/",
+  // kb-transfer/exports|imports/<jobId>/<файл>.zip — архивы переноса базы знаний между
+  // инстансами. Живут ограниченно: свип воркера переноса удаляет объект завершённого
+  // задания через 7 суток и ставит archive_expired.
+  "kb-transfer/",
 ] as const;
 
 /** Папки, которые пишутся мимо белого списка: картинки баз знаний image-storage кладёт сырым putObject. */
@@ -231,6 +236,25 @@ export const WORKSPACE_STORAGE_OWNERSHIP: readonly StoragePrefixOwnership[] = [
     references: [],
     pathOwners: [],
     note: LEGACY_IMPORT_NOTE,
+  },
+  {
+    prefix: "kb-transfer/",
+    category: "knowledge_transfer",
+    mode: "reconcile",
+    references: [
+      {
+        table: "knowledge_base_transfer_jobs",
+        column: "archive_object_key",
+        workspaceColumn: "workspace_id",
+      },
+      {
+        table: "knowledge_base_transfer_jobs",
+        column: "source_object_key",
+        workspaceColumn: "workspace_id",
+      },
+    ],
+    pathOwners: [],
+    note: "Архивы переноса базы знаний; объект без задания — остаток оборванной загрузки.",
   },
   {
     prefix: "canonical/",

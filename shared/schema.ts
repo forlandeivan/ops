@@ -2010,6 +2010,89 @@ export const knowledgeDeleteJobs = pgTable(
 export type KnowledgeDeleteJob = typeof knowledgeDeleteJobs.$inferSelect;
 export type KnowledgeDeleteJobInsert = typeof knowledgeDeleteJobs.$inferInsert;
 
+export const knowledgeBaseTransferJobTypes = ["export_base", "import_base"] as const;
+export type KnowledgeBaseTransferJobTypeRow = (typeof knowledgeBaseTransferJobTypes)[number];
+
+export const knowledgeBaseTransferJobStatuses = [
+  "pending",
+  "processing",
+  "completed",
+  "failed",
+  "canceled",
+] as const;
+export type KnowledgeBaseTransferJobStatusRow =
+  (typeof knowledgeBaseTransferJobStatuses)[number];
+
+/**
+ * Перенос базы знаний архивом между инстансами: задание на выгрузку базы в zip и задание на
+ * загрузку базы из zip. Формат пакета и границы v1 — shared/knowledge-base-transfer.ts,
+ * дизайн — docs/features/knowledge-base/base-archive-transfer.md.
+ *
+ * Почему отдельная таблица, а не knowledge_delete_jobs: у переноса есть числовой прогресс
+ * (`processed_units`/`total_units`), отчёт (`report`) и произведённый артефакт в объектном
+ * хранилище (`archive_object_key`), которого у удаления нет вовсе.
+ *
+ * `base_id` без FK намеренно: у импорта базы ещё нет в момент постановки, а после удаления
+ * базы задание остаётся в журнале как след операции.
+ */
+export const knowledgeBaseTransferJobs = pgTable(
+  "knowledge_base_transfer_jobs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    jobType: text("job_type").$type<KnowledgeBaseTransferJobTypeRow>().notNull(),
+    workspaceId: varchar("workspace_id").notNull(),
+    /** Экспорт: база-источник. Импорт: созданная база (NULL, пока не создана). */
+    baseId: varchar("base_id"),
+    baseName: text("base_name"),
+    status: text("status")
+      .$type<KnowledgeBaseTransferJobStatusRow>()
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    requestedByUserId: varchar("requested_by_user_id"),
+    formatVersion: integer("format_version").notNull().default(1),
+    /** Импорт: загруженный архив в бакете пространства (`kb-transfer/imports/...`). */
+    sourceObjectKey: text("source_object_key"),
+    /** Экспорт: собранный архив (`kb-transfer/exports/...`). Пусто после уборки по сроку. */
+    archiveObjectKey: text("archive_object_key"),
+    archiveSizeBytes: bigint("archive_size_bytes", { mode: "number" }),
+    /** Архив завершённого экспорта удалён свипом ретенции: задание есть, файла уже нет. */
+    archiveExpired: boolean("archive_expired").notNull().default(false),
+    totalUnits: integer("total_units").notNull().default(0),
+    processedUnits: integer("processed_units").notNull().default(0),
+    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+    report: jsonb("report"),
+    error: text("error"),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => ({
+    claimIdx: index("knowledge_base_transfer_jobs_claim_idx").on(
+      table.status,
+      table.nextRetryAt,
+      table.createdAt,
+    ),
+    workspaceIdx: index("knowledge_base_transfer_jobs_workspace_idx").on(
+      table.workspaceId,
+      table.status,
+      table.createdAt,
+    ),
+    // Ретенция архивов: свип ищет завершённые задания с ещё живым объектом.
+    retentionIdx: index("knowledge_base_transfer_jobs_retention_idx")
+      .on(table.finishedAt)
+      .where(sql`archive_object_key IS NOT NULL AND archive_expired = false`),
+    // Одна активная выгрузка на базу: повтор возвращает существующее задание.
+    activeExportUniqueIdx: uniqueIndex("knowledge_base_transfer_jobs_active_export_idx")
+      .on(table.workspaceId, table.baseId)
+      .where(sql`job_type = 'export_base' AND status IN ('pending', 'processing')`),
+  }),
+);
+export type KnowledgeBaseTransferJobRow = typeof knowledgeBaseTransferJobs.$inferSelect;
+export type KnowledgeBaseTransferJobInsert = typeof knowledgeBaseTransferJobs.$inferInsert;
+
 export const knowledgeDocumentIndexRevisionStatuses = [
   "processing",
   "ready",
