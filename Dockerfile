@@ -24,6 +24,10 @@ ENV NODE_ENV=production
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 2000 nodejs \
     && useradd --system --uid 2000 --gid nodejs --create-home --shell /usr/sbin/nologin nodejs
 
