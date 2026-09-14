@@ -212,6 +212,46 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     cascadeNote: "Каскадно удаляет события журнала (agent_execution_events).",
   }),
 
+  // ── Проверка достоверности ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md) ──
+  task({
+    key: "pg.chat_answer_quality.claims",
+    label: "Утверждения проверок достоверности",
+    description:
+      "Обнуляет детализацию утверждений (claims) в проверках достоверности ответов старше срока хранения. Строка проверки, вердикт и оценки сохраняются для статистики.",
+    category: "llm",
+    action: "strip_columns",
+    table: "chat_answer_quality",
+    timeColumn: "created_at",
+    strippedColumns: ["claims"],
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+  }),
+  task({
+    key: "pg.chat_answer_quality",
+    label: "Строки проверок достоверности (chat_answer_quality)",
+    description:
+      "Полностью удаляет проверки достоверности ответов старше срока хранения. Суточные срезы (chat_answer_quality_stats_day) не затрагиваются, отметки в сообщениях чата остаются.",
+    category: "llm",
+    action: "delete_rows",
+    table: "chat_answer_quality",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 400,
+  }),
+  task({
+    key: "pg.chat_answer_quality_jobs",
+    label: "Выполненные задания проверок достоверности (chat_answer_quality_jobs)",
+    description:
+      "Удаляет выполненные задания очереди проверки достоверности старше срока хранения. Ожидающие, выполняющиеся и сбойные задания не трогает — их закрывает сам воркер.",
+    category: "llm",
+    action: "delete_rows",
+    table: "chat_answer_quality_jobs",
+    timeColumn: "updated_at",
+    equalsFilter: { column: "status", value: "done" },
+    defaultEnabled: true,
+    defaultRetentionDays: 7,
+  }),
+
   // ── ASR ────────────────────────────────────────────────────────────────
   task({
     key: "pg.asr_executions.logs",

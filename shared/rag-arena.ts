@@ -3,6 +3,7 @@ import { z } from "zod";
 import { MAX_RELEVANCE_THRESHOLD, MAX_TOP_K, MIN_RELEVANCE_THRESHOLD, MIN_TOP_K } from "./indexing-rules";
 import { ragPipelineErrorDetailsSchema, ragPipelineExecutionSourceSchema } from "./rag-errors";
 import { searchProfileStrategies } from "./search-profiles";
+import { answerQualityClaimSchema } from "./answer-quality";
 
 export const ragArenaExperimentStatuses = [
   "pending",
@@ -174,6 +175,24 @@ export const ragArenaResultMetricsSchema = z.object({
   candidateCount: z.number().int().min(0).nullable(),
 });
 export type RagArenaResultMetrics = z.infer<typeof ragArenaResultMetricsSchema>;
+
+/** Детализация судьи достоверности по кейсу — колонка `judge_details` (монолит, 0372); фасад держит тип для схемы. */
+export const ragArenaJudgeDetailsSchema = z.object({
+  claims: z.array(answerQualityClaimSchema).default([]),
+  mustHaveFacts: z
+    .array(z.object({ fact: z.string(), found: z.boolean(), evidenceChunkIds: z.array(z.string()).default([]) }))
+    .default([]),
+  judgeModel: z.string().nullable().default(null),
+  judgePromptVersion: z.string().nullable().default(null),
+  judgeTokensIn: z.number().int().min(0).nullable().default(null),
+  judgeTokensOut: z.number().int().min(0).nullable().default(null),
+  judgeDurationMs: z.number().int().min(0).nullable().default(null),
+  status: z.enum(["done", "skipped", "failed"]).default("done"),
+  skipReason: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+  judgedAt: z.string().datetime().nullable().default(null),
+});
+export type RagArenaJudgeDetails = z.infer<typeof ragArenaJudgeDetailsSchema>;
 
 export const ragArenaReviewSchema = z.object({
   verdict: z.enum(ragArenaReviewVerdicts).nullable(),

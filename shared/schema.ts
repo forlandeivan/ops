@@ -70,7 +70,20 @@ import type {
   RagArenaResultMetrics,
   RagArenaResultStatus,
   RagArenaReview,
+  RagArenaJudgeDetails,
 } from "./rag-arena";
+import type {
+  AnswerQualityCheckStatus,
+  AnswerQualityClaim,
+  AnswerQualityCostMode,
+  AnswerQualityJobStatus,
+  AnswerQualityMode,
+  AnswerQualitySkipReason,
+  AnswerQualitySource,
+  AnswerQualityVerdict,
+  AnswerQualityVisibility,
+  ChatMessageAnswerQuality,
+} from "./answer-quality";
 import type {
   DocumentClaimLedgerEntry,
   DocumentDraftSection,
@@ -3916,6 +3929,19 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
    * (0362, волна С2). NULL = «Авто» = включено, когда такие базы есть; false — явное отключение.
    */
   systemKnowledgeEnabled: boolean("system_knowledge_enabled"),
+  // --- Проверка достоверности после ответа (docs/rag-answer-quality-metrics-strategy-2026-09.md,
+  // миграция 0372). Все поля NULL = «Авто» (дефолты `answerQualityDefaults` в shared/answer-quality.ts);
+  // значение — явный админ-override из карточки «Честность ответов чата». ---
+  answerQualityMode: text("answer_quality_mode").$type<AnswerQualityMode>(),
+  answerQualityJudgeModelId: text("answer_quality_judge_model_id"),
+  answerQualityWorkerConcurrency: integer("answer_quality_worker_concurrency"),
+  answerQualitySupportedThreshold: doublePrecision("answer_quality_supported_threshold"),
+  answerQualityPartialThreshold: doublePrecision("answer_quality_partial_threshold"),
+  answerQualityVisibility: text("answer_quality_visibility").$type<AnswerQualityVisibility>(),
+  answerQualityClaimsRetentionDays: integer("answer_quality_claims_retention_days"),
+  answerQualityCostMode: text("answer_quality_cost_mode").$type<AnswerQualityCostMode>(),
+  answerQualityArenaJudgeEnabled: boolean("answer_quality_arena_judge_enabled"),
+  answerQualityArenaJudgeModelId: text("answer_quality_arena_judge_model_id"),
   // --- Блок 8, задача 8.1: Tool-RAG (поиск по инструментам), Phase A. Все поля NULL = «Авто» (env-дефолт/
   // документированный fallback), значение — явный админ-override. Сужают ВНЕШНИЙ хвост (mcpTools/actions/
   // operations) ретривалом перед показом модели; ниже порога промоции ретривал — no-op (нулевой регресс). ---
@@ -4895,6 +4921,15 @@ export type ChatMessageGroundingMetadata = {
 };
 
 export type ChatMessageMetadata = {
+  /**
+   * Итог асинхронной проверки достоверности (docs/rag-answer-quality-metrics-strategy-2026-09.md):
+   * зеркало строки `chat_answer_quality`, дописывается воркером после ответа — клиент получает отметку
+   * вместе с сообщением по событию чата, детализация утверждений — отдельной ручкой по `checkId`.
+   * Лежит рядом с `grounding`, а не внутри: гейт честности может быть выключен, и `grounding` тогда пуст.
+   */
+  quality?: ChatMessageAnswerQuality;
+  /** Идентификатор прогона RAG, породившего ответ, — связь сообщения с журналом и проверкой. */
+  askAiRunId?: string;
   transcriptId?: string;
   transcriptStatus?: TranscriptStatus;
   audioSourceAvailable?: boolean;
@@ -5750,6 +5785,12 @@ export const ragArenaExperimentResults = pgTable(
     status: text("status").$type<RagArenaResultStatus>().notNull().default("pending"),
     metrics: jsonb("metrics").$type<RagArenaResultMetrics>().notNull().default(sql`'{}'::jsonb`),
     review: jsonb("review").$type<RagArenaReview>().notNull().default(sql`'{}'::jsonb`),
+    /**
+     * Судья арены (0372): утверждения ответа с доказательствами, модель, версия промпта, токены и
+     * длительность. Числовые оценки (faithfulness, answerRelevance, completeness, косинусы) лежат
+     * в `metrics` рядом с Hit/Recall, чтобы сводка считалась одним проходом.
+     */
+    judgeDetails: jsonb("judge_details").$type<RagArenaJudgeDetails>(),
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at"),
     finishedAt: timestamp("finished_at"),
@@ -5765,6 +5806,157 @@ export const ragArenaExperimentResults = pgTable(
 );
 export type RagArenaExperimentResult = typeof ragArenaExperimentResults.$inferSelect;
 export type RagArenaExperimentResultInsert = typeof ragArenaExperimentResults.$inferInsert;
+
+// --- Проверка достоверности ответов RAG (docs/rag-answer-quality-metrics-strategy-2026-09.md, 0372) ---
+
+/**
+ * Одна строка на проверенный ответ: ярусы 0 (сигналы) → 1 (близость по эмбеддингам) → 2 (судья).
+ * `chat_message_id`, `assistant_id`, `chat_id` без внешних ключей намеренно: проверка — след операции
+ * и переживает удаление сообщения и ассистента, статистика по дням от этого не портится. Вопрос и
+ * связь с журналом прогона дублируются, чтобы «Пробелы в знаниях» и список проверок не зависели от
+ * ретенции `knowledge_base_ask_ai_runs`.
+ */
+export const chatAnswerQualityChecks = pgTable(
+  "chat_answer_quality",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    assistantId: varchar("assistant_id"),
+    chatId: varchar("chat_id"),
+    chatMessageId: varchar("chat_message_id"),
+    askAiRunId: varchar("ask_ai_run_id").references(() => knowledgeBaseAskAiRuns.id, { onDelete: "set null" }),
+    assistantExecutionId: uuid("assistant_execution_id"),
+    source: text("source").$type<AnswerQualitySource>().notNull(),
+    llmModel: text("llm_model"),
+    embeddingProviderId: varchar("embedding_provider_id"),
+    status: text("status").$type<AnswerQualityCheckStatus>().notNull().default("done"),
+    tierReached: integer("tier_reached").notNull().default(0),
+    skipReason: text("skip_reason").$type<AnswerQualitySkipReason>(),
+    verdict: text("verdict").$type<AnswerQualityVerdict>(),
+    question: text("question"),
+    citationsCount: integer("citations_count"),
+    sourcesAttached: boolean("sources_attached"),
+    requestedIdentifiersFound: boolean("requested_identifiers_found"),
+    bestScore: doublePrecision("best_score"),
+    lexicalCoverage: doublePrecision("lexical_coverage"),
+    cosineAnswerContextMax: doublePrecision("cosine_answer_context_max"),
+    cosineAnswerContextMean: doublePrecision("cosine_answer_context_mean"),
+    cosineQuestionAnswer: doublePrecision("cosine_question_answer"),
+    faithfulness: doublePrecision("faithfulness"),
+    answerRelevance: doublePrecision("answer_relevance"),
+    claimsTotal: integer("claims_total"),
+    claimsSupported: integer("claims_supported"),
+    claimsContradicted: integer("claims_contradicted"),
+    /** Детализация утверждений; обнуляется политикой ретенции, строка и оценки остаются. */
+    claims: jsonb("claims").$type<AnswerQualityClaim[]>(),
+    judgeModel: text("judge_model"),
+    judgePromptVersion: text("judge_prompt_version"),
+    judgeTokensIn: integer("judge_tokens_in"),
+    judgeTokensOut: integer("judge_tokens_out"),
+    judgeDurationMs: integer("judge_duration_ms"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    judgedAt: timestamp("judged_at", { withTimezone: true }),
+  },
+  (table) => ({
+    createdIdx: index("chat_answer_quality_created_idx").on(table.createdAt),
+    workspaceIdx: index("chat_answer_quality_workspace_idx").on(table.workspaceId, table.createdAt),
+    assistantIdx: index("chat_answer_quality_assistant_idx").on(table.assistantId, table.createdAt),
+    verdictIdx: index("chat_answer_quality_verdict_idx").on(table.verdict, table.createdAt),
+    chatMessageUnique: uniqueIndex("chat_answer_quality_chat_message_uidx")
+      .on(table.chatMessageId)
+      .where(sql`chat_message_id IS NOT NULL`),
+    askAiRunUnique: uniqueIndex("chat_answer_quality_ask_ai_run_uidx")
+      .on(table.askAiRunId)
+      .where(sql`ask_ai_run_id IS NOT NULL`),
+    executionIdx: index("chat_answer_quality_execution_idx").on(table.assistantExecutionId),
+  }),
+);
+export type ChatAnswerQualityCheck = typeof chatAnswerQualityChecks.$inferSelect;
+export type ChatAnswerQualityCheckInsert = typeof chatAnswerQualityChecks.$inferInsert;
+
+/**
+ * Очередь воркера `chat-answer-quality`: одна вставка после `finalizeRunLog` конвейера RAG
+ * (по `ask_ai_run_id`), идентификатор сообщения чата дописывается маршрутом чата, когда ответ
+ * сохранён. Claim по `status='pending' AND next_run_at <= now()` с `FOR UPDATE SKIP LOCKED`;
+ * зависшие `running` возвращаются в очередь по истечении `lease_until`.
+ */
+export const chatAnswerQualityJobs = pgTable(
+  "chat_answer_quality_jobs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    askAiRunId: varchar("ask_ai_run_id").notNull(),
+    workspaceId: varchar("workspace_id").notNull(),
+    assistantId: varchar("assistant_id"),
+    chatId: varchar("chat_id"),
+    chatMessageId: varchar("chat_message_id"),
+    assistantExecutionId: uuid("assistant_execution_id"),
+    source: text("source").$type<AnswerQualitySource>().notNull(),
+    sourcesAttached: boolean("sources_attached"),
+    requestedIdentifiersFound: boolean("requested_identifiers_found"),
+    status: text("status").$type<AnswerQualityJobStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    leaseOwner: text("lease_owner"),
+    checkId: varchar("check_id"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    askAiRunUnique: uniqueIndex("chat_answer_quality_jobs_ask_ai_run_uidx").on(table.askAiRunId),
+    claimIdx: index("chat_answer_quality_jobs_claim_idx").on(table.status, table.nextRunAt, table.createdAt),
+    chatMessageIdx: index("chat_answer_quality_jobs_chat_message_idx").on(table.chatMessageId),
+    // Уборка выполненных заданий (janitor: status = 'done' старше срока) и свип воркера по updated_at.
+    retentionIdx: index("chat_answer_quality_jobs_retention_idx").on(table.status, table.updatedAt),
+  }),
+);
+export type ChatAnswerQualityJob = typeof chatAnswerQualityJobs.$inferSelect;
+export type ChatAnswerQualityJobInsert = typeof chatAnswerQualityJobs.$inferInsert;
+
+/**
+ * Суточный срез проверок по пространству, ассистенту и модели: воркер делает один upsert на
+ * проверку, страница «Знания и поиск → Качество» и вкладка «Качество» ассистента читают только его.
+ * Пустая строка в `assistant_id` / `llm_model` — «не задано» (первичный ключ не терпит NULL).
+ */
+export const chatAnswerQualityStatsDay = pgTable(
+  "chat_answer_quality_stats_day",
+  {
+    day: date("day").notNull(),
+    workspaceId: varchar("workspace_id").notNull(),
+    assistantId: varchar("assistant_id").notNull().default(""),
+    llmModel: text("llm_model").notNull().default(""),
+    checksTotal: integer("checks_total").notNull().default(0),
+    withSourcesTotal: integer("with_sources_total").notNull().default(0),
+    supportedCount: integer("supported_count").notNull().default(0),
+    partialCount: integer("partial_count").notNull().default(0),
+    unsupportedCount: integer("unsupported_count").notNull().default(0),
+    abstainedCount: integer("abstained_count").notNull().default(0),
+    noSourcesCount: integer("no_sources_count").notNull().default(0),
+    skippedCount: integer("skipped_count").notNull().default(0),
+    faithfulnessSum: doublePrecision("faithfulness_sum").notNull().default(0),
+    faithfulnessCount: integer("faithfulness_count").notNull().default(0),
+    answerRelevanceSum: doublePrecision("answer_relevance_sum").notNull().default(0),
+    answerRelevanceCount: integer("answer_relevance_count").notNull().default(0),
+    cosineAnswerContextSum: doublePrecision("cosine_answer_context_sum").notNull().default(0),
+    cosineAnswerContextCount: integer("cosine_answer_context_count").notNull().default(0),
+    judgeCalls: integer("judge_calls").notNull().default(0),
+    judgeTokensIn: bigint("judge_tokens_in", { mode: "number" }).notNull().default(0),
+    judgeTokensOut: bigint("judge_tokens_out", { mode: "number" }).notNull().default(0),
+    judgeDurationMsSum: bigint("judge_duration_ms_sum", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.day, table.workspaceId, table.assistantId, table.llmModel] }),
+    workspaceDayIdx: index("chat_answer_quality_stats_day_workspace_idx").on(table.workspaceId, table.day),
+    dayIdx: index("chat_answer_quality_stats_day_day_idx").on(table.day),
+  }),
+);
+export type ChatAnswerQualityStatsDay = typeof chatAnswerQualityStatsDay.$inferSelect;
+export type ChatAnswerQualityStatsDayInsert = typeof chatAnswerQualityStatsDay.$inferInsert;
 
 // Relations
 // Zod schemas for validation
