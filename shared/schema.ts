@@ -3865,10 +3865,8 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   agentPlanExecuteMaxSteps: integer("agent_plan_execute_max_steps"),
   // Сколько живёт состояние прерванного прогона, пригодное для продолжения (сек). 0 = выключено.
   agentRunContinuationTtlSec: integer("agent_run_continuation_ttl_sec"),
-  // З-33: двухфазный lifecycle файловых артефактов — публикация карточки в чат откладывается до
-  // конца прогона и проходит только после проверок. NULL = «Авто» (выключено).
-  agentArtifactTwoPhaseEnabled: boolean("agent_artifact_two_phase_enabled"),
-  // Сколько живёт неопубликованный черновик до принудительного снятия reaper'ом (сек).
+  // Сколько живёт неопубликованный черновик до принудительного снятия reaper'ом (сек). З-33: файлы
+  // агента публикуются только в конце прогона, переключатель режима снят миграцией 0373.
   agentArtifactDraftTtlSec: integer("agent_artifact_draft_ttl_sec"),
   // --- Step-debug D6.4: устойчивость пошаговой отладки сценариев. NULL = «Авто» (env-дефолт
   // WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE → fallback); 0 = kill-switch (arm отклоняется).
