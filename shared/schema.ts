@@ -9261,6 +9261,11 @@ export const mcpServerRegistryEntries = pgTable(
       onDelete: "set null",
     }),
     sourcePath: text("source_path"),
+    // Двухуровневый реестр (0374): NULL — сервер уровня инсталляции из локального манифеста,
+    // значение — сервер, который пространство подключило по адресу; ключ уникален внутри уровня.
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    origin: varchar("origin", { length: 32 }).$type<"local_manifest" | "remote_url">().notNull().default("local_manifest"),
+    sourceUrl: text("source_url"),
     configSchema: jsonb("config_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     secretSchema: jsonb("secret_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     headerTemplates: jsonb("header_templates").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
@@ -9270,7 +9275,12 @@ export const mcpServerRegistryEntries = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    keyUniqueIdx: uniqueIndex("mcp_server_registry_entries_key_uq").on(table.key),
+    instanceKeyUniqueIdx: uniqueIndex("mcp_server_registry_entries_instance_key_uq")
+      .on(table.key)
+      .where(sql`${table.workspaceId} IS NULL`),
+    workspaceKeyUniqueIdx: uniqueIndex("mcp_server_registry_entries_workspace_key_uq")
+      .on(table.workspaceId, table.key)
+      .where(sql`${table.workspaceId} IS NOT NULL`),
     statusIdx: index("mcp_server_registry_entries_status_idx").on(table.status, table.updatedAt),
   }),
 );
@@ -9392,6 +9402,9 @@ export const workspaceMcpDiscoveredTools = pgTable(
     description: text("description"),
     inputSchema: jsonb("input_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     rawTool: jsonb("raw_tool").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    // Подсказки инструмента из tools/list (readOnlyHint/destructiveHint/title): политика по умолчанию
+    // для сервера, подключённого по адресу, и часть пина целостности определения (0374).
+    annotations: jsonb("annotations").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     permissionLevel: varchar("permission_level", { length: 32 })
       .$type<McpToolPermissionLevel>()
       .notNull()
