@@ -1304,7 +1304,7 @@ export const ragGlobalSettings = pgTable("rag_global_settings", {
   // Размерность вектора глобальной embedding-модели (см. shared/rag-global-settings.ts).
   embeddingVectorSize: integer("embedding_vector_size"),
   // Small-to-big retrieval (№26): режим ретривала и его пороги (см. shared/rag-global-settings.ts).
-  retrieveMode: text("retrieve_mode").notNull().default("chunk"),
+  retrieveMode: text("retrieve_mode").notNull().default("auto"),
   parentMaxTokens: integer("parent_max_tokens").notNull().default(32000),
   neighborWindow: integer("neighbor_window").notNull().default(1),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
