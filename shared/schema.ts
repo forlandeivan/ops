@@ -164,7 +164,7 @@ const ltree = customType<{ data: string; driverData: string }>({
 // Users table for platform authentication
 export const userRoles = ["admin", "user"] as const;
 export type UserRole = (typeof userRoles)[number];
-export const userAvatarSources = ["custom", "google", "yandex", "initials"] as const;
+export const userAvatarSources = ["custom", "yandex", "initials"] as const;
 export type UserAvatarSource = (typeof userAvatarSources)[number];
 
 export const users = pgTable("users", {
@@ -187,9 +187,6 @@ export const users = pgTable("users", {
   personalApiTokenHash: text("personal_api_token_hash"),
   personalApiTokenLastFour: text("personal_api_token_last_four"),
   personalApiTokenGeneratedAt: timestamp("personal_api_token_generated_at"),
-  googleId: text("google_id").unique(),
-  googleAvatar: text("google_avatar").notNull().default(""),
-  googleEmailVerified: boolean("google_email_verified").notNull().default(false),
   yandexId: text("yandex_id").unique(),
   yandexAvatar: text("yandex_avatar").notNull().default(""),
   yandexEmailVerified: boolean("yandex_email_verified").notNull().default(false),
@@ -1059,7 +1056,8 @@ export const authProviders = pgTable("auth_providers", {
   isEnabled: boolean("is_enabled").notNull().default(false),
   clientId: text("client_id").notNull().default(""),
   clientSecret: text("client_secret").notNull().default(""),
-  callbackUrl: text("callback_url").notNull().default("/api/auth/google/callback"),
+  // Пустое значение = путь по умолчанию `/api/auth/<provider>/callback` (auth-provider-settings).
+  callbackUrl: text("callback_url").notNull().default(""),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
@@ -3011,8 +3009,6 @@ export const insertUserSchema = createInsertSchema(users).omit({
   personalApiTokenHash: true,
   personalApiTokenLastFour: true,
   personalApiTokenGeneratedAt: true,
-  googleAvatar: true,
-  googleEmailVerified: true,
   yandexAvatar: true,
   yandexEmailVerified: true,
   avatarKey: true,
@@ -3236,7 +3232,7 @@ export function canEmbeddingProviderOmitModel(
   return resolveEmbeddingProviderAdapterKind(input) === "legacy_unica" || isAitunnelProviderType(input.providerType);
 }
 
-export const authProviderTypes = ["google", "yandex"] as const;
+export const authProviderTypes = ["yandex"] as const;
 export type AuthProviderType = (typeof authProviderTypes)[number];
 
 export const embeddingRequestConfigSchema = z
@@ -6841,8 +6837,6 @@ export type PublicUser = Omit<
   | "avatarUpdatedAt"
   // OAuth-идентификаторы — серверная деталь: клиенту не нужны и не должны
   // попадать в /api/auth/session и sessionStorage (аудит M3).
-  | "googleId"
-  | "googleEmailVerified"
   | "yandexId"
   | "yandexEmailVerified"
 > & {
