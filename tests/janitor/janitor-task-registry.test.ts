@@ -58,6 +58,15 @@ describe("janitor task registry", () => {
         // Суточные вёдра учёта вызовов (a7bf4731): агрегат, а не сырой лог, поэтому срок
         // длинный — 400 дней закрывают вопрос «кто ходил прошлой осенью» с запасом на год.
         "pg.public_api_usage_day",
+        // Проверка достоверности ответов (f97938e5): детализация утверждений — 90 дней, строки
+        // проверок — 400 дней под статистику, выполненные задания очереди — 7 дней.
+        "pg.chat_answer_quality.claims",
+        "pg.chat_answer_quality",
+        "pg.chat_answer_quality_jobs",
+        // Журнал приёма документов (волна 2): попытки стадий и карантин — append-only таблицы,
+        // без уборки росли бы бессрочно; в error_tail лежат машинные хвосты ошибок.
+        "pg.ingest_stage_attempts",
+        "pg.ingest_dead_letters",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
@@ -71,8 +80,38 @@ describe("janitor task registry", () => {
 
   it("exposes exactly two policies per heavy domain (logs + run rows)", () => {
     const byCategory = (category: string) => JANITOR_TASKS.filter((task) => task.category === category);
-    expect(byCategory("llm")).toHaveLength(2);
+    // В категории llm живут и политики проверки достоверности — домен запусков ассистента считаем по его таблицам.
+    expect(byCategory("llm").filter((task) => task.table.startsWith("assistant_execution"))).toHaveLength(2);
     expect(byCategory("asr")).toHaveLength(2);
+  });
+
+  it("registers ingest journal retention policies (knowledge category)", () => {
+    for (const [key, table, batchSize, intervalMinutes] of [
+      ["pg.ingest_stage_attempts", "ingest_stage_attempts", 2000, 360],
+      ["pg.ingest_dead_letters", "ingest_dead_letters", 500, 1440],
+    ] as const) {
+      const policy = getJanitorTask(key);
+      expect(policy, key).toMatchObject({
+        category: "knowledge",
+        storage: "postgres",
+        action: "delete_rows",
+        table,
+        timeColumn: "created_at",
+        defaultRetentionDays: 90,
+        defaultEnabled: true,
+        sensitive: true,
+        defaultBatchSize: batchSize,
+        intervalMinutes,
+      });
+    }
+  });
+
+  it("every retentionNotLongerThan points to an existing policy", () => {
+    for (const task of JANITOR_TASKS) {
+      if (task.retentionNotLongerThan) {
+        expect(getJanitorTask(task.retentionNotLongerThan), task.key).toBeDefined();
+      }
+    }
   });
 
   it("merges both ASR log locations into a single log policy", () => {

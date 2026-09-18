@@ -1325,6 +1325,9 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   // jsonb, NULL = дефолты кода. См. shared/knowledge-document-structure-enhancement.ts.
   structureEnhancementEnabled: boolean("structure_enhancement_enabled").notNull().default(true),
   structureEnhancementRules: jsonb("structure_enhancement_rules"),
+  // Аварийный переключатель журнала приёма: full | attempts | off (0381). Значения валидирует zod
+  // на границе API, CHECK не заводим. См. shared/knowledge-document-import-settings.ts.
+  ingestJournalMode: text("ingest_journal_mode").notNull().default("full"),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -10387,6 +10390,26 @@ export type IngestStage = (typeof ingestStages)[number];
 export const ingestOutboxStatuses = ["pending", "sent", "failed"] as const;
 export type IngestOutboxStatus = (typeof ingestOutboxStatuses)[number];
 
+// Исход попытки стадии в журнале приёма (docs/kb-indexing-observability-strategy.md §3.10.3):
+// повторяет StageRunOutcome раннера плюс `running` для открытой попытки.
+export const ingestStageAttemptOutcomes = [
+  "running",
+  "succeeded",
+  "needs_attention",
+  "failed",
+  "retry_scheduled",
+  "retry_exhausted",
+  "canceled",
+  "lease_lost",
+  "no_handler",
+] as const;
+export type IngestStageAttemptOutcome = (typeof ingestStageAttemptOutcomes)[number];
+
+// Единица работы стадии: что стадия считает в heartbeat({unitDone}). Декларацию на хендлерах
+// заводит волна 3; до неё колонка unit_kind попытки остаётся пустой.
+export const ingestUnitKinds = ["page", "sheet", "image", "chunk", "document"] as const;
+export type IngestUnitKind = (typeof ingestUnitKinds)[number];
+
 export const ingestBatches = pgTable(
   "ingest_batches",
   {
@@ -10475,7 +10498,6 @@ export const ingestSources = pgTable(
     // Дизайн описывает jsonb[]; осознанно одиночный jsonb-массив: читается целиком,
     // массив jsonb в PG хуже индексируется (см. миграцию 0311).
     qualityFlags: jsonb("quality_flags").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
-    warnings: jsonb("warnings").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
     errorCode: text("error_code"),
     errorDetail: text("error_detail"),
     parserVersion: text("parser_version"),
@@ -10496,6 +10518,10 @@ export const ingestSources = pgTable(
   },
   (table) => ({
     rootCreatedAtIdx: index("ingest_sources_root_created_at_idx").on(table.createdAt).where(sql`"parent_source_id" IS NULL`),
+    // 0381: лента админского журнала приёма — все источники, включая распакованные из архивов.
+    // Порядок ленты — created_at DESC, id DESC: btree читается в обратную сторону без отдельного DESC-индекса.
+    journalCreatedIdx: index("ingest_sources_journal_created_idx").on(table.createdAt, table.id),
+    statusCreatedAtIdx: index("ingest_sources_status_created_at_idx").on(table.status, table.createdAt),
     batchStatusIdx: index("ingest_sources_batch_status_idx").on(table.batchId, table.status),
     workspaceStatusUpdatedIdx: index("ingest_sources_workspace_status_updated_idx").on(
       table.workspaceId,
@@ -10824,7 +10850,87 @@ export const ingestDeadLetters = pgTable(
       table.createdAt,
     ),
     stageErrorIdx: index("ingest_dead_letters_stage_error_idx").on(table.stage, table.errorCode),
+    // 0381: уборка карантина по возрасту (pg.ingest_dead_letters) и лента «Карантин» журнала.
+    createdAtIdx: index("ingest_dead_letters_created_at_idx").on(table.createdAt),
   }),
 );
 export type IngestDeadLetter = typeof ingestDeadLetters.$inferSelect;
 export type IngestDeadLetterInsert = typeof ingestDeadLetters.$inferInsert;
+
+/**
+ * История попыток стадий конвейера приёма (журнал приёма, волна 2). `ingest_stage_runs` хранит
+ * только последнюю попытку и перезаписывает её время; здесь каждая попытка — своя строка, и
+ * «первая упала по таймауту, вторая прошла» не теряется.
+ *
+ * Журнал не источник правды: пишется вне транзакций конвейера (server/ingestion/ingest-journal-store.ts),
+ * незакрытые попытки добивает watchdog по состоянию ingest_stage_runs. Текста документа здесь нет.
+ */
+export const ingestStageAttempts = pgTable(
+  "ingest_stage_attempts",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    /** Мягкая ссылка без FK: строка попытки переживает пересоздание прогона стадии. */
+    stageRunId: uuid("stage_run_id").notNull(),
+    /** Денормализация как в ingest_stage_runs, FK нет: каскад идёт по source_id. */
+    workspaceId: varchar("workspace_id").notNull(),
+    batchId: uuid("batch_id"),
+    scope: text("scope").$type<IngestScope>().notNull(),
+    stage: text("stage").$type<IngestStage>().notNull(),
+    attempt: integer("attempt").notNull(),
+    outcome: text("outcome").$type<IngestStageAttemptOutcome>().notNull().default("running"),
+    /** Открытый каталог движков: CHECK нет. */
+    engine: text("engine"),
+    engineVersion: text("engine_version"),
+    workerId: text("worker_id"),
+    /** Ожидание захвата исполнителем: только у первой попытки прогона. */
+    queueWaitMs: integer("queue_wait_ms"),
+    durationMs: integer("duration_ms"),
+    unitKind: text("unit_kind").$type<IngestUnitKind>(),
+    /** 'per_unit' — у попытки есть строки единиц; 'aggregate' — счётчики только здесь. */
+    unitJournal: text("unit_journal").$type<"per_unit" | "aggregate">(),
+    unitsTotal: integer("units_total"),
+    unitsOk: integer("units_ok").notNull().default(0),
+    unitsDegraded: integer("units_degraded").notNull().default(0),
+    unitsFailed: integer("units_failed").notNull().default(0),
+    unitsSkipped: integer("units_skipped").notNull().default(0),
+    errorCode: text("error_code"),
+    retryClass: text("retry_class"),
+    /** Машинный хвост исключения, не длиннее 512 символов. */
+    errorTail: text("error_tail"),
+    /** Санитизированный снимок попытки и служебные поля записи журнала (journalMode и т. п.). */
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    /** true — журнал единиц обрезан потолком строк на попытку. */
+    journalTruncated: boolean("journal_truncated").notNull().default(false),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    runAttemptUnique: uniqueIndex("ingest_stage_attempts_run_attempt_uq").on(table.stageRunId, table.attempt),
+    sourceCreatedIdx: index("ingest_stage_attempts_source_created_idx").on(table.sourceId, table.createdAt),
+    createdAtIdx: index("ingest_stage_attempts_created_at_idx").on(table.createdAt),
+    stageOutcomeCreatedIdx: index("ingest_stage_attempts_stage_outcome_created_idx").on(
+      table.stage,
+      table.outcome,
+      table.createdAt,
+    ),
+    // Незакрытые попытки для добивания watchdog'ом: частичный индекс остаётся крошечным.
+    runningCreatedIdx: index("ingest_stage_attempts_running_created_idx")
+      .on(table.createdAt)
+      .where(sql`"outcome" = 'running'`),
+    outcomeCheck: check(
+      "ingest_stage_attempts_outcome_check",
+      sql`${table.outcome} IN ('running', 'succeeded', 'needs_attention', 'failed', 'retry_scheduled', 'retry_exhausted', 'canceled', 'lease_lost', 'no_handler')`,
+    ),
+    unitKindCheck: check(
+      "ingest_stage_attempts_unit_kind_check",
+      sql`${table.unitKind} IS NULL OR ${table.unitKind} IN ('page', 'sheet', 'image', 'chunk', 'document')`,
+    ),
+    attemptCheck: check("ingest_stage_attempts_attempt_check", sql`${table.attempt} >= 0`),
+  }),
+);
+export type IngestStageAttemptRow = typeof ingestStageAttempts.$inferSelect;
+export type IngestStageAttemptRowInsert = typeof ingestStageAttempts.$inferInsert;

@@ -90,6 +90,13 @@ export interface JanitorTaskDefinition {
    * укладывается в синхронный вызов из админки.
    */
   backgroundRun?: boolean;
+  /**
+   * Ключ родительской политики, дольше которой эта политика хранить данные не может: строки
+   * этой таблицы ссылаются на строки родительской без FK, и более длинный срок оставил бы сирот.
+   * Инвариант проверяет единственная точка записи политик — updatePolicy (выключенная политика
+   * считается бесконечным сроком).
+   */
+  retentionNotLongerThan?: string;
 }
 
 const DEFAULT_BATCH_SIZE = 500;
@@ -299,6 +306,39 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     table: "knowledge_base_indexing_actions",
     timeColumn: "created_at",
     defaultRetentionDays: 90,
+  }),
+  // Журнал приёма документов (волна 2 журнала для администратора): история попыток стадий и
+  // карантин. Обе таблицы append-only и без уборки росли бы бессрочно; в error_tail лежат
+  // машинные хвосты ошибок — поэтому политики чувствительные и включены из коробки.
+  task({
+    key: "pg.ingest_stage_attempts",
+    label: "Журнал приёма: попытки стадий (ingest_stage_attempts)",
+    description:
+      "Удаляет записи о попытках стадий конвейера приёма документов старше срока хранения. Это история для экрана «Обработка документов»: какая стадия сколько раз запускалась, чем закончилась и сколько длилась. Состояние обработки документов уборка не меняет.",
+    category: "knowledge",
+    action: "delete_rows",
+    table: "ingest_stage_attempts",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+    defaultBatchSize: 2000,
+    intervalMinutes: 360,
+    sensitive: true,
+  }),
+  task({
+    key: "pg.ingest_dead_letters",
+    label: "Журнал приёма: карантин (ingest_dead_letters)",
+    description:
+      "Удаляет записи карантина конвейера приёма — документы, обработка которых окончательно не удалась, — старше срока хранения. Сами документы и их статус не затрагиваются.",
+    category: "knowledge",
+    action: "delete_rows",
+    table: "ingest_dead_letters",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+    defaultBatchSize: 500,
+    intervalMinutes: 1440,
+    sensitive: true,
   }),
 
   // ── Логи / события ───────────────────────────────────────────────────────

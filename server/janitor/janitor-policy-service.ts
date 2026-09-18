@@ -157,6 +157,42 @@ export async function getResolvedPolicy(resourceKey: string): Promise<CleanupPol
   return found;
 }
 
+type EffectiveRetention = Pick<CleanupPolicyDto, "enabled" | "retentionDays">;
+
+/** Эффективный срок: выключенная политика не удаляет ничего — срок бесконечный. */
+function effectiveRetentionDays(policy: EffectiveRetention): number {
+  return policy.enabled ? policy.retentionDays : Number.POSITIVE_INFINITY;
+}
+
+function describeRetention(policy: EffectiveRetention): string {
+  return policy.enabled ? `${policy.retentionDays} дн.` : "без срока (политика выключена)";
+}
+
+/**
+ * Инвариант сроков: политика с `retentionNotLongerThan` не хранит данные дольше родительской,
+ * иначе её строки переживут строки, на которые ссылаются без FK. Возвращает текст нарушения
+ * или null. Чистая функция — проверяет все пары, затронутые правкой любой из сторон.
+ */
+export function findRetentionInvariantViolation(
+  tasks: readonly JanitorTaskDefinition[],
+  resolve: (key: string) => EffectiveRetention | undefined,
+): string | null {
+  for (const child of tasks) {
+    if (!child.retentionNotLongerThan) continue;
+    const parentTask = tasks.find((task) => task.key === child.retentionNotLongerThan);
+    const childPolicy = resolve(child.key);
+    const parentPolicy = resolve(child.retentionNotLongerThan);
+    if (!parentTask || !childPolicy || !parentPolicy) continue;
+    if (effectiveRetentionDays(childPolicy) > effectiveRetentionDays(parentPolicy)) {
+      return (
+        `Срок хранения «${child.label}» (${describeRetention(childPolicy)}) не может быть больше срока ` +
+        `«${parentTask.label}» (${describeRetention(parentPolicy)}): записи остались бы без родительских.`
+      );
+    }
+  }
+  return null;
+}
+
 function auditSnapshot(policy: Pick<CleanupPolicyDto, "enabled" | "retentionDays" | "batchSize">) {
   return {
     enabled: policy.enabled,
@@ -183,6 +219,15 @@ export async function updatePolicy(
     retentionDays: patch.retentionDays ?? current.retentionDays,
     batchSize: patch.batchSize ?? current.batchSize,
   };
+
+  const violation = findRetentionInvariantViolation(JANITOR_TASKS, (key) => {
+    if (key === resourceKey) return next;
+    const other = getJanitorTask(key);
+    return other ? resolvePolicy(other, overrides.get(key), null) : undefined;
+  });
+  if (violation) {
+    throw new CleanupPolicyError(violation, 400);
+  }
 
   await db
     .insert(cleanupPolicies)
