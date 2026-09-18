@@ -326,6 +326,22 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     sensitive: true,
   }),
   task({
+    key: "pg.ingest_unit_outcomes",
+    label: "Журнал приёма: исходы страниц (ingest_unit_outcomes)",
+    description:
+      "Удаляет постраничную детализацию журнала приёма — исходы страниц, изображений и листов книг — старше срока хранения. Это карта страниц на экране «Обработка документов»; после уборки у документа остаётся сводка по стадиям. Срок не может быть больше срока политики «Журнал приёма: попытки стадий».",
+    category: "knowledge",
+    action: "delete_rows",
+    table: "ingest_unit_outcomes",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 30,
+    defaultBatchSize: 5000,
+    intervalMinutes: 60,
+    sensitive: true,
+    retentionNotLongerThan: "pg.ingest_stage_attempts",
+  }),
+  task({
     key: "pg.ingest_dead_letters",
     label: "Журнал приёма: карантин (ingest_dead_letters)",
     description:

@@ -67,6 +67,8 @@ describe("janitor task registry", () => {
         // без уборки росли бы бессрочно; в error_tail лежат машинные хвосты ошибок.
         "pg.ingest_stage_attempts",
         "pg.ingest_dead_letters",
+        // Постраничная детализация журнала приёма (волна 3): 30 дней, не дольше попыток.
+        "pg.ingest_unit_outcomes",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
@@ -104,6 +106,24 @@ describe("janitor task registry", () => {
         intervalMinutes,
       });
     }
+  });
+
+  it("unit outcomes live no longer than stage attempts by default", () => {
+    const units = getJanitorTask("pg.ingest_unit_outcomes");
+    const attempts = getJanitorTask("pg.ingest_stage_attempts");
+    expect(units).toMatchObject({
+      category: "knowledge",
+      action: "delete_rows",
+      table: "ingest_unit_outcomes",
+      timeColumn: "created_at",
+      defaultRetentionDays: 30,
+      defaultEnabled: true,
+      sensitive: true,
+      defaultBatchSize: 5000,
+      intervalMinutes: 60,
+      retentionNotLongerThan: "pg.ingest_stage_attempts",
+    });
+    expect(units!.defaultRetentionDays).toBeLessThanOrEqual(attempts!.defaultRetentionDays);
   });
 
   it("every retentionNotLongerThan points to an existing policy", () => {

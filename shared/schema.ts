@@ -1328,6 +1328,9 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   // Аварийный переключатель журнала приёма: full | attempts | off (0381). Значения валидирует zod
   // на границе API, CHECK не заводим. См. shared/knowledge-document-import-settings.ts.
   ingestJournalMode: text("ingest_journal_mode").notNull().default("full"),
+  // Платформенный админ может открыть распознанный текст страницы в журнале приёма (0382). Только
+  // on-prem; каждое чтение пишет аудит. Участник пространства видит текст своего документа всегда.
+  ingestJournalTextReadEnabled: boolean("ingest_journal_text_read_enabled").notNull().default(false),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -10405,10 +10408,15 @@ export const ingestStageAttemptOutcomes = [
 ] as const;
 export type IngestStageAttemptOutcome = (typeof ingestStageAttemptOutcomes)[number];
 
-// Единица работы стадии: что стадия считает в heartbeat({unitDone}). Декларацию на хендлерах
-// заводит волна 3; до неё колонка unit_kind попытки остаётся пустой.
+// Единица работы стадии: что стадия считает в heartbeat({unitDone}). Объявляется при регистрации
+// хендлера (server/ingestion/stages/register-stage-handlers.ts).
 export const ingestUnitKinds = ["page", "sheet", "image", "chunk", "document"] as const;
 export type IngestUnitKind = (typeof ingestUnitKinds)[number];
+
+// Исход единицы работы в журнале приёма (§3.10.4): ok — результат получен, degraded — получен
+// с потерями, empty — единица законно пуста, failed — результата нет, skipped — не обрабатывалась.
+export const ingestUnitOutcomeValues = ["ok", "degraded", "empty", "failed", "skipped"] as const;
+export type IngestUnitOutcome = (typeof ingestUnitOutcomeValues)[number];
 
 export const ingestBatches = pgTable(
   "ingest_batches",
@@ -10934,3 +10942,95 @@ export const ingestStageAttempts = pgTable(
 );
 export type IngestStageAttemptRow = typeof ingestStageAttempts.$inferSelect;
 export type IngestStageAttemptRowInsert = typeof ingestStageAttempts.$inferInsert;
+
+/**
+ * Исход единицы работы стадии (журнал приёма, волна 3): страница OCR, изображение vision, лист
+ * книги, единица уровня документа у index. Только числа, коды и хеши — текста документа нет.
+ * Клетка карты на экране — страница документа: page_no сводит к ней изображение №3 со страницы 12.
+ */
+export const ingestUnitOutcomes = pgTable(
+  "ingest_unit_outcomes",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    /**
+     * Мягкая ссылка без FK: каскад по попыткам не батчится движком уборки (deleteBatch
+     * лимитирует только корневые строки). Целостность держат FK по source_id и инвариант
+     * сроков политик: pg.ingest_unit_outcomes не хранит строки дольше pg.ingest_stage_attempts.
+     */
+    stageAttemptId: bigint("stage_attempt_id", { mode: "number" }).notNull(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    /** Денормализация без FK: каскад идёт по source_id. */
+    workspaceId: varchar("workspace_id").notNull(),
+    stage: text("stage").$type<IngestStage>().notNull(),
+    unitKind: text("unit_kind").$type<IngestUnitKind>().notNull(),
+    /** 1-based номер страницы/листа/изображения; 0 — единица уровня документа. */
+    unitNo: integer("unit_no").notNull(),
+    /** Страница документа, к которой относится единица; NULL — номера страницы у единицы нет. */
+    pageNo: integer("page_no"),
+    outcome: text("outcome").$type<IngestUnitOutcome>().notNull(),
+    engine: text("engine").notNull(),
+    engineVersion: text("engine_version"),
+    renderSource: text("render_source"),
+    /** Код каталога единиц @unica/doc-model (unit-outcome-codes). NULL при outcome='ok'. */
+    failureCode: text("failure_code"),
+    qualityCode: text("quality_code"),
+    charCount: integer("char_count"),
+    letterRatio: doublePrecision("letter_ratio"),
+    cyrillicRatio: doublePrecision("cyrillic_ratio"),
+    /** Доля символов вне букв, цифр, пробелов и обычной пунктуации. */
+    serviceCharRatio: doublePrecision("service_char_ratio"),
+    illegibleMarks: integer("illegible_marks").notNull().default(0),
+    /** Меток на 1000 символов. */
+    illegibleRatio: doublePrecision("illegible_ratio"),
+    /** Признак пустой единицы пришёл от распознавателя, а не выведен из пустой строки. */
+    isEmptyMarker: boolean("is_empty_marker").notNull().default(false),
+    textSha256: varchar("text_sha256", { length: 64 }),
+    imageWidth: integer("image_width"),
+    imageHeight: integer("image_height"),
+    imageBytes: integer("image_bytes"),
+    imageSha256: varchar("image_sha256", { length: 64 }),
+    edgeFraction: doublePrecision("edge_fraction"),
+    lapStdev: doublePrecision("lap_stdev"),
+    enhancementApplied: boolean("enhancement_applied").notNull().default(false),
+    cacheHit: boolean("cache_hit").notNull().default(false),
+    attempts: integer("attempts").notNull().default(1),
+    usageTokens: integer("usage_tokens"),
+    durationMs: integer("duration_ms"),
+    /** Дубль растра ссылается на первую единицу с тем же изображением. */
+    dedupOfUnitNo: integer("dedup_of_unit_no"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    /** Идемпотентность записи: повтор батча после таймаута не даёт дублей. */
+    attemptUnitUnique: uniqueIndex("ingest_unit_outcomes_attempt_unit_uq").on(
+      table.stageAttemptId,
+      table.unitKind,
+      table.unitNo,
+    ),
+    /** Карта читается страницами: ведущая пара — (source_id, page_no). */
+    sourcePageIdx: index("ingest_unit_outcomes_source_page_idx").on(
+      table.sourceId,
+      table.pageNo,
+      table.unitKind,
+      table.unitNo,
+    ),
+    createdAtIdx: index("ingest_unit_outcomes_created_at_idx").on(table.createdAt),
+    problemIdx: index("ingest_unit_outcomes_source_problem_idx")
+      .on(table.sourceId, table.pageNo)
+      .where(sql`"outcome" <> 'ok'`),
+    outcomeCheck: check(
+      "ingest_unit_outcomes_outcome_check",
+      sql`${table.outcome} IN ('ok', 'degraded', 'empty', 'failed', 'skipped')`,
+    ),
+    unitKindCheck: check(
+      "ingest_unit_outcomes_unit_kind_check",
+      sql`${table.unitKind} IN ('page', 'sheet', 'image', 'chunk', 'document')`,
+    ),
+    unitNoCheck: check("ingest_unit_outcomes_unit_no_check", sql`${table.unitNo} >= 0`),
+    pageNoCheck: check("ingest_unit_outcomes_page_no_check", sql`${table.pageNo} IS NULL OR ${table.pageNo} >= 1`),
+  }),
+);
+export type IngestUnitOutcomeRow = typeof ingestUnitOutcomes.$inferSelect;
+export type IngestUnitOutcomeRowInsert = typeof ingestUnitOutcomes.$inferInsert;
