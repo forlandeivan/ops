@@ -4370,7 +4370,8 @@ export type ActionInputType = (typeof actionInputTypes)[number];
 export const actionOutputModes = ["replace_text", "new_version", "new_message", "document"] as const;
 export type ActionOutputMode = (typeof actionOutputModes)[number];
 
-export const actionKinds = ["prompt", "tool", "hybrid"] as const;
+// agent — агентская команда: не исполняется движком действий, ход чата уходит агенту с задачей команды.
+export const actionKinds = ["prompt", "tool", "hybrid", "agent"] as const;
 export type ActionKind = (typeof actionKinds)[number];
 
 // Кому доступно действие: только человеку из UI, только рантайму агента, либо обоим.
