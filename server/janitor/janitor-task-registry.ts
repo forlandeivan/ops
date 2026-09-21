@@ -342,6 +342,20 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     retentionNotLongerThan: "pg.ingest_stage_attempts",
   }),
   task({
+    key: "pg.ingest_stage_stats_day",
+    label: "Журнал приёма: суточная статистика (ingest_stage_stats_day)",
+    description:
+      "Удаляет суточные агрегаты журнала приёма — число попыток, единиц, длительности и ожидание по стадиям и движкам — старше срока хранения. На них строится вкладка «Узкие места» за период; это сводные числа, а не записи о документах.",
+    category: "knowledge",
+    action: "delete_rows",
+    table: "ingest_stage_stats_day",
+    timeColumn: "day",
+    defaultEnabled: true,
+    defaultRetentionDays: 400,
+    defaultBatchSize: 2000,
+    intervalMinutes: 1440,
+  }),
+  task({
     key: "pg.ingest_dead_letters",
     label: "Журнал приёма: карантин (ingest_dead_letters)",
     description:

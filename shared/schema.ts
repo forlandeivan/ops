@@ -1946,6 +1946,10 @@ export const knowledgeBaseIndexingJobs = pgTable(
     chunkCount: integer("chunk_count"),
     totalChars: integer("total_chars"),
     totalTokens: integer("total_tokens"),
+    // Сквозная ссылка «стадия index конвейера приёма → задача индексации» (0383). Без FK: задача
+    // переживает источник, а журнал приёма находит свою задачу по идентификатору, а не по времени.
+    ingestSourceId: uuid("ingest_source_id"),
+    ingestStageRunId: uuid("ingest_stage_run_id"),
     createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -1965,6 +1969,9 @@ export const knowledgeBaseIndexingJobs = pgTable(
     // составного unique-индекса, не ведущие → seq-scan дочерней таблицы при DELETE documents/versions).
     versionIdx: index("knowledge_base_indexing_jobs_version_id_idx").on(table.versionId),
     documentIdx: index("knowledge_base_indexing_jobs_document_id_idx").on(table.documentId),
+    ingestSourceIdx: index("knowledge_base_indexing_jobs_ingest_source_idx")
+      .on(table.ingestSourceId)
+      .where(sql`${table.ingestSourceId} IS NOT NULL`),
   }),
 );
 export type KnowledgeBaseIndexingJob = typeof knowledgeBaseIndexingJobs.$inferSelect;
@@ -11035,3 +11042,129 @@ export const ingestUnitOutcomes = pgTable(
 );
 export type IngestUnitOutcomeRow = typeof ingestUnitOutcomes.$inferSelect;
 export type IngestUnitOutcomeRowInsert = typeof ingestUnitOutcomes.$inferInsert;
+
+/**
+ * Холодная сводка документа журнала приёма (волна 4): агрегаты, которые переживают уборку
+ * постраничных строк и попыток. Статус, стадия, код ошибки и пометки качества здесь не
+ * дублируются — они читаются из ingest_sources. Живёт ровно столько, сколько строка источника:
+ * source_id одновременно PK и FK с каскадом, собственной политики уборки нет.
+ */
+export const ingestSourceReports = pgTable(
+  "ingest_source_reports",
+  {
+    sourceId: uuid("source_id")
+      .primaryKey()
+      .references(() => ingestSources.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").notNull(),
+    batchId: uuid("batch_id"),
+    scope: text("scope").$type<IngestScope>().notNull(),
+    /** Единица основной постраничной стадии (страница или лист); NULL — у документа её нет. */
+    unitKind: text("unit_kind").$type<IngestUnitKind>(),
+    unitsTotal: integer("units_total").notNull().default(0),
+    unitsOk: integer("units_ok").notNull().default(0),
+    unitsDegraded: integer("units_degraded").notNull().default(0),
+    unitsFailed: integer("units_failed").notNull().default(0),
+    unitsSkipped: integer("units_skipped").notNull().default(0),
+    unitsCached: integer("units_cached").notNull().default(0),
+    illegibleUnits: integer("illegible_units").notNull().default(0),
+    /** Медиана числа символов по единицам с текстом. */
+    unitCharMedian: integer("unit_char_median"),
+    charsTotal: bigint("chars_total", { mode: "number" }).notNull().default(0),
+    tokensTotal: bigint("tokens_total", { mode: "number" }).notNull().default(0),
+    attemptsTotal: integer("attempts_total").notNull().default(0),
+    language: text("language"),
+    languageConfidence: doublePrecision("language_confidence"),
+    /** {stage: {attempts, durationMs, queueWaitMs, outcome, engine, errorCode}} */
+    stagesJson: jsonb("stages_json").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    /** {engine: {units, durationMs, failed}} */
+    enginesJson: jsonb("engines_json").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    slowestStage: text("slowest_stage").$type<IngestStage>(),
+    slowestStageMs: integer("slowest_stage_ms"),
+    totalMs: integer("total_ms"),
+    journalTruncated: boolean("journal_truncated").notNull().default(false),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceCreatedIdx: index("ingest_source_reports_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  }),
+);
+export type IngestSourceReport = typeof ingestSourceReports.$inferSelect;
+export type IngestSourceReportInsert = typeof ingestSourceReports.$inferInsert;
+
+/**
+ * Суточные агрегаты журнала приёма (волна 5): «что масштабировать» с историей за месяц и после
+ * уборки сырья. Ведро пишется абсолютным значением полного пересчёта дня. Суррогатный PK — потому
+ * что движок уборки удаляет по одной колонке pkColumn; FK на пространство — потому что источника
+ * у агрегата нет, и без каскада суммы удалённого пространства остались бы навсегда.
+ */
+export const ingestStageStatsDay = pgTable(
+  "ingest_stage_stats_day",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    day: date("day").notNull(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<IngestScope>().notNull(),
+    stage: text("stage").$type<IngestStage>().notNull(),
+    engine: text("engine").notNull().default(""),
+    contentClass: text("content_class").notNull().default(""),
+    outcome: text("outcome").notNull(),
+    attemptsCount: integer("attempts_count").notNull().default(0),
+    sourcesCount: integer("sources_count").notNull().default(0),
+    unitsCount: bigint("units_count", { mode: "number" }).notNull().default(0),
+    unitsFailed: bigint("units_failed", { mode: "number" }).notNull().default(0),
+    unitsDegraded: bigint("units_degraded", { mode: "number" }).notNull().default(0),
+    unitsCached: bigint("units_cached", { mode: "number" }).notNull().default(0),
+    durationMsSum: bigint("duration_ms_sum", { mode: "number" }).notNull().default(0),
+    durationMsMax: integer("duration_ms_max").notNull().default(0),
+    queueWaitMsSum: bigint("queue_wait_ms_sum", { mode: "number" }).notNull().default(0),
+    charsSum: bigint("chars_sum", { mode: "number" }).notNull().default(0),
+    tokensSum: bigint("tokens_sum", { mode: "number" }).notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    bucketUnique: uniqueIndex("ingest_stage_stats_day_bucket_uq").on(
+      table.day,
+      table.workspaceId,
+      table.scope,
+      table.stage,
+      table.engine,
+      table.contentClass,
+      table.outcome,
+    ),
+    dayIdx: index("ingest_stage_stats_day_day_idx").on(table.day),
+    stageDayIdx: index("ingest_stage_stats_day_stage_day_idx").on(table.stage, table.day),
+    // FK-индекс под каскад offboarding пространства: в ведре workspace_id не ведущий.
+    workspaceIdx: index("ingest_stage_stats_day_workspace_idx").on(table.workspaceId, table.day),
+  }),
+);
+export type IngestStageStatsDay = typeof ingestStageStatsDay.$inferSelect;
+
+/**
+ * Покрытие ролл-апа и здоровье журнала: одна строка в сутки. Курсоры по bigserial определяют,
+ * какие дни пересчитать; has_gap — сырьё вычистили раньше, чем ролл-ап его прочитал. Замер
+ * размера журнальных таблиц пишется в строку текущего дня. Политики уборки нет.
+ */
+export const ingestStatsRollupDay = pgTable("ingest_stats_rollup_day", {
+  day: date("day").primaryKey(),
+  builtAt: timestamp("built_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  lastAttemptId: bigint("last_attempt_id", { mode: "number" }),
+  lastUnitOutcomeId: bigint("last_unit_outcome_id", { mode: "number" }),
+  attemptsScanned: integer("attempts_scanned").notNull().default(0),
+  unitsScanned: integer("units_scanned").notNull().default(0),
+  hasGap: boolean("has_gap").notNull().default(false),
+  lastError: text("last_error"),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+  /** {table: bytes} по журнальным отношениям. */
+  journalBytes: jsonb("journal_bytes").$type<Record<string, number>>(),
+  /** {table: seconds} — возраст старейшей строки. */
+  journalOldestAgeSec: jsonb("journal_oldest_age_sec").$type<Record<string, number>>(),
+  journalHealth: jsonb("journal_health").$type<Record<string, unknown>>(),
+  journalMeasuredAt: timestamp("journal_measured_at", { withTimezone: true }),
+});
+export type IngestStatsRollupDay = typeof ingestStatsRollupDay.$inferSelect;

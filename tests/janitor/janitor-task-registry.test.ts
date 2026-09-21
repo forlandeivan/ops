@@ -69,6 +69,8 @@ describe("janitor task registry", () => {
         "pg.ingest_dead_letters",
         // Постраничная детализация журнала приёма (волна 3): 30 дней, не дольше попыток.
         "pg.ingest_unit_outcomes",
+        // Суточные агрегаты журнала приёма (волна 5): сводные числа, 400 дней, как у учёта публичного API.
+        "pg.ingest_stage_stats_day",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
@@ -106,6 +108,18 @@ describe("janitor task registry", () => {
         intervalMinutes,
       });
     }
+  });
+
+  it("registers the ingest journal daily stats policy (400 days by day)", () => {
+    expect(getJanitorTask("pg.ingest_stage_stats_day")).toMatchObject({
+      category: "knowledge",
+      action: "delete_rows",
+      table: "ingest_stage_stats_day",
+      timeColumn: "day",
+      defaultRetentionDays: 400,
+      defaultEnabled: true,
+      sensitive: false,
+    });
   });
 
   it("unit outcomes live no longer than stage attempts by default", () => {
