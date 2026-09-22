@@ -3800,6 +3800,12 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<{ tier1: string[]; tier2: string[] }>()
     .notNull()
     .default(sql`'{"tier1":[],"tier2":[]}'::jsonb`),
+  // Новый агент (сервис сессий): группа «Новый агент» в «Настройках агента». Форму и значения по умолчанию задаёт
+  // shared/agent-settings.ts; пустой объект — всё по умолчанию. Тип здесь намеренно общий: схема зеркалится в сервисы.
+  agentSessionSettings: jsonb("agent_session_settings")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   // Режим reasoning для агентских запусков (значение из reasoningModes); null = по умолчанию модели
   // (inputCapabilities.reasoning.defaultMode). Применяется через провайдерский reasoningMapping —
   // тем же механизмом, что чат (buildReasoningRequestBodyPatch).
@@ -6779,6 +6785,247 @@ export type AgentExecutionRecord = typeof agentExecutions.$inferSelect;
 export type AgentExecutionInsert = typeof agentExecutions.$inferInsert;
 export type AgentExecutionEventRecord = typeof agentExecutionEvents.$inferSelect;
 export type AgentExecutionEventInsert = typeof agentExecutionEvents.$inferInsert;
+
+// --- Новый агент: сервис сессий агента (Python, rospartner.ai.unica.agent, app/sessions) ---------------------------
+// Таблицы сервиса живут в базе монолита и заводятся миграциями 0386–0387: своей базы у сервиса нет. Пишет в них сервис;
+// монолит читает состояние сессий и удаляет их вместе с чатом, пространством и пользователем. Точки восстановления
+// движка уходят вместе со строкой сессии триггером базы (0387).
+export const agentSessionStatuses = [
+  "queued",
+  "running",
+  "waiting_model",
+  "waiting_user",
+  "stopping",
+  "finished",
+  "stopped",
+  "budget_exhausted",
+  "failed",
+] as const;
+export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
+
+export const agentSessions = pgTable(
+  "agent_sessions",
+  {
+    id: uuid("id").primaryKey(),
+    // Номер записи прогона в журнале монолита (agent_executions.id) — ключ идемпотентного старта.
+    executionId: text("execution_id").notNull(),
+    runId: varchar("run_id"),
+    nodeId: varchar("node_id"),
+    // Сессия не переживает свой чат и пространство, кто бы их ни удалил: монолит, ретенция ops или каскад (0387).
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
+    assistantId: varchar("assistant_id"),
+    actorUserId: varchar("actor_user_id"),
+    status: text("status").$type<AgentSessionStatus>().notNull(),
+    // Снимок настроек запуска без секретов.
+    launch: jsonb("launch").$type<Record<string, unknown>>().notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    attempt: integer("attempt").notNull().default(0),
+    claimsWithoutProgress: integer("claims_without_progress").notNull().default(0),
+    resumeAfter: timestamp("resume_after", { withTimezone: true }),
+    modelWaitSince: timestamp("model_wait_since", { withTimezone: true }),
+    usage: jsonb("usage").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    error: jsonb("error").$type<{ code?: string; message?: string }>(),
+    eventsSeq: bigint("events_seq", { mode: "number" }).notNull().default(0),
+    heartbeatSentAt: timestamp("heartbeat_sent_at", { withTimezone: true }),
+    resultDeliveredAt: timestamp("result_delivered_at", { withTimezone: true }),
+    deliveryAttempts: integer("delivery_attempts").notNull().default(0),
+    deliveryNextAt: timestamp("delivery_next_at", { withTimezone: true }),
+    deliveryError: text("delivery_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => ({
+    executionIdUniqueIdx: uniqueIndex("agent_sessions_execution_id_unique_idx").on(table.executionId),
+    workspaceIdx: index("agent_sessions_workspace_idx").on(table.workspaceId),
+    chatIdx: index("agent_sessions_chat_idx").on(table.chatId),
+    actorIdx: index("agent_sessions_actor_idx").on(table.actorUserId),
+    claimableIdx: index("agent_sessions_claimable_idx")
+      .on(table.status, table.leaseExpiresAt, table.resumeAfter)
+      .where(sql`${table.status} IN ('queued', 'running', 'waiting_model', 'stopping')`),
+    finishedIdx: index("agent_sessions_finished_idx").on(table.finishedAt).where(sql`${table.finishedAt} IS NOT NULL`),
+    resultPendingIdx: index("agent_sessions_result_pending_idx")
+      .on(table.deliveryNextAt)
+      .where(
+        sql`${table.status} IN ('finished', 'stopped', 'budget_exhausted', 'failed') AND ${table.resultDeliveredAt} IS NULL`,
+      ),
+    heartbeatIdx: index("agent_sessions_heartbeat_idx")
+      .on(table.heartbeatSentAt)
+      .where(sql`${table.status} IN ('queued', 'running', 'waiting_model', 'waiting_user', 'stopping')`),
+    statusCheck: check(
+      "agent_sessions_status_check",
+      sql`${table.status} IN ('queued', 'running', 'waiting_model', 'waiting_user', 'stopping', 'finished', 'stopped', 'budget_exhausted', 'failed')`,
+    ),
+  }),
+);
+
+export const agentSessionEvents = pgTable(
+  "agent_session_events",
+  {
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    kind: text("kind").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.sessionId, table.seq] }),
+    undeliveredIdx: index("agent_session_events_undelivered_idx")
+      .on(table.sessionId, table.seq)
+      .where(sql`${table.deliveredAt} IS NULL`),
+  }),
+);
+
+export const agentSessionCommands = pgTable(
+  "agent_session_commands",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"stop" | "input">().notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    sessionIdx: index("agent_session_commands_session_idx").on(table.sessionId),
+    idempotencyUniqueIdx: uniqueIndex("agent_session_commands_idempotency_unique_idx")
+      .on(table.sessionId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
+    pendingIdx: index("agent_session_commands_pending_idx")
+      .on(table.sessionId, table.id)
+      .where(sql`${table.consumedAt} IS NULL`),
+    kindCheck: check("agent_session_commands_kind_check", sql`${table.kind} IN ('stop', 'input')`),
+  }),
+);
+
+export const agentModelSlots = pgTable(
+  "agent_model_slots",
+  {
+    id: uuid("id").primaryKey(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").notNull(),
+    owner: text("owner").notNull(),
+    acquiredAt: timestamp("acquired_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    workspaceIdx: index("agent_model_slots_workspace_idx").on(table.workspaceId),
+    sessionIdx: index("agent_model_slots_session_idx").on(table.sessionId),
+  }),
+);
+
+export const agentModelWaiters = pgTable(
+  "agent_model_waiters",
+  {
+    id: uuid("id").primaryKey(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").notNull(),
+    since: timestamp("since", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+  },
+  (table) => ({
+    workspaceIdx: index("agent_model_waiters_workspace_idx").on(table.workspaceId),
+    sessionIdx: index("agent_model_waiters_session_idx").on(table.sessionId),
+  }),
+);
+
+// Учёт песочниц сервиса. Связи с сессией нет намеренно: строку убирают вместе с контейнером.
+export const agentSandboxes = pgTable(
+  "agent_sandboxes",
+  {
+    sessionId: uuid("session_id").primaryKey(),
+    name: text("name"),
+    inflight: integer("inflight").notNull().default(0),
+    busyUntil: timestamp("busy_until", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+  },
+  (table) => ({
+    idleIdx: index("agent_sandboxes_idle_idx").on(table.lastUsedAt),
+  }),
+);
+
+// Точки восстановления движка агента. Имена и форму таблиц задаёт библиотека langgraph-checkpoint-postgres 3.1.2;
+// описание здесь — для проверок схемы, код монолита в эти таблицы не пишет.
+const checkpointBytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
+export const agentCheckpointMigrations = pgTable("checkpoint_migrations", {
+  v: integer("v").primaryKey(),
+});
+
+export const agentCheckpoints = pgTable(
+  "checkpoints",
+  {
+    threadId: text("thread_id").notNull(),
+    checkpointNs: text("checkpoint_ns").notNull().default(""),
+    checkpointId: text("checkpoint_id").notNull(),
+    parentCheckpointId: text("parent_checkpoint_id"),
+    type: text("type"),
+    checkpoint: jsonb("checkpoint").notNull(),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.threadId, table.checkpointNs, table.checkpointId] }),
+    threadIdx: index("checkpoints_thread_id_idx").on(table.threadId),
+  }),
+);
+
+export const agentCheckpointBlobs = pgTable(
+  "checkpoint_blobs",
+  {
+    threadId: text("thread_id").notNull(),
+    checkpointNs: text("checkpoint_ns").notNull().default(""),
+    channel: text("channel").notNull(),
+    version: text("version").notNull(),
+    type: text("type").notNull(),
+    blob: checkpointBytea("blob"),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.threadId, table.checkpointNs, table.channel, table.version] }),
+    threadIdx: index("checkpoint_blobs_thread_id_idx").on(table.threadId),
+  }),
+);
+
+export const agentCheckpointWrites = pgTable(
+  "checkpoint_writes",
+  {
+    threadId: text("thread_id").notNull(),
+    checkpointNs: text("checkpoint_ns").notNull().default(""),
+    checkpointId: text("checkpoint_id").notNull(),
+    taskId: text("task_id").notNull(),
+    idx: integer("idx").notNull(),
+    channel: text("channel").notNull(),
+    type: text("type"),
+    blob: checkpointBytea("blob").notNull(),
+    taskPath: text("task_path").notNull().default(""),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.threadId, table.checkpointNs, table.checkpointId, table.taskId, table.idx] }),
+    threadIdx: index("checkpoint_writes_thread_id_idx").on(table.threadId),
+  }),
+);
+
+export type AgentSessionRecord = typeof agentSessions.$inferSelect;
 
 // Задача 5.2: durable реестр идемпотентности вызовов агента с побочными эффектами. Ключ =
 // (run_id, node_id, tool_kind, tool_ref, input_hash) — переживает re-queue (5.1) и ре-диспатч
