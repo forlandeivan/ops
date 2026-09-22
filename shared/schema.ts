@@ -1247,6 +1247,8 @@ export const searchProfiles = pgTable(
     bm25Threshold: doublePrecision("bm25_threshold"),
     vectorThreshold: doublePrecision("vector_threshold"),
     rrfK: integer("rrf_k").notNull().default(60),
+    // Лимит времени поиска по словам на один вопрос, общий на все его слои (0388).
+    bm25TimeBudgetMs: integer("bm25_time_budget_ms").notNull().default(20000),
     queryRewriteEnabled: boolean("query_rewrite_enabled").notNull().default(true),
     queryRewriteModel: text("query_rewrite_model"),
     queryRewritePrompt: text("query_rewrite_prompt"),
@@ -3602,7 +3604,11 @@ export const knowledgeBaseRagRequests = pgTable("knowledge_base_rag_requests", {
 export type KnowledgeBaseAskAiPipelineStepLog = {
   key: string;
   title?: string | null;
-  status: "success" | "skipped" | "error";
+  /**
+   * `partial` — шаг вернул результат без части работы (например, один из слоёв поиска упал),
+   * `timeout` — шаг упёрся в лимит времени и вернул то, что успел найти.
+   */
+  status: "success" | "skipped" | "error" | "partial" | "timeout";
   startedAt?: string | null;
   finishedAt?: string | null;
   durationMs?: number | null;
