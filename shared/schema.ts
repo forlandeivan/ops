@@ -23,6 +23,7 @@ import {
   bigint,
   bigserial,
   pgEnum,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1076,6 +1077,20 @@ export const authAppearanceSettings = pgTable("auth_appearance_settings", {
 });
 export type AuthAppearanceSettings = typeof authAppearanceSettings.$inferSelect;
 export type AuthAppearanceSettingsInsert = typeof authAppearanceSettings.$inferInsert;
+// mirror-drift-allow:end
+// mirror-drift-allow:begin(feedback-settings) — меню обратной связи и его администрирование принадлежат монолиту
+export const feedbackSettings = pgTable("feedback_settings", {
+  menuLabel: text("menu_label").notNull().default("Обратная связь"),
+  communityLinks: jsonb("community_links").$type<import("./feedback-settings").CommunityLink[]>().notNull().default(sql`'[]'::jsonb`),
+  id: varchar("id").primaryKey().default("feedback_settings_singleton"),
+  generalFeedbackEnabled: boolean("general_feedback_enabled").notNull().default(true),
+  maxEnabled: boolean("max_enabled").notNull().default(true),
+  maxLabel: text("max_label").notNull(),
+  maxUrl: text("max_url").notNull(),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
 // mirror-drift-allow:end
 
 export const smtpSettings = pgTable("smtp_settings", {
@@ -3788,6 +3803,7 @@ export const ocrProviders = pgTable(
 );
 
 export const unicaChatConfig = pgTable("unica_chat_config", {
+  scheduledTaskSettings: jsonb("scheduled_task_settings").$type<Record<string, unknown>>().notNull().default({}),
   id: varchar("id").primaryKey().default("singleton"),
   /** @deprecated Модель Unica Chat берётся из общего дефолта assistant_llm_policy; поле не читается,
    * колонка ждёт отдельной миграции удаления в будущем релизе. */
@@ -4745,6 +4761,7 @@ export type ChatOutputChannel = (typeof chatOutputChannels)[number];
  * означает обычный пользовательский чат.
  */
 export const CHAT_SESSION_ORIGIN_PUBLIC_API = "public_api" as const;
+export const CHAT_SESSION_ORIGIN_SCHEDULED_TASK = "scheduled_task" as const;
 
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
@@ -4757,7 +4774,7 @@ export type ChatSessionMetadata = {
   /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
   selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
-  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API;
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK;
   [key: string]: unknown;
 };
 
@@ -4775,6 +4792,7 @@ export const chatSessions = pgTable(
       .notNull()
       .references(() => assistants.id, { onDelete: "cascade" }),
     title: text("title").notNull().default(""),
+    scheduledTaskRunId: uuid("scheduled_task_run_id"),
     status: text("status").$type<ChatStatus>().notNull().default("active"),
     currentAssistantActionType: text("current_assistant_action_type").$type<AssistantActionType | null>(),
     currentAssistantActionText: text("current_assistant_action_text"),
@@ -4788,6 +4806,7 @@ export const chatSessions = pgTable(
   },
   (table) => ({
     createdAtIdx: index("chat_sessions_created_at_idx").on(table.createdAt).where(sql`"deleted_at" IS NULL`),
+    scheduledRunUnique: uniqueIndex("chat_sessions_scheduled_run_unique").on(table.scheduledTaskRunId).where(sql`${table.scheduledTaskRunId} IS NOT NULL`),
     deletedAtIdx: index("chat_sessions_deleted_at_idx").on(table.deletedAt).where(sql`"deleted_at" IS NOT NULL`),
     workspaceUserIdx: index("chat_sessions_workspace_user_idx").on(
       table.workspaceId,
@@ -5647,6 +5666,7 @@ export const assistantWorkflowRunStatuses = [
 ] as const;
 export type AssistantWorkflowRunStatus = (typeof assistantWorkflowRunStatuses)[number];
 export const assistantWorkflowRunDispatchSources = [
+  "scheduled_task",
   "assistant_execution",
   "assistant_transcription",
   "external_message",
@@ -7983,6 +8003,8 @@ export const assistantWorkflowRuns = pgTable(
         .$type<AssistantWorkflowRunDispatchSource>()
         .notNull()
         .default("assistant_execution"),
+      enqueueKey: varchar("enqueue_key", { length: 200 }),
+      enqueuePayloadHash: varchar("enqueue_payload_hash", { length: 64 }),
       status: varchar("status", { length: 32 }).$type<AssistantWorkflowRunStatus>().notNull().default("queued"),
     queuePosition: integer("queue_position").notNull().default(1),
     queueKey: varchar("queue_key", { length: 255 }),
@@ -8015,6 +8037,7 @@ export const assistantWorkflowRuns = pgTable(
       table.queuePosition,
       table.createdAt,
     ),
+    enqueueKeyUnique: uniqueIndex("assistant_workflow_runs_enqueue_key_unique").on(table.workspaceId, table.enqueueKey).where(sql`${table.enqueueKey} IS NOT NULL`),
     statusWakeIdx: index("assistant_workflow_runs_status_wake_idx").on(
       table.status,
       table.wakeAt,
@@ -11421,3 +11444,119 @@ export const ingestStatsRollupDay = pgTable("ingest_stats_rollup_day", {
   journalMeasuredAt: timestamp("journal_measured_at", { withTimezone: true }),
 });
 export type IngestStatsRollupDay = typeof ingestStatsRollupDay.$inferSelect;
+
+// Scheduled tasks: monolith owns scheduling, workflow owns execution. Revisions and runs
+// retain immutable input snapshots; deleting a chat never cascades into the run/audit.
+export const scheduledTasks = pgTable("scheduled_tasks", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  ownerUserId: varchar("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+  name: text("name").notNull(),
+  state: text("state").notNull().default("active"),
+  revision: integer("revision").notNull().default(1),
+  currentRevisionId: uuid("current_revision_id"),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+  lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+  cursorAt: timestamp("cursor_at", { withTimezone: true }),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceIdx: index("scheduled_tasks_workspace_idx").on(table.workspaceId, table.state, table.updatedAt),
+  dueIdx: index("scheduled_tasks_due_idx").on(table.nextRunAt).where(sql`${table.state} = 'active'`),
+  ownerIdx: index("scheduled_tasks_owner_idx").on(table.ownerUserId),
+  actorIdx: index("scheduled_tasks_actor_idx").on(table.actorUserId),
+  assistantIdx: index("scheduled_tasks_assistant_idx").on(table.assistantId),
+  revisionFk: foreignKey({ name: "scheduled_tasks_current_revision_fk", columns: [table.id, table.currentRevisionId], foreignColumns: [scheduledTaskRevisions.taskId, scheduledTaskRevisions.id] }),
+  stateCheck: check("scheduled_tasks_state_check", sql`${table.state} IN ('active','paused','completed','archived')`),
+}));
+
+export const scheduledTaskRevisions = pgTable("scheduled_task_revisions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  taskId: uuid("task_id").notNull().references((): AnyPgColumn => scheduledTasks.id, { onDelete: "cascade" }),
+  revision: integer("revision").notNull(),
+  definition: jsonb("definition").$type<Record<string, unknown>>().notNull(),
+  createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  taskRevisionUnique: uniqueIndex("scheduled_task_revisions_version_unique").on(table.taskId, table.revision),
+  taskIdUnique: uniqueIndex("scheduled_task_revisions_task_id_unique").on(table.taskId, table.id),
+  creatorIdx: index("scheduled_task_revisions_creator_idx").on(table.createdByUserId),
+}));
+
+export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  taskId: uuid("task_id").notNull().references(() => scheduledTasks.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  revisionId: uuid("revision_id").notNull(),
+  revision: integer("revision").notNull(),
+  actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  definition: jsonb("definition").$type<Record<string, unknown>>().notNull(),
+  trigger: text("trigger").notNull(),
+  requestKey: varchar("request_key", { length: 100 }),
+  scheduledFor: timestamp("scheduled_for", { withTimezone: true }).notNull(),
+  eligibleAt: timestamp("eligible_at", { withTimezone: true }).notNull(),
+  status: text("status").notNull().default("queued"),
+  capacityReserved: boolean("capacity_reserved").notNull().default(false),
+  leaseOwner: text("lease_owner"),
+  leaseEpoch: integer("lease_epoch").notNull().default(0),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
+  dispatchNextAt: timestamp("dispatch_next_at", { withTimezone: true }),
+  enqueuePayload: jsonb("enqueue_payload").$type<Record<string, unknown>>(),
+  chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
+  userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+  workflowRunId: uuid("workflow_run_id"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  waitKind: text("wait_kind"),
+  waitingSince: timestamp("waiting_since", { withTimezone: true }),
+  activeSince: timestamp("active_since", { withTimezone: true }),
+  activeMilliseconds: bigint("active_milliseconds", { mode: "number" }).notNull().default(0),
+  windowFrom: timestamp("window_from", { withTimezone: true }),
+  windowTo: timestamp("window_to", { withTimezone: true }),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  outcome: text("outcome"),
+  summary: text("summary"),
+  reportedOutcome: jsonb("reported_outcome").$type<Record<string, unknown>>(),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  revisionFk: foreignKey({ name: "scheduled_task_runs_revision_fk", columns: [table.taskId, table.revisionId], foreignColumns: [scheduledTaskRevisions.taskId, scheduledTaskRevisions.id] }),
+  slotUnique: uniqueIndex("scheduled_task_runs_slot_unique").on(table.taskId, table.scheduledFor).where(sql`${table.trigger} = 'schedule'`),
+  requestUnique: uniqueIndex("scheduled_task_runs_request_unique").on(table.taskId, table.requestKey).where(sql`${table.requestKey} IS NOT NULL`),
+  unfinishedUnique: uniqueIndex("scheduled_task_runs_unfinished_unique").on(table.taskId).where(sql`${table.status} IN ('queued','dispatching','running','waiting')`),
+  queueIdx: index("scheduled_task_runs_queue_idx").on(table.status, table.eligibleAt),
+  retentionIdx: index("scheduled_task_runs_retention_idx").on(table.finishedAt),
+  workspaceIdx: index("scheduled_task_runs_workspace_idx").on(table.workspaceId, table.createdAt),
+  historyIdx: index("scheduled_task_runs_history_idx").on(table.taskId, table.createdAt),
+  revisionIdx: index("scheduled_task_runs_revision_idx").on(table.revisionId),
+  actorIdx: index("scheduled_task_runs_actor_idx").on(table.actorUserId),
+  chatIdx: index("scheduled_task_runs_chat_idx").on(table.chatId),
+  messageIdx: index("scheduled_task_runs_message_idx").on(table.userMessageId),
+  workflowIdx: uniqueIndex("scheduled_task_runs_workflow_unique").on(table.workflowRunId).where(sql`${table.workflowRunId} IS NOT NULL`),
+  statusCheck: check("scheduled_task_runs_status_check", sql`${table.status} IN ('queued','dispatching','running','waiting','succeeded','failed','canceled','timed_out','skipped')`),
+  triggerCheck: check("scheduled_task_runs_trigger_check", sql`${table.trigger} IN ('schedule','manual')`),
+}));
+export type ScheduledTaskRecord = typeof scheduledTasks.$inferSelect;
+export type ScheduledTaskRunRecord = typeof scheduledTaskRuns.$inferSelect;
+
+export const scheduledTaskAudit = pgTable("scheduled_task_audit", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  taskId: uuid("task_id").notNull(),
+  runId: uuid("run_id"),
+  actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  action: text("action").notNull(),
+  details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  taskIdx: index("scheduled_task_audit_task_idx").on(table.taskId, table.createdAt),
+  retentionIdx: index("scheduled_task_audit_retention_idx").on(table.createdAt),
+  workspaceIdx: index("scheduled_task_audit_workspace_idx").on(table.workspaceId, table.createdAt),
+  actorIdx: index("scheduled_task_audit_actor_idx").on(table.actorUserId),
+}));

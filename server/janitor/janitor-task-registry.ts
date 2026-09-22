@@ -429,6 +429,20 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
 
   // ── Аудит ────────────────────────────────────────────────────────────────
   task({
+    key: "pg.scheduled_task_runs",
+    label: "История задач по расписанию",
+    description: "Удаляет завершённые запуски старше срока хранения. Незавершённые запуски и сами задачи сохраняются.",
+    category: "events", action: "delete_rows", table: "scheduled_task_runs", timeColumn: "finished_at",
+    defaultRetentionDays: 180, defaultEnabled: true,
+  }),
+  task({
+    key: "pg.scheduled_task_audit",
+    label: "Аудит задач по расписанию",
+    description: "Удаляет события создания, изменения и выполнения задач старше срока хранения.",
+    category: "audit", action: "delete_rows", table: "scheduled_task_audit", timeColumn: "created_at",
+    defaultRetentionDays: 365, defaultEnabled: true,
+  }),
+  task({
     key: "pg.workflow_audit_log",
     label: "Аудит workflow (workflow_audit_log)",
     description: "Удаляет аудит-записи изменений workflow старше срока хранения.",

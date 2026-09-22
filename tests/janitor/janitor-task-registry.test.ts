@@ -34,6 +34,8 @@ describe("janitor task registry", () => {
       [
         // поглощённые legacy-джобы — сохраняют прежнее поведение (уже чистили до janitor)
         "pg.assistant_executions",
+        "pg.scheduled_task_runs",
+        "pg.scheduled_task_audit",
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
         "s3.chat_attachments.drafts",
