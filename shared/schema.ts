@@ -8687,6 +8687,29 @@ export const skillVersions = pgTable(
 export type SkillVersion = typeof skillVersions.$inferSelect;
 export type SkillVersionInsert = typeof skillVersions.$inferInsert;
 
+// Файлы навыка-папки: у навыка пространства нет папки на диске, поэтому его материалы лежат здесь.
+// Только текст: навык пространства пишет пользователь, исполняемому коду в нём места нет.
+export const skillResourceFiles = pgTable(
+  "skill_resource_files",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    skillVersionId: uuid("skill_version_id")
+      .notNull()
+      .references(() => skillVersions.id, { onDelete: "cascade" }),
+    path: varchar("path", { length: 400 }).notNull(),
+    content: text("content").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    contentHash: varchar("content_hash", { length: 128 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    skillResourceFileUniqueIdx: uniqueIndex("skill_resource_files_version_path_uq").on(table.skillVersionId, table.path),
+  }),
+);
+
+export type SkillResourceFile = typeof skillResourceFiles.$inferSelect;
+export type SkillResourceFileInsert = typeof skillResourceFiles.$inferInsert;
+
 export const connectionTypeRegistry = pgTable(
   "connection_type_registry",
   {
