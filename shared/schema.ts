@@ -2924,6 +2924,11 @@ export const knowledgeDocumentChunkSets = pgTable(
     versionIndex: index("knowledge_document_chunk_sets_version_id_idx").on(table.versionId),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIndex: index("knowledge_document_chunk_sets_workspace_id_idx").on(table.workspaceId),
+    // 0391: отбор политики уборки старых наборов — неактуальные наборы по возрасту.
+    latestCreatedIndex: index("knowledge_document_chunk_sets_latest_created_idx").on(
+      table.isLatest,
+      table.createdAt,
+    ),
   }),
 );
 

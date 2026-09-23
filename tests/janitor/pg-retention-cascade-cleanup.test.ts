@@ -289,3 +289,77 @@ describe("двухфазный purge архивных ассистентов: ц
     expect(getJanitorTask("pg.chat_sessions")?.drainChildrenFirst).toBeUndefined();
   });
 });
+
+describe("старые наборы фрагментов баз знаний: свой отбор и пачка во фрагментах", () => {
+  const chunkSetsOp = operationsOf(getJanitorTask("pg.knowledge_document_chunk_sets.superseded")!)[0];
+
+  function expectSupersededCandidateCondition(statement: string) {
+    expect(statement).toContain("join knowledge_documents as doc on doc.id = root.document_id");
+    expect(statement).toContain("root.is_latest = false");
+    // Набор текущей ревизии остаётся, даже если он уже не актуальный.
+    expect(statement).toContain(
+      "doc.current_revision_id is null or root.revision_id is distinct from doc.current_revision_id",
+    );
+    expect(statement).toContain("state.chunk_set_id = root.id");
+    // Набор идущей индексации живёт не меньше двух суток при любом сроке политики.
+    expect(statement).toContain("revision.status = 'processing'");
+    expect(statement).toContain("interval '2 days'");
+  }
+
+  it("предпросмотр считает фрагменты кандидатов, а не наборы, и ничего не удаляет", async () => {
+    const capture = captureDatabase([{ count: 12_000 }]);
+    const store = createPgRetentionStore(capture.database);
+
+    await expect(
+      store.countMatches({ table: chunkSetsOp.table, timeColumn: chunkSetsOp.timeColumn, cutoff, cap: 500_000 }),
+    ).resolves.toBe(12_000);
+
+    const query = capture.queries[0];
+    const statement = query.sql.toLowerCase();
+    expect(statement).toContain("sum(eligible.chunk_count)");
+    expectSupersededCandidateCondition(statement);
+    expect(statement).not.toContain("delete from");
+    expect(query.params).toContain(500_000);
+  });
+
+  it("стейтмент удаления набирает наборы до пачки во фрагментах и удаляет их каскадом", async () => {
+    const capture = captureDatabase([{ affected: 10_400 }]);
+    const store = createPgRetentionStore(capture.database);
+
+    await expect(
+      store.deleteBatch({
+        table: chunkSetsOp.table,
+        timeColumn: chunkSetsOp.timeColumn,
+        pkColumn: chunkSetsOp.pkColumn,
+        cutoff,
+        batchSize: 10_000,
+      }),
+    ).resolves.toBe(10_400);
+
+    const query = capture.queries[0];
+    const statement = query.sql.toLowerCase();
+    expectSupersededCandidateCondition(statement);
+    expect(statement).toContain("for update of root skip locked");
+    expect(statement).toContain("sum(locked.chunk_count) over (order by locked.created_at, locked.id)");
+    expect(statement).toContain("ranked.chunks_before <");
+    expect(statement).toContain("delete from knowledge_document_chunk_sets as root");
+    expect(statement).toContain("returning root.chunk_count");
+    expect(query.params).toContain(10_000);
+    expect(query.params).toContain(1000);
+  });
+
+  it("прогон идёт пачками, пока стейтмент удаляет полную пачку фрагментов", async () => {
+    const capture = sequencedDatabase([{ affected: 10_400 }, { affected: 10_000 }, { affected: 3_200 }]);
+    const store = createPgRetentionStore(capture.database);
+
+    const result = await runRetentionTask(
+      chunkSetsOp,
+      { action: "delete_rows", mode: "enforce", retentionDays: 7, batchSize: 10_000 },
+      store,
+      { now: NOW },
+    );
+
+    expect(result).toEqual({ matched: 23_600, deleted: 23_600, batches: 3, drainedChildren: 0, aborted: false });
+    expect(capture.queries).toHaveLength(3);
+  });
+});

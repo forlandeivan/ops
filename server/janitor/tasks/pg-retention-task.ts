@@ -443,6 +443,83 @@ async function drainAssistantChatSessions(
 }
 
 /**
+ * Наборы фрагментов баз знаний (политика `pg.knowledge_document_chunk_sets.superseded`). Возраст строки
+ * не говорит, нужен ли набор, поэтому отбор свой: удаляется набор, который не актуальный, не набор
+ * текущей ревизии документа и на который не ссылается состояние индекса. Набор ревизии, которая ещё
+ * строится, живёт не меньше двух суток при любом сроке политики. Фрагменты уходят каскадом, ссылки
+ * ревизий и состояния индекса на набор обнуляются.
+ *
+ * Пачка считается во ФРАГМЕНТАХ, а не в наборах: набор тома-скана бывает на десятки тысяч строк, и
+ * пачка в наборах не ограничивала бы стейтмент. Стейтмент берёт наборы по возрасту, пока сумма их
+ * фрагментов не достигнет batchSize (первый набор — всегда), и возвращает число удалённых фрагментов:
+ * неполная пачка, как и у остальных политик, значит «кандидаты кончились».
+ */
+const CHUNK_SETS_TABLE = "knowledge_document_chunk_sets";
+/** Сколько наборов стейтмент блокирует за раз: наборы из пары фрагментов тоже не должны тянуть его без конца. */
+const CHUNK_SETS_MAX_LOCKED = 1000;
+
+function supersededChunkSetCondition(cutoff: Date): SQL {
+  return sql`
+    root.created_at < ${cutoff}
+    AND root.is_latest = FALSE
+    AND (doc.current_revision_id IS NULL OR root.revision_id IS DISTINCT FROM doc.current_revision_id)
+    AND NOT EXISTS (
+      SELECT 1 FROM knowledge_document_index_state AS state
+      WHERE state.chunk_set_id = root.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM knowledge_document_index_revisions AS revision
+      WHERE revision.id = root.revision_id
+        AND revision.status = 'processing'
+        AND revision.created_at > NOW() - INTERVAL '2 days'
+    )
+  `;
+}
+
+async function countSupersededChunkSets(database: RetentionExecutor, params: CountMatchesParams): Promise<number> {
+  const query = sql`
+    SELECT LEAST(COALESCE(sum(eligible.chunk_count), 0), ${params.cap})::int AS count
+    FROM (
+      SELECT root.chunk_count
+      FROM knowledge_document_chunk_sets AS root
+      JOIN knowledge_documents AS doc ON doc.id = root.document_id
+      WHERE ${supersededChunkSetCondition(params.cutoff)}
+    ) AS eligible
+  `;
+  return firstCount(await database.execute(query));
+}
+
+async function deleteSupersededChunkSets(database: RetentionExecutor, params: DeleteBatchParams): Promise<number> {
+  const query = sql`
+    WITH locked AS MATERIALIZED (
+      SELECT root.id, root.chunk_count, root.created_at
+      FROM knowledge_document_chunk_sets AS root
+      JOIN knowledge_documents AS doc ON doc.id = root.document_id
+      WHERE ${supersededChunkSetCondition(params.cutoff)}
+      ORDER BY root.created_at, root.id
+      FOR UPDATE OF root SKIP LOCKED
+      LIMIT ${CHUNK_SETS_MAX_LOCKED}
+    ), candidates AS MATERIALIZED (
+      SELECT ranked.id
+      FROM (
+        SELECT
+          locked.id,
+          sum(locked.chunk_count) OVER (ORDER BY locked.created_at, locked.id) - locked.chunk_count AS chunks_before
+        FROM locked
+      ) AS ranked
+      WHERE ranked.chunks_before < ${params.batchSize}
+    ), deleted AS (
+      DELETE FROM knowledge_document_chunk_sets AS root
+      USING candidates
+      WHERE root.id = candidates.id
+      RETURNING root.chunk_count
+    )
+    SELECT COALESCE(sum(deleted.chunk_count), 0)::int AS affected FROM deleted
+  `;
+  return firstAffected(await database.execute(query));
+}
+
+/**
  * Боевое хранилище поверх drizzle. Имена таблиц/колонок берутся ТОЛЬКО из реестра
  * в коде, но всё равно квотируются через sql.identifier (никакого пользовательского
  * ввода в идентификаторах).
@@ -455,6 +532,9 @@ export function createPgRetentionStore(
 
   return {
     async countMatches({ table, timeColumn, cutoff, requireNonNullAny, equalsFilter, cap }) {
+      if (table === CHUNK_SETS_TABLE) {
+        return countSupersededChunkSets(database, { table, timeColumn, cutoff, cap });
+      }
       if (isCascadeCleanupRoot(table)) {
         return countCascadeSafeRoots(database, {
           table,
@@ -494,6 +574,9 @@ export function createPgRetentionStore(
     },
 
     async deleteBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize }) {
+      if (table === CHUNK_SETS_TABLE) {
+        return deleteSupersededChunkSets(database, { table, timeColumn, pkColumn, cutoff, batchSize });
+      }
       if (isCascadeCleanupRoot(table)) {
         return deleteCascadeSafeRoots(database, {
           table,

@@ -248,6 +248,24 @@ describe("janitor task registry", () => {
     expect(getJanitorTask("pg.knowledge_base_indexing_jobs")).toBeUndefined();
   });
 
+  it("registers superseded chunk sets cleanup: off by default, synchronous, batch counted in chunks", () => {
+    // Первую уборку большой установки администратор запускает сам; отбор и пачку ведёт ops.
+    expect(getJanitorTask("pg.knowledge_document_chunk_sets.superseded")).toMatchObject({
+      category: "knowledge",
+      action: "delete_rows",
+      table: "knowledge_document_chunk_sets",
+      timeColumn: "created_at",
+      equalsFilter: { column: "is_latest", value: "false" },
+      defaultEnabled: false,
+      defaultRetentionDays: 7,
+      defaultBatchSize: 10_000,
+      intervalMinutes: 30,
+      sensitive: true,
+      backgroundRun: false,
+      storage: "postgres",
+    });
+  });
+
   it("registers the Qdrant orphaned-collections GC policy (vector category, opt-in, sensitive)", () => {
     const gc = getJanitorTask("qdrant.orphaned_collections");
     expect(gc?.storage).toBe("qdrant");
