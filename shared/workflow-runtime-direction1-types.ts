@@ -28,6 +28,7 @@ export type {
 
 /** Результат `enqueueAssistantWorkflowRun`. */
 export type WorkflowEnqueueResultDto = {
+  replayed?: boolean;
   runId: string;
   queuePosition: number;
   resolvedWorkflowVersionId: string;
@@ -190,6 +191,10 @@ export type ListWorkflowRunEventsParams = {
   workspaceId: string;
   runId: string;
   workflowDefinitionId?: string;
+  /** Курсор ленты: только события с номером больше этого. */
+  afterSeq?: number;
+  /** Сколько событий отдать за раз, по возрастанию номера. */
+  limit?: number;
 };
 
 /** Параметры `listWorkflowRunsForDefinition`. */
@@ -219,6 +224,44 @@ export type ResumeWorkflowRunAfterTranscriptionParams = {
 
 /** Результат `resumeWorkflowRunAfterTranscription`. */
 export type ResumeWorkflowRunAfterTranscriptionResult = { runId: string } | null;
+
+// ── Новый агент: пробуждение прогона после итога сессии ─────────────────────────────────────────────
+
+/**
+ * Параметры `resumeWorkflowRunAfterAgentSession`. Прогон ищется по записи журнала запусков агента: узел agent ждёт
+ * итог именно этой записи. Итог узел заберёт сам — в теле его нет.
+ */
+export type ResumeWorkflowRunAfterAgentSessionParams = {
+  workspaceId: string;
+  runId: string;
+  executionId: string;
+};
+
+/** Результат: `null` — прогон уже не ждёт этого итога (разбужен раньше, отменён, закончен). */
+export type ResumeWorkflowRunAfterAgentSessionResult = { runId: string } | null;
+
+/**
+ * Параметры `createAgentSessionApproval`: новый агент просит подтвердить запись. `request` — состав карточки в той же
+ * форме, что у старого агента (`kind`: agent_system_operation | agent_action | agent_operation | agent_mcp_tool, цель,
+ * `input`, `inputHash`). Прогон при этом не выходит из ожидания сессии.
+ */
+export type CreateAgentSessionApprovalParams = {
+  workspaceId: string;
+  runId: string;
+  nodeId: string;
+  stepId: string | null;
+  executionId: string;
+  sessionId: string | null;
+  request: Record<string, unknown>;
+};
+
+/** Карточка в чате: новая или та же нерешённая, если сессия повторила вызов с тем же входом. */
+export type CreateAgentSessionApprovalResult = {
+  approvalId: string;
+  status: string;
+  title: string;
+  created: boolean;
+};
 
 /**
  * Ветка externalWait рантайма для транскрипции (снимок из `RuntimeState.externalWait`, kind:"transcription").

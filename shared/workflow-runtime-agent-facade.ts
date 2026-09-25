@@ -1,61 +1,35 @@
 /**
- * @shared-фасад агентского кластера для workflow-runtime (W2/S8 Tier-2, deep-cascade,
- * docs/w2-workflow-packaging-plan.md §5). Сигнатуры функций agent-runtime, которые ядро
- * зовёт через `WorkflowGateway.agent`, + структурные типы результатов
- * (`AgentRuntimeResult`, `AgentKnowledgePrefetchResult`, source-grounding) — чтобы поддерево
- * рантайма компилировалось без type-импортов `../agent-runtime/*`.
+ * @shared-фасад агентского кластера для workflow-runtime (W2/S8 Tier-2). Сигнатуры функций монолита, которые ядро
+ * сценариев зовёт через `WorkflowGateway.agent`, и форма их результатов — чтобы поддерево рантайма компилировалось
+ * без type-импортов `../agent-runtime/*`. Дрейф ловится на wire.
  *
- * `AgentRuntimeResult` и `AgentKnowledgePrefetchResult` ослаблять НЕЛЬЗЯ (ядро читает все
- * поля). Возвраты `listAgentArtifacts`/`listCompletedIdempotentToolCalls` ослаблены до
- * читаемых полей. Дрейф ловится на wire.
+ * Агент в Унике один — новый (сервис сессий): узел agent ставит сессию и не ждёт её, итог забирает после пробуждения
+ * прогона. Прежний синхронный вызов агента и его предзагрузки удалены.
  */
 
 import type { JsonObject } from "@shared/plugin-system";
-import type {
-  AgentCapabilityOptimizationProfile,
-  ResolvedKbPrefetchConfig,
-} from "@shared/workflow-runtime-config-types";
-
-// ── executeAgentRuntime ──────────────────────────────────────────────────────
-
-/** server/agent-runtime/runtime-provider.ts AgentRuntimeResult — итог прогона рантайма агента. */
-export type AgentRuntimeResult = {
-  status: "success" | "partial" | "error";
-  result: string | null;
-  finalText: string | null;
-  finalPayload: JsonObject | null;
-  stepsUsed: number;
-  toolCallsUsed: number;
-  usedTools: string[];
-  usedSkills: string[];
-  providerRunId: string | null;
-  trace: JsonObject[];
-  events: JsonObject[];
-  warnings: string[];
-  errors: string[];
-  meta: JsonObject;
-};
 
 /**
- * server/agent-runtime/agent-runtime-service.ts executeAgentRuntime — параметр
- * (`Omit<AgentRuntimeRequest, "model" | "capabilities">` + обёртка модель/способности).
+ * «Стоп» на узле agent: останавливает сессию нового агента по `runId`. Метод короткий и идемпотентный.
+ * `aborted` остаётся ради контракта шлюза и всегда 0: сессия живёт в сервисе сессий, а не в памяти монолита.
  */
-export type ExecuteAgentRuntimeFacade = (params: {
-  providerId: "unica_agent";
+export type CancelAgentRuntimeFacade = (params: {
+  runId: string;
+  reason?: string | null;
+}) => Promise<{ aborted: number }>;
+
+// ── новый агент (сервис сессий агента) ───────────────────────────────────────
+
+/**
+ * server/agent-runtime/agent-session-service.ts startAgentSession — сессию нового агента ставят и не ждут: узел agent
+ * засыпает в ожидании `agent_session`, а итог сервис сессий сам приносит в монолит. Повтор для того же прогона и узла
+ * возвращает идущую сессию. Сервис недоступен — ошибка `AGENT_SESSION_SERVICE_UNAVAILABLE` с понятным текстом, шаг
+ * падает: другого агента в Унике нет.
+ */
+export type StartAgentSessionFacade = (params: {
   goal: string;
   context: JsonObject;
-  finishSchema: JsonObject | null;
-  limits: {
-    maxSteps: number | null;
-    maxToolCalls: number | null;
-    timeoutSec: number | null;
-    maxCostUsd: number | null;
-  };
-  writePolicy: "approval_required" | "read_only";
-  traceLevel: "basic" | "verbose";
-  callbacks?: {
-    events?: { url: string; token: string | null; executionId?: string | null } | null;
-  } | null;
+  limits: { maxCostUsd: number | null };
   invocation: {
     runId: string;
     stepId: string;
@@ -64,186 +38,53 @@ export type ExecuteAgentRuntimeFacade = (params: {
     chatId: string;
     userId: string | null;
   };
-  runtimeCapacity?: {
-    maxConcurrentRuns?: number;
-    maxConcurrentCodeExec?: number;
-    retryAfterSec?: number;
-  } | null;
-  runtimeResilience?: {
-    guardRetryMaxPerRun: number;
-    guardRetryMinRemainingSec: number;
-    deadlineSafetyMarginSec: number;
-    roundMinRemainingSec: number;
-    retryEchoMaxChars: number;
-  } | null;
   modelId?: string | null;
-  optimizationProfile?: AgentCapabilityOptimizationProfile | null;
+  /**
+   * Что узел разрешает агенту: навыки и те же списки инструментов, что у старого агента. Монолит считает из них
+   * инструменты платформы сессии — операции, действия, MCP, операции подключений — и хранит в записи прогона.
+   */
   capabilityIds: {
-    actionIds: string[];
-    operationIds: string[];
-    systemOperationKeys: string[];
     skillIds: string[];
-    connectionIds: string[];
+    actionIds?: string[];
+    operationIds?: string[];
+    systemOperationKeys?: string[];
+    connectionIds?: string[];
   };
-  includeAllWorkspaceMcpTools?: boolean;
+  /** Политика записи узла: read_only — новому агенту доступно только чтение платформы. */
+  writePolicy?: "approval_required" | "read_only";
+  /** Схема итога узла (JSON Schema): новый агент сдаёт `payload` по ней, узел отдаёт его дальше как `finalPayload`. */
+  resultSchema?: JsonObject | null;
   assistantId?: string | null;
-  signal?: AbortSignal;
-}) => Promise<AgentRuntimeResult>;
+}) => Promise<StartAgentSessionResult>;
 
-// ── knowledge-prefetch ───────────────────────────────────────────────────────
-
-/** server/agent-runtime/knowledge-prefetch.ts — статус инлайна привязанной БЗ в контекст. */
-export type AgentKnowledgePrefetchStatus = "inlined" | "toc_only" | "skipped";
-
-/** server/agent-runtime/knowledge-prefetch.ts — причина итогового статуса prefetch. */
-export type AgentKnowledgePrefetchReason =
-  | "ok"
-  | "disabled"
-  | "no_knowledge_scope"
-  | "over_char_budget"
-  | "over_doc_budget"
-  | "acl_denied"
-  | "empty"
-  | "error";
-
-/** server/agent-runtime/knowledge-prefetch.ts — инлайн-документ БЗ. */
-export type AgentInlineKnowledgeDocument = {
-  baseId: string;
-  baseName: string;
-  nodeId: string;
-  title: string;
-  text: string;
-  truncated: false;
-  breadcrumbs?: string[];
-  updatedAt?: string;
+/**
+ * `deadlineAt` — до какого момента узел ждёт итог сессии. Позже подметальщик сервиса сценариев останавливает сессию
+ * и закрывает прогон понятной ошибкой. Срок — с запасом над потолком длительности сессии из «Настроек агента»:
+ * сессия может постоять в очереди сервиса до первого захвата.
+ */
+export type StartAgentSessionResult = {
+  executionId: string;
+  sessionId: string;
+  status: string;
+  created: boolean;
+  deadlineAt: string;
 };
 
-/** server/agent-runtime/knowledge-prefetch.ts — элемент инвентаря БЗ. */
-export type AgentKnowledgeInventoryItem = {
-  baseId: string;
-  baseName: string;
-  nodeId: string;
-  title: string;
-  updatedAt: string | null;
-  charCount: number;
-  inlined: boolean;
+/** Итог сессии нового агента из журнала запусков; `running` — итога ещё нет. */
+export type AgentSessionResult = {
+  executionId: string;
+  sessionId: string | null;
+  status: "running" | "success" | "partial" | "cancelled" | "error" | "timeout";
+  sessionStatus: string | null;
+  answer: string | null;
+  summary: string | null;
+  /** Итог по схеме узла (`resultSchema`); null — схемы не было или агент итог по ней не сдал. */
+  payload?: JsonObject | null;
+  /** Итог не совпал со схемой и принят как есть: описание расхождения. Шаг не падает, узел предупреждает. */
+  payloadMismatch?: string | null;
+  files: Array<{ name: string; attachmentId: string }>;
+  errorCode: string | null;
+  errorMessage: string | null;
 };
 
-/** server/agent-runtime/knowledge-prefetch.ts AgentKnowledgePrefetchResult — итог prefetch БЗ. */
-export type AgentKnowledgePrefetchResult = {
-  status: AgentKnowledgePrefetchStatus;
-  reason: AgentKnowledgePrefetchReason;
-  baseIds: string[];
-  documents: AgentInlineKnowledgeDocument[];
-  inventory: AgentKnowledgeInventoryItem[];
-  complete: boolean;
-  totalChars: number;
-  inlinedChars: number;
-  docCount: number;
-};
-
-/** server/agent-runtime/knowledge-prefetch.ts collectKnowledgeBaseIdsFromContextRefs. */
-export type CollectKnowledgeBaseIdsFromContextRefsFacade = (value: unknown) => string[];
-
-/** server/agent-runtime/knowledge-prefetch.ts prefetchKnowledgeForAgentRun. */
-export type PrefetchKnowledgeForAgentRunFacade = (params: {
-  workspaceId: string;
-  actorUserId: string | null;
-  assistantKnowledgeBaseIds: string[];
-  contextRefKnowledgeBaseIds?: string[];
-  requestText: string;
-  recentChatMessages: Array<{ content: string }>;
-  config: ResolvedKbPrefetchConfig;
-}) => Promise<AgentKnowledgePrefetchResult>;
-
-// ── artifacts / idempotency ──────────────────────────────────────────────────
-
-/** server/agent-runtime/agent-artifacts.ts listAgentArtifacts — возврат ослаблен до читаемых полей. */
-export type ListAgentArtifactsFacade = (params: {
-  workspaceId: string;
-  chatId: string | null;
-  runId?: string | null;
-  scope?: "current_chat" | "last_run" | "run";
-  mutationKinds?: string[];
-  resourceTypes?: string[];
-  includeCleaned?: boolean;
-  limit?: number;
-}) => Promise<
-  Array<{
-    artifactId: string;
-    operationKey: string;
-    resourceId: string;
-    title: string;
-  }>
->;
-
-/** server/agent-runtime/agent-tool-idempotency-service.ts — возврат ослаблен (без `completedAt`). */
-export type ListCompletedIdempotentToolCallsFacade = (params: {
-  runId: string;
-  nodeId?: string | null;
-}) => Promise<
-  Array<{
-    toolKind: string;
-    toolRef: string;
-    inputHash: string;
-  }>
->;
-
-// ── source-grounding ─────────────────────────────────────────────────────────
-
-/** server/agent-runtime/source-grounding.ts — семейство источников. */
-export type AgentSourceFamily = "attachments" | "chat_tabs" | "knowledge";
-
-/** server/agent-runtime/source-grounding.ts — вход prefetch БЗ для грундинга. */
-export type AgentSourceGroundingKnowledgePrefetch = {
-  status: "inlined" | "toc_only" | "skipped";
-  baseIds: string[];
-  documents: ReadonlyArray<unknown>;
-  inventory: ReadonlyArray<unknown>;
-};
-
-/** server/agent-runtime/source-grounding.ts — контракт грундинга источников. */
-export type AgentSourceGroundingContract = {
-  requiresGrounding: boolean;
-  requiredSourceFamilies: AgentSourceFamily[];
-  availableSourceFamilies: AgentSourceFamily[];
-  comparisonRequested: boolean;
-  inlineSourceBodiesAvailable: boolean;
-  inlineKnowledgeDocumentsAvailable: boolean;
-  sourceInventorySummary: string[];
-};
-
-/** server/agent-runtime/source-grounding.ts — инвентарь источников. */
-export type AgentSourceInventory = {
-  attachments: Array<{
-    id: string;
-    filename: string;
-    kind: string;
-    hasInlineText: boolean;
-    hasTruncatedInlineText: boolean;
-    canOcr: boolean;
-  }>;
-  chatTabs: Array<{
-    tabId: string;
-    title: string;
-    sourceType: "transcript" | "canvas_document";
-    tabType: "original" | "canvas_document";
-    transcriptId: string | null;
-  }>;
-  knowledgeRefs: string[];
-};
-
-/** server/agent-runtime/source-grounding.ts buildAgentSourceGroundingContext. */
-export type BuildAgentSourceGroundingContextFacade = (params: {
-  requestText: string;
-  recentChatMessages: Array<{ role: string; content: string }>;
-  requestPrefersChatTabsOverAttachments: boolean;
-  requestMentionsTranscriptOrTab: boolean;
-  attachments: unknown;
-  chatTabContext: unknown;
-  transcriptText: string | null;
-  knowledgePrefetch?: AgentSourceGroundingKnowledgePrefetch | null;
-}) => {
-  contract: AgentSourceGroundingContract;
-  inventory: AgentSourceInventory;
-};
+export type GetAgentSessionResultFacade = (params: { executionId: string }) => Promise<AgentSessionResult | null>;
