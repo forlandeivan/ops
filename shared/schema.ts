@@ -1336,6 +1336,8 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   aiOcrPageConcurrency: integer("ai_ocr_page_concurrency"),
   documentImportWorkerConcurrency: integer("document_import_worker_concurrency"),
   visionOcrMaxConcurrency: integer("vision_ocr_max_concurrency"),
+  ocrRequestTimeoutMs: integer("ocr_request_timeout_ms"),
+  chatDocumentOcrTimeoutMs: integer("chat_document_ocr_timeout_ms"),
   // Потолок одновременных job-ов индексации на пространство (fair claim, S16). NULL = env/дефолт.
   kbIndexingPerWorkspaceLimit: integer("kb_indexing_per_workspace_limit"),
   // Структуризатор импортируемых документов (rule-based): включён по умолчанию; пороги правил —
