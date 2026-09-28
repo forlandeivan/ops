@@ -448,6 +448,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     table: "assistant_workflow_run_events",
     timeColumn: "created_at",
   }),
+  task({
+    key: "pg.user_action_events",
+    label: "Журнал действий участников",
+    description:
+      "Удаляет записи журнала действий участников старше срока хранения. По журналу строятся отчёт владельца пространства об активности участников и счёт действий в «Обзоре» админ-аналитики; суточные витрины «Обзора» уборка не затрагивает. Отчёт за период старше срока хранения станет пустым.",
+    category: "events",
+    action: "delete_rows",
+    table: "user_action_events",
+    timeColumn: "occurred_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 400,
+  }),
 
   // ── Аудит ────────────────────────────────────────────────────────────────
   task({

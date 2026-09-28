@@ -615,6 +615,8 @@ export const adminAnalyticsRollupState = pgTable(
     lastRepairTo: date("last_repair_to"),
     lastSuccessfulAt: timestamp("last_successful_at", { withTimezone: true }),
     lastError: text("last_error"),
+    /** С этих суток (UTC) действия считаются по журналу `user_action_events`; раньше — по прежним источникам. */
+    actionJournalSince: date("action_journal_since"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
@@ -759,6 +761,57 @@ export const adminAnalyticsEntityLifecycleDay = pgTable(
   }),
 );
 
+/** Виды действий журнала участников. Подписи и подвиды — `shared/user-actions.ts`. */
+export const userActionKinds = [
+  "chat_message",
+  "transcription",
+  "transcript_correction",
+  "action_run",
+  "document_created",
+  "document_edited",
+  "knowledge_base_created",
+  "knowledge_document_saved",
+  "knowledge_upload",
+] as const;
+export type UserActionKind = (typeof userActionKinds)[number];
+
+/**
+ * Кто совершил действие или потратил ресурс: человек сам или автоматика от его имени.
+ * Передаётся явно в точке записи, не угадывается по косвенным признакам.
+ */
+export const userActionOrigins = ["human", "agent", "workflow", "scheduled", "api", "external", "auto"] as const;
+export type UserActionOrigin = (typeof userActionOrigins)[number];
+
+/**
+ * Журнал действий участников (docs/user-action-journal-design.md): строка на действие в момент
+ * совершения. `id` — uuid v5 от ключа события (`<вид>:<id сущности>`), повторная запись того же
+ * события не удваивает счёт. Содержимого нет: только коды, ссылки на сущности и числа.
+ */
+export const userActionEvents = pgTable(
+  "user_action_events",
+  {
+    id: uuid("id").primaryKey(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    kind: varchar("kind", { length: 48 }).$type<UserActionKind>().notNull(),
+    detail: varchar("detail", { length: 32 }),
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>().notNull(),
+    entityId: varchar("entity_id", { length: 64 }),
+    actionId: varchar("action_id"),
+    quantity: bigint("quantity", { mode: "number" }),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    workspaceOccurredIdx: index("user_action_events_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
+    userOccurredIdx: index("user_action_events_user_occurred_idx").on(table.userId, table.occurredAt),
+    occurredAtIdx: index("user_action_events_occurred_at_idx").on(table.occurredAt),
+  }),
+);
+
+export type UserActionEvent = typeof userActionEvents.$inferSelect;
+
 export const workspaceLlmUsageLedger = pgTable(
   "workspace_llm_usage_ledger",
   {
@@ -780,6 +833,11 @@ export const workspaceLlmUsageLedger = pgTable(
     creditsCharged: integer("credits_charged").notNull().default(0),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+    // 0397: участник и происхождение расхода, id запуска — для отчёта владельца пространства. Без FK:
+    // журнал большой, индекс под ключ в миграции не строим; удалённый участник остаётся id без строки.
+    userId: varchar("user_id"),
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>(),
+    runRef: varchar("run_ref", { length: 64 }),
   },
   (table) => ({
     uniqueExecution: uniqueIndex("workspace_llm_usage_ledger_execution_idx").on(
@@ -824,6 +882,11 @@ export const workspaceEmbeddingUsageLedger = pgTable(
     creditsCharged: integer("credits_charged").notNull().default(0),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+    // 0397: участник и происхождение расхода, id запуска — для отчёта владельца пространства. Без FK:
+    // журнал большой, индекс под ключ в миграции не строим; удалённый участник остаётся id без строки.
+    userId: varchar("user_id"),
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>(),
+    runRef: varchar("run_ref", { length: 64 }),
   },
   (table) => ({
     uniqueOperation: uniqueIndex("workspace_embedding_usage_ledger_operation_idx").on(
@@ -867,6 +930,11 @@ export const workspaceAsrUsageLedger = pgTable(
     creditsCharged: integer("credits_charged").notNull().default(0),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+    // 0397: участник и происхождение расхода, id запуска — для отчёта владельца пространства. Без FK:
+    // журнал большой, индекс под ключ в миграции не строим; удалённый участник остаётся id без строки.
+    userId: varchar("user_id"),
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>(),
+    runRef: varchar("run_ref", { length: 64 }),
   },
   (table) => ({
     occurredAtIdx: index("workspace_asr_usage_ledger_occurred_at_idx").on(table.occurredAt),
@@ -4576,6 +4644,8 @@ export const actionExecutions = pgTable(
     finishedAt: timestamp("finished_at"),
     meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    /** 0397: кто запустил — человек, агент, сценарий, API. NULL у строк до обновления. */
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>(),
   },
   (table) => ({
     startedAtIdx: index("action_executions_started_at_idx").on(table.startedAt),
@@ -7317,6 +7387,8 @@ export const asrExecutions = pgTable(
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
     pipelineEvents: jsonb("pipeline_events").$type<unknown[]>(),
+    /** 0397: кто запустил расшифровку — человек, агент, сценарий, API, приём в БЗ. NULL у строк до обновления. */
+    origin: varchar("origin", { length: 24 }).$type<UserActionOrigin>(),
   },
   (table) => ({
     createdAtIdx: index("asr_executions_created_at_idx").on(table.createdAt),
