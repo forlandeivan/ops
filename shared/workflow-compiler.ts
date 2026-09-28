@@ -419,9 +419,10 @@ export const workflowKnowledgeRagConfigSchema = z.object({
   enableQueryRewriting: z.boolean().nullable().optional(),
   queryRewriteModel: z.string().min(1).max(200).nullable().optional(),
   bm25Weight: z.number().min(0).max(1).nullable().optional(),
-  bm25Limit: z.number().int().min(1).max(20).nullable().optional(),
+  // Потолок кандидатов — как у профиля поиска (задача 5.1).
+  bm25Limit: z.number().int().min(1).max(50).nullable().optional(),
   vectorWeight: z.number().min(0).max(1).nullable().optional(),
-  vectorLimit: z.number().int().min(1).max(20).nullable().optional(),
+  vectorLimit: z.number().int().min(1).max(50).nullable().optional(),
   llmModelSource: workflowModelSourceSchema.nullable().optional(),
   llmProviderId: z.string().min(1).max(200).nullable().optional(),
   llmModel: z.string().min(1).max(200).nullable().optional(),

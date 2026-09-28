@@ -1318,6 +1318,9 @@ export const ragGlobalSettings = pgTable("rag_global_settings", {
   embeddingModel: text("embedding_model"),
   // Размерность вектора глобальной embedding-модели (см. shared/rag-global-settings.ts).
   embeddingVectorSize: integer("embedding_vector_size"),
+  // Инструкция к вопросу для модели эмбеддингов (задача 5.2): добавляется только к вектору вопроса,
+  // документы не трогаются. NULL — выключено (см. shared/rag-global-settings.ts).
+  embeddingQueryInstruction: text("embedding_query_instruction"),
   // Small-to-big retrieval (№26): режим ретривала и его пороги (см. shared/rag-global-settings.ts).
   retrieveMode: text("retrieve_mode").notNull().default("auto"),
   parentMaxTokens: integer("parent_max_tokens").notNull().default(32000),
@@ -7429,6 +7432,13 @@ export const asrCompletionJobs = pgTable(
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     cancellationConfirmedAt: timestamp("cancellation_confirmed_at", { withTimezone: true }),
     billingCompletedAt: timestamp("billing_completed_at", { withTimezone: true }),
+    // 0394: перезапуск зависшей задачи. Параметры старта сохраняются, чтобы повторная задача
+    // распознавалась так же (диаризация и прочее); NULL у задач, созданных до 0394, —
+    // такие не перезапускаются. processing_seen_at — первый ответ сервиса «в работе»:
+    // от него, а не от постановки в очередь сервиса, считается порог зависания.
+    recognitionOptions: jsonb("recognition_options").$type<UnicaAsrAdvancedOptions | null>(),
+    recognitionRestarts: integer("recognition_restarts").notNull().default(0),
+    processingSeenAt: timestamp("processing_seen_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
   },

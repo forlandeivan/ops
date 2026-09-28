@@ -55,9 +55,10 @@ export const KNOWLEDGE_BASE_SEARCH_CONSTRAINTS = {
   rag: {
     topK: { defaultValue: 6, min: 1, max: 20, step: 1 } satisfies NumericConstraint,
     bm25Weight: { defaultValue: 0.5, min: 0, max: 1, step: 0.05 } satisfies NumericConstraint,
-    bm25Limit: { defaultValue: 6, min: 1, max: 20, step: 1 } satisfies NumericConstraint,
+    // Потолок кандидатов — как у профиля поиска (задача 5.1): BM25 и вектор могут отдать больше, чем topK.
+    bm25Limit: { defaultValue: 6, min: 1, max: 50, step: 1 } satisfies NumericConstraint,
     vectorWeight: { defaultValue: 0.5, min: 0, max: 1, step: 0.05 } satisfies NumericConstraint,
-    vectorLimit: { defaultValue: 8, min: 1, max: 20, step: 1 } satisfies NullableNumberConstraint,
+    vectorLimit: { defaultValue: 8, min: 1, max: 50, step: 1 } satisfies NullableNumberConstraint,
     temperature: { defaultValue: 0.2, min: 0, max: 2, step: 0.1 } satisfies NumericConstraint,
     maxCompletionTokens: { defaultValue: 2048, min: 16, max: 4096, step: 1 } satisfies NullableNumericConstraint,
     systemPrompt: { defaultValue: "" } satisfies TextConstraint,
