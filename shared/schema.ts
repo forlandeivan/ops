@@ -1343,6 +1343,10 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   chatDocumentOcrTimeoutMs: integer("chat_document_ocr_timeout_ms"),
   // Потолок одновременных job-ов индексации на пространство (fair claim, S16). NULL = env/дефолт.
   kbIndexingPerWorkspaceLimit: integer("kb_indexing_per_workspace_limit"),
+  // Сколько записей одного пользователя и одного пространства одновременно у сервиса распознавания
+  // при приёме в базы знаний (0395). NULL = дефолт кода; потолка на установку нет.
+  ingestAsrPerUserLimit: integer("ingest_asr_per_user_limit"),
+  ingestAsrPerWorkspaceLimit: integer("ingest_asr_per_workspace_limit"),
   // Структуризатор импортируемых документов (rule-based): включён по умолчанию; пороги правил —
   // jsonb, NULL = дефолты кода. См. shared/knowledge-document-structure-enhancement.ts.
   structureEnhancementEnabled: boolean("structure_enhancement_enabled").notNull().default(true),
