@@ -1347,6 +1347,8 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   // при приёме в базы знаний (0395). NULL = дефолт кода; потолка на установку нет.
   ingestAsrPerUserLimit: integer("ingest_asr_per_user_limit"),
   ingestAsrPerWorkspaceLimit: integer("ingest_asr_per_workspace_limit"),
+  // Сколько документов одного пространства одновременно у Docling при приёме (0396). NULL = дефолт кода.
+  ingestDoclingPerWorkspaceLimit: integer("ingest_docling_per_workspace_limit"),
   // Структуризатор импортируемых документов (rule-based): включён по умолчанию; пороги правил —
   // jsonb, NULL = дефолты кода. См. shared/knowledge-document-structure-enhancement.ts.
   structureEnhancementEnabled: boolean("structure_enhancement_enabled").notNull().default(true),
