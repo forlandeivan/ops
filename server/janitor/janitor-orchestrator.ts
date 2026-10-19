@@ -41,6 +41,7 @@ import {
 } from "./tasks/s3-retention-task";
 import { runQdrantOrphanGcTask } from "./tasks/qdrant-orphan-gc-task";
 import { runStorageOrphanTask } from "./tasks/storage-orphan-task";
+import { runAgentSessionFoldersTask } from "./tasks/agent-session-folders-task";
 
 // Тип сторов живёт в default-stores; реэкспорт сохраняет прежние импорты потребителей.
 export type { JanitorStores } from "./default-stores";
@@ -270,6 +271,15 @@ export async function runPolicy(
       matched += result.matched;
       deleted += result.deleted;
       freedBytes += result.freedBytes;
+      aborted = aborted || result.aborted;
+    } else if (storageOf(task) === "agent_session_folders") {
+      const result = await runAgentSessionFoldersTask(
+        { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
+        stores.agentSessionFolders,
+        { maxBatchesPerRun: MAX_BATCHES_PER_RUN, shouldAbort },
+      );
+      matched += result.matched;
+      deleted += result.deleted;
       aborted = aborted || result.aborted;
     } else if (storageOf(task) === "s3_reconcile") {
       const result = await resolveReconcileRunner(task)(stores, {
@@ -639,6 +649,15 @@ export async function previewPolicy(
     const result = await runQdrantOrphanGcTask(
       { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
       stores.qdrant,
+      { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
+    );
+    return { matched: result.matched };
+  }
+
+  if (storageOf(taskDef) === "agent_session_folders") {
+    const result = await runAgentSessionFoldersTask(
+      { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
+      stores.agentSessionFolders,
       { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
     );
     return { matched: result.matched };

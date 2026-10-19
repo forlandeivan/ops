@@ -36,6 +36,12 @@ export interface JanitorDomainGateway {
   purgeChatAttachmentArtifacts(workspaceId: string, attachment: GatewayChatAttachmentRef): Promise<void>;
   deleteWorkspaceFile(workspaceId: string, storageKey: string): Promise<void>;
   reconcileQdrantUsage(): Promise<void>;
+  /** Рабочие папки сессий агента (agent.session_folders): удаляет сервис агента через монолит. */
+  purgeAgentSessionFolders(request: {
+    olderThanDays: number;
+    limit: number;
+    dryRun: boolean;
+  }): Promise<{ purged: number; remaining: number }>;
 }
 
 export class JanitorDomainGatewayError extends Error {
@@ -80,7 +86,7 @@ async function callGateway(
   path: string,
   body: Record<string, unknown>,
   parentSignal?: AbortSignal,
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const token = gatewayToken();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
@@ -123,17 +129,27 @@ async function callGateway(
       : response.status >= 500 || response.status === 429;
     throw new JanitorDomainGatewayError(message, response.status, code, retryable);
   }
+  return (await response.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
 /** HTTP-реализация gateway; boundary-URL валидируется вызывающим (default-stores). */
 export function createHttpJanitorDomainGateway(baseUrl: string): JanitorDomainGateway {
   return {
-    cleanupFileArtifacts: (request, signal) =>
-      callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal),
-    purgeChatAttachmentArtifacts: (workspaceId, attachment) =>
-      callGateway(baseUrl, "/chat-attachments/purge-artifacts", { workspaceId, attachment }),
-    deleteWorkspaceFile: (workspaceId, storageKey) =>
-      callGateway(baseUrl, "/workspace-files/delete", { workspaceId, storageKey }),
-    reconcileQdrantUsage: () => callGateway(baseUrl, "/qdrant-usage/reconcile", {}),
+    cleanupFileArtifacts: async (request, signal) => {
+      await callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal);
+    },
+    purgeChatAttachmentArtifacts: async (workspaceId, attachment) => {
+      await callGateway(baseUrl, "/chat-attachments/purge-artifacts", { workspaceId, attachment });
+    },
+    deleteWorkspaceFile: async (workspaceId, storageKey) => {
+      await callGateway(baseUrl, "/workspace-files/delete", { workspaceId, storageKey });
+    },
+    reconcileQdrantUsage: async () => {
+      await callGateway(baseUrl, "/qdrant-usage/reconcile", {});
+    },
+    purgeAgentSessionFolders: async (request) => {
+      const payload = await callGateway(baseUrl, "/agent-session-folders/purge", { ...request });
+      return { purged: Number(payload.purged ?? 0), remaining: Number(payload.remaining ?? 0) };
+    },
   };
 }

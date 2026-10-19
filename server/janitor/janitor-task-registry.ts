@@ -64,9 +64,10 @@ export interface JanitorTaskDefinition {
    * векторное (Qdrant). Для "s3" оркестратор использует S3-исполнитель (tasks/s3-retention-task),
    * для "qdrant" — GC осиротевших коллекций (tasks/qdrant-orphan-gc-task),
    * для "s3_reconcile" — сверку содержимого бакетов с базой (tasks/storage-orphan-task),
+   * для "agent_session_folders" — вызов сервиса агента через монолит (tasks/agent-session-folders-task),
    * а не PG-движок.
    */
-  storage?: "postgres" | "s3" | "qdrant" | "s3_reconcile";
+  storage?: "postgres" | "s3" | "qdrant" | "s3_reconcile" | "agent_session_folders";
   /** S3: префиксы mime для отбора (напр. ["audio/", "video/"]); пусто — без фильтра по типу. */
   mimePrefixes?: string[];
   /** S3: true — отбирать строки, чей mime НЕ из mimePrefixes (включая mime IS NULL). */
@@ -100,6 +101,8 @@ export interface JanitorTaskDefinition {
 }
 
 const DEFAULT_BATCH_SIZE = 500;
+/** «Лента сессий агента»: дольше неё рабочие папки сессий храниться не могут. */
+export const AGENT_SESSIONS_POLICY_KEY = "pg.agent_sessions";
 const DEFAULT_INTERVAL_MINUTES = 360;
 
 function task(
@@ -128,7 +131,7 @@ function task(
 }
 
 /** Хранилище-владелец задачи (по умолчанию PostgreSQL). */
-export function storageOf(task: JanitorTaskDefinition): "postgres" | "s3" | "qdrant" | "s3_reconcile" {
+export function storageOf(task: JanitorTaskDefinition): NonNullable<JanitorTaskDefinition["storage"]> {
   return task.storage ?? "postgres";
 }
 
@@ -217,6 +220,40 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 90,
     sensitive: true,
     cascadeNote: "Каскадно удаляет события журнала (agent_execution_events).",
+  }),
+  // Сессии агента (SEC-08.2). Срок хранения раньше стоял в «Настройках агента» и применялся самим сервисом агента;
+  // теперь оба срока — здесь. Точки восстановления сервис агента удаляет сразу после конца сессии, без политики.
+  task({
+    key: AGENT_SESSIONS_POLICY_KEY,
+    label: "Лента сессий агента",
+    description:
+      "Удаляет закончившиеся сессии агента старше срока хранения: ход работы для ленты ответа, команды и остатки точек восстановления. Живые сессии не трогает. Ответы и файлы, выданные в чат, остаются в чате.",
+    category: "agent",
+    action: "delete_rows",
+    table: "agent_sessions",
+    timeColumn: "finished_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 14,
+    defaultBatchSize: 200,
+    intervalMinutes: 60,
+    cascadeNote:
+      "Каскадно удаляет события сессии (agent_session_events) и команды; рабочую папку сессии сервис агента убирает следом.",
+  }),
+  task({
+    key: "agent.session_folders",
+    label: "Рабочие папки сессий агента",
+    description:
+      "Удаляет рабочие папки закончившихся сессий агента старше срока хранения: скрипты, черновики и промежуточные файлы. Запись сессии и лента остаются. Файлы, выданные в чат, хранятся отдельно и не затрагиваются. Папки лежат на томе сервиса агента, удаляет их сервис агента по вызову janitor.",
+    category: "agent",
+    action: "delete_object",
+    storage: "agent_session_folders",
+    table: "agent_sessions",
+    timeColumn: "finished_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 7,
+    defaultBatchSize: 500,
+    intervalMinutes: 60,
+    retentionNotLongerThan: AGENT_SESSIONS_POLICY_KEY,
   }),
 
   // ── Проверка достоверности ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md) ──

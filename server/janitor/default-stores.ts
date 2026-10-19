@@ -43,6 +43,7 @@ import {
   type QdrantOrphanStore,
 } from "./tasks/qdrant-orphan-gc-task";
 import { createStorageOrphanDeps, type StorageOrphanDeps } from "./tasks/storage-orphan-task";
+import type { AgentSessionFoldersStore } from "./tasks/agent-session-folders-task";
 import { createFileArtifactCleanupJobStore } from "./file-artifact-cleanup-job-store";
 
 const logger = createLogger("janitor-default-stores");
@@ -52,6 +53,7 @@ export interface JanitorStores {
   s3: Record<string, S3RetentionStore>;
   qdrant: QdrantOrphanStore;
   storageOrphans: StorageOrphanDeps;
+  agentSessionFolders: AgentSessionFoldersStore;
 }
 
 /**
@@ -199,5 +201,7 @@ export function defaultStores(): JanitorStores {
     }),
     // Сверка хранилища: найденное уходит в очередь удаления, файлы удаляет монолит после перепроверки.
     storageOrphans: createStorageOrphanDeps((job) => cleanupJobs.enqueueStorageJob(job)),
+    // Папки сессий агента лежат на томе сервиса агента: удаляет он, janitor зовёт его через монолит.
+    agentSessionFolders: { purge: (request) => gateway.purgeAgentSessionFolders(request) },
   };
 }
