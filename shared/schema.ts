@@ -10166,6 +10166,245 @@ export const workspaceMemberRoleAssignments = pgTable(
 export type WorkspaceMemberRoleAssignment = typeof workspaceMemberRoleAssignments.$inferSelect;
 export type WorkspaceMemberRoleAssignmentInsert = typeof workspaceMemberRoleAssignments.$inferInsert;
 
+// ─── Корпоративный каталог (LDAP / AD) ──────────────────────────────────────
+// docs/dev/directory-login.md. Подключение и политика каталога, правила «группа → пространство + роль»,
+// связь учётки Уники с записью каталога, участие, выданное правилами, и журнал синхронизаций.
+
+export const directoryPresets = ["active_directory", "freeipa", "generic_ldap"] as const;
+export type DirectoryPreset = (typeof directoryPresets)[number];
+export const directoryTlsModes = ["ldaps", "starttls"] as const;
+export type DirectoryTlsMode = (typeof directoryTlsModes)[number];
+export const directoryUnmatchedPolicies = ["default_workspace", "deny"] as const;
+export type DirectoryUnmatchedPolicy = (typeof directoryUnmatchedPolicies)[number];
+export const directoryPersonalWorkspaceModes = ["off", "on_first_login"] as const;
+export type DirectoryPersonalWorkspaceMode = (typeof directoryPersonalWorkspaceModes)[number];
+export const directorySyncKinds = ["delta", "full"] as const;
+export type DirectorySyncKind = (typeof directorySyncKinds)[number];
+export const directorySyncTriggers = ["schedule", "manual"] as const;
+export type DirectorySyncTrigger = (typeof directorySyncTriggers)[number];
+export const directorySyncStatuses = ["running", "succeeded", "failed", "halted_threshold"] as const;
+export type DirectorySyncStatus = (typeof directorySyncStatuses)[number];
+export const localLoginModes = ["all", "admins_only"] as const;
+export type LocalLoginMode = (typeof localLoginModes)[number];
+
+export type DirectoryHost = { host: string; port: number };
+/** Группа каталога: неизменный идентификатор, текущий DN и имя для показа. */
+export type DirectoryGroupRef = { id: string; dn: string; name: string };
+/** Переопределения атрибутов пресета: ключ — роль атрибута (login, email, …), значение — имя в каталоге. */
+export type DirectoryAttributeMap = Partial<Record<string, string>>;
+/** Курсор прохода изменений: номер USN конкретного контроллера (AD) или метка времени (остальные). */
+export type DirectoryDeltaCursor = { host: string; usn: string } | { timestamp: string };
+export type DirectorySyncCounters = {
+  seen: number;
+  created: number;
+  updated: number;
+  disabled: number;
+  enabled: number;
+  membershipsAdded: number;
+  membershipsRemoved: number;
+  conflicts: number;
+  limitBlocked: number;
+};
+export type DirectorySyncIssue = {
+  kind: "email_conflict" | "member_limit" | "invalid_entry";
+  externalId?: string;
+  userId?: string;
+  workspaceId?: string;
+  detail?: string;
+};
+
+export const directoryProviders = pgTable("directory_providers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  displayName: text("display_name").notNull(),
+  isEnabled: boolean("is_enabled").notNull().default(false),
+  /** Каталог для логина без домена (`ivanov`). */
+  isDefault: boolean("is_default").notNull().default(false),
+  preset: text("preset").$type<DirectoryPreset>().notNull().default("active_directory"),
+  hosts: jsonb("hosts").$type<DirectoryHost[]>().notNull().default(sql`'[]'::jsonb`),
+  tlsMode: text("tls_mode").$type<DirectoryTlsMode>().notNull().default("ldaps"),
+  caPem: text("ca_pem").notNull().default(""),
+  bindDn: text("bind_dn").notNull().default(""),
+  /** Пароль служебной учётки, зашифрованный `server/secret-storage.ts`. */
+  bindPasswordEncrypted: text("bind_password_encrypted").notNull().default(""),
+  userBaseDn: text("user_base_dn").notNull().default(""),
+  userFilter: text("user_filter").notNull().default(""),
+  groupBaseDn: text("group_base_dn").notNull().default(""),
+  /** UPN-суффиксы и NetBIOS-имена, по которым логин направляется в этот каталог. */
+  loginDomains: jsonb("login_domains").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  attributeMap: jsonb("attribute_map").$type<DirectoryAttributeMap>().notNull().default(sql`'{}'::jsonb`),
+  accessGroup: jsonb("access_group").$type<DirectoryGroupRef | null>(),
+  unmatchedPolicy: text("unmatched_policy").$type<DirectoryUnmatchedPolicy>().notNull().default("deny"),
+  defaultWorkspaceId: varchar("default_workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+  defaultRoleId: varchar("default_role_id").references(() => workspaceRoles.id, { onDelete: "set null" }),
+  personalWorkspaceMode: text("personal_workspace_mode")
+    .$type<DirectoryPersonalWorkspaceMode>()
+    .notNull()
+    .default("off"),
+  syncIntervalMinutes: integer("sync_interval_minutes").notNull().default(15),
+  fullSyncHour: integer("full_sync_hour").notNull().default(3),
+  disableThresholdPercent: integer("disable_threshold_percent").notNull().default(10),
+  loginFailuresLimit: integer("login_failures_limit").notNull().default(5),
+  connectTimeoutMs: integer("connect_timeout_ms").notNull().default(5000),
+  operationTimeoutMs: integer("operation_timeout_ms").notNull().default(10000),
+  poolSize: integer("pool_size").notNull().default(4),
+  deltaCursor: jsonb("delta_cursor").$type<DirectoryDeltaCursor | null>(),
+  lastFullSyncAt: timestamp("last_full_sync_at", { withTimezone: true }),
+  lastDeltaSyncAt: timestamp("last_delta_sync_at", { withTimezone: true }),
+  syncRequestedKind: text("sync_requested_kind").$type<DirectorySyncKind | null>(),
+  /** Разовое разрешение превысить порог отключений в следующей полной сверке. */
+  syncForceThreshold: boolean("sync_force_threshold").notNull().default(false),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => ({
+  presetChk: check("directory_providers_preset_chk", sql`${table.preset} IN ('active_directory', 'freeipa', 'generic_ldap')`),
+  tlsModeChk: check("directory_providers_tls_mode_chk", sql`${table.tlsMode} IN ('ldaps', 'starttls')`),
+  unmatchedPolicyChk: check(
+    "directory_providers_unmatched_policy_chk",
+    sql`${table.unmatchedPolicy} IN ('default_workspace', 'deny')`,
+  ),
+  personalWorkspaceModeChk: check(
+    "directory_providers_personal_workspace_mode_chk",
+    sql`${table.personalWorkspaceMode} IN ('off', 'on_first_login')`,
+  ),
+  defaultWorkspaceIdx: index("directory_providers_default_workspace_idx").on(table.defaultWorkspaceId),
+  defaultRoleIdx: index("directory_providers_default_role_idx").on(table.defaultRoleId),
+}));
+
+export type DirectoryProvider = typeof directoryProviders.$inferSelect;
+export type DirectoryProviderInsert = typeof directoryProviders.$inferInsert;
+
+export const directoryGroupRules = pgTable(
+  "directory_group_rules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    groupExternalId: text("group_external_id").notNull(),
+    groupDn: text("group_dn").notNull(),
+    groupName: text("group_name").notNull(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    roleId: varchar("role_id")
+      .notNull()
+      .references(() => workspaceRoles.id, { onDelete: "cascade" }),
+    createdByAdminId: varchar("created_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    ruleUniq: uniqueIndex("directory_group_rules_uq").on(
+      table.providerId,
+      table.groupExternalId,
+      table.workspaceId,
+      table.roleId,
+    ),
+    workspaceIdx: index("directory_group_rules_workspace_idx").on(table.workspaceId),
+    roleIdx: index("directory_group_rules_role_idx").on(table.roleId),
+  }),
+);
+
+export type DirectoryGroupRule = typeof directoryGroupRules.$inferSelect;
+export type DirectoryGroupRuleInsert = typeof directoryGroupRules.$inferInsert;
+
+export const userDirectoryLinks = pgTable(
+  "user_directory_links",
+  {
+    userId: varchar("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    dn: text("dn").notNull(),
+    login: text("login").notNull(),
+    upn: text("upn").notNull().default(""),
+    /** Истина, только если `users.email` взят из почтового атрибута каталога: на остальные адреса письма не шлём. */
+    emailIsMailbox: boolean("email_is_mailbox").notNull().default(false),
+    attributesHash: text("attributes_hash").notNull().default(""),
+    /** Учётку заблокировал каталог: синхронизация вправе снять блокировку, ручную — нет. */
+    disabledByDirectory: boolean("disabled_by_directory").notNull().default(false),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    externalUniq: uniqueIndex("user_directory_links_provider_external_uq").on(table.providerId, table.externalId),
+  }),
+);
+
+export type UserDirectoryLink = typeof userDirectoryLinks.$inferSelect;
+export type UserDirectoryLinkInsert = typeof userDirectoryLinks.$inferInsert;
+
+/** Участие и роли, выданные правилами каталога: синхронизация снимает только их. */
+export const directoryMembershipGrants = pgTable(
+  "directory_membership_grants",
+  {
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    roleId: varchar("role_id")
+      .notNull()
+      .references(() => workspaceRoles.id, { onDelete: "cascade" }),
+    /** Правило создало само участие, а не только добавило роль к уже существующему. */
+    createdMembership: boolean("created_membership").notNull().default(false),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.providerId, table.userId, table.workspaceId, table.roleId] }),
+    userIdx: index("directory_membership_grants_user_idx").on(table.userId),
+    workspaceIdx: index("directory_membership_grants_workspace_idx").on(table.workspaceId),
+    roleIdx: index("directory_membership_grants_role_idx").on(table.roleId),
+  }),
+);
+
+export type DirectoryMembershipGrant = typeof directoryMembershipGrants.$inferSelect;
+export type DirectoryMembershipGrantInsert = typeof directoryMembershipGrants.$inferInsert;
+
+export const directorySyncRuns = pgTable(
+  "directory_sync_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<DirectorySyncKind>().notNull(),
+    trigger: text("trigger").$type<DirectorySyncTrigger>().notNull(),
+    status: text("status").$type<DirectorySyncStatus>().notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    counters: jsonb("counters").$type<Partial<DirectorySyncCounters>>().notNull().default(sql`'{}'::jsonb`),
+    issues: jsonb("issues").$type<DirectorySyncIssue[]>().notNull().default(sql`'[]'::jsonb`),
+    errorMessage: text("error_message"),
+  },
+  (table) => ({
+    providerStartedIdx: index("directory_sync_runs_provider_started_idx").on(table.providerId, table.startedAt),
+  }),
+);
+
+export type DirectorySyncRun = typeof directorySyncRuns.$inferSelect;
+export type DirectorySyncRunInsert = typeof directorySyncRuns.$inferInsert;
+
+/** Политика входа уровня установки (singleton). */
+export const authPolicySettings = pgTable("auth_policy_settings", {
+  id: varchar("id").primaryKey().default("auth_policy_settings_singleton"),
+  localLoginMode: text("local_login_mode").$type<LocalLoginMode>().notNull().default("all"),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => ({
+  localLoginModeChk: check("auth_policy_settings_local_login_mode_chk", sql`${table.localLoginMode} IN ('all', 'admins_only')`),
+}));
+
+export type AuthPolicySettings = typeof authPolicySettings.$inferSelect;
+
 // ─── Resource-Level Access Control (Epic 6) ─────────────────────────────────
 
 /** ACL rules for KB resources (knowledge_base, knowledge_node). */
