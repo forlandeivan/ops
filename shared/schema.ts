@@ -10411,6 +10411,67 @@ export const authPolicySettings = pgTable("auth_policy_settings", {
 
 export type AuthPolicySettings = typeof authPolicySettings.$inferSelect;
 
+export const directorySyncEventOrigins = ["sync", "login", "admin"] as const;
+export type DirectorySyncEventOrigin = (typeof directorySyncEventOrigins)[number];
+export const directorySyncEventKinds = [
+  "user_created",
+  "user_updated",
+  "user_disabled",
+  "user_enabled",
+  "user_linked",
+  "access_granted",
+  "access_revoked",
+  "issue",
+] as const;
+export type DirectorySyncEventKind = (typeof directorySyncEventKinds)[number];
+/** Подробности события: изменённые поля «было → стало», причина выдачи доступа, текст замечания. */
+export type DirectorySyncEventDetails = {
+  login?: string;
+  changes?: Array<{ field: "fullName" | "email" | "login" | "dn"; from: string; to: string }>;
+  reason?: "rule" | "default_workspace" | "disabled" | "out_of_scope" | "rule_removed";
+  groupName?: string;
+  email?: string;
+  emailIsMailbox?: boolean;
+  issue?: string;
+};
+
+/** Журнал событий каталога. Срок хранения — политика janitor `pg.directory_sync_events`. */
+export const directorySyncEvents = pgTable(
+  "directory_sync_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    runId: varchar("run_id").references(() => directorySyncRuns.id, { onDelete: "set null" }),
+    origin: text("origin").$type<DirectorySyncEventOrigin>().notNull(),
+    kind: text("kind").$type<DirectorySyncEventKind>().notNull(),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ФИО и логин на момент события: журнал читаем и после удаления учётной записи. */
+    userLabel: text("user_label").notNull().default(""),
+    workspaceId: varchar("workspace_id"),
+    workspaceName: text("workspace_name"),
+    roleName: text("role_name"),
+    details: jsonb("details").$type<DirectorySyncEventDetails>().notNull().default(sql`'{}'::jsonb`),
+    actorId: varchar("actor_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    originChk: check("directory_sync_events_origin_chk", sql`${table.origin} IN ('sync', 'login', 'admin')`),
+    kindChk: check(
+      "directory_sync_events_kind_chk",
+      sql`${table.kind} IN ('user_created', 'user_updated', 'user_disabled', 'user_enabled', 'user_linked', 'access_granted', 'access_revoked', 'issue')`,
+    ),
+    runKindIdx: index("directory_sync_events_run_kind_idx").on(table.runId, table.kind, table.occurredAt),
+    providerOccurredIdx: index("directory_sync_events_provider_occurred_idx").on(table.providerId, table.occurredAt),
+    userOccurredIdx: index("directory_sync_events_user_occurred_idx").on(table.userId, table.occurredAt),
+    occurredAtIdx: index("directory_sync_events_occurred_at_idx").on(table.occurredAt),
+  }),
+);
+
+export type DirectorySyncEvent = typeof directorySyncEvents.$inferSelect;
+export type DirectorySyncEventInsert = typeof directorySyncEvents.$inferInsert;
+
 // ─── Resource-Level Access Control (Epic 6) ─────────────────────────────────
 
 /** ACL rules for KB resources (knowledge_base, knowledge_node). */

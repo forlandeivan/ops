@@ -497,6 +497,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultEnabled: true,
     defaultRetentionDays: 400,
   }),
+  task({
+    key: "pg.directory_sync_events",
+    label: "Журнал событий корпоративного каталога",
+    description:
+      "Удаляет события синхронизации с корпоративным каталогом старше срока хранения: кто создан, что изменилось, кто заблокирован, где выдан или снят доступ. Сами учётные записи и доступы уборка не трогает, пропадает только история событий.",
+    category: "events",
+    action: "delete_rows",
+    table: "directory_sync_events",
+    timeColumn: "occurred_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+  }),
 
   // ── Аудит ────────────────────────────────────────────────────────────────
   task({
