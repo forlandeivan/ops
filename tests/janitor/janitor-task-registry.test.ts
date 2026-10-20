@@ -28,7 +28,7 @@ describe("janitor task registry", () => {
     }
   });
 
-  it("enables exactly the absorbed-job + agent-journal policies by default; other new coverage stays off", () => {
+  it("enables the declared retention policies by default and keeps optional coverage off", () => {
     const enabled = JANITOR_TASKS.filter((task) => task.defaultEnabled).map((task) => task.key).sort();
     expect(enabled).toEqual(
       [
@@ -38,6 +38,8 @@ describe("janitor task registry", () => {
         "pg.scheduled_task_audit",
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
+        "pg.notification_inbox.archived",
+        "pg.user_action_events",
         "s3.chat_attachments.drafts",
         // C12: рабочие файлы конвейера приёма (ingest/) — новые объекты, чистятся из коробки;
         // оригиналы и canonical/ политика не затрагивает (префикс-гард в ops-сторе).
