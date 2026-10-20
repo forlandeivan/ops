@@ -3557,12 +3557,15 @@ export const UNICA_EMBEDDING_RESPONSE_CONFIG: EmbeddingResponseConfig = {
  * платформенная директива `math_latex` (`packages/llm-client-core/src/platform-directives.ts`) и только там,
  * где ответ рендерим мы сами. Дублировать её сюда нельзя: во внешних каналах и текстовых
  * ответах RAG формулы уехали бы сырыми долларами, а в чат пришли бы дважды.
+ *
+ * Про фрагменты базы знаний здесь тоже ни слова: промпт провайдера уходит и в обычный чат, где
+ * фрагментов нет. Инструкцию к ним ставит блок «Контекст» (`RETRIEVED_CONTEXT_INSTRUCTION`).
  */
 export const DEFAULT_LLM_REQUEST_CONFIG = {
   modelField: "model",
   messagesField: "messages",
   systemPrompt:
-    "Ты — помощник для базы знаний. Отвечай на вопросы пользователя на основе предоставленных фрагментов контента. Если в фрагментах нет ответа, честно сообщи об этом.",
+    "Ты — полезный ассистент. Отвечай точно и по существу. Если не знаешь ответа или не уверен в нём, честно скажи об этом.",
   additionalBodyFields: {
     stream: false,
   },
@@ -10242,6 +10245,7 @@ export const directoryProviders = pgTable("directory_providers", {
     .default("off"),
   syncIntervalMinutes: integer("sync_interval_minutes").notNull().default(15),
   fullSyncHour: integer("full_sync_hour").notNull().default(3),
+  fullSyncMinute: integer("full_sync_minute").notNull().default(0),
   disableThresholdPercent: integer("disable_threshold_percent").notNull().default(10),
   loginFailuresLimit: integer("login_failures_limit").notNull().default(5),
   connectTimeoutMs: integer("connect_timeout_ms").notNull().default(5000),
@@ -10251,6 +10255,8 @@ export const directoryProviders = pgTable("directory_providers", {
   lastFullSyncAt: timestamp("last_full_sync_at", { withTimezone: true }),
   lastDeltaSyncAt: timestamp("last_delta_sync_at", { withTimezone: true }),
   syncRequestedKind: text("sync_requested_kind").$type<DirectorySyncKind | null>(),
+  /** Когда синхронизацию поставили в очередь: по нему экран замечает, что запуск задерживается. */
+  syncRequestedAt: timestamp("sync_requested_at", { withTimezone: true }),
   /** Разовое разрешение превысить порог отключений в следующей полной сверке. */
   syncForceThreshold: boolean("sync_force_threshold").notNull().default(false),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
