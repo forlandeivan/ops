@@ -28,6 +28,8 @@ export const chatRouteReasons = [
   "assistant_workflow",
   "policy_no_workflow",
   "universal_agent_missing",
+  /** Живая сессия агента в чате ждёт ответа на свой вопрос или подтверждения — реплика идёт ей. */
+  "agent_session_waiting",
   "router_disabled",
   "smalltalk_library",
   "explicit_file_artifact",
