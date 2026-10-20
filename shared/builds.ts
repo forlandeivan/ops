@@ -174,6 +174,7 @@ export type BuildInstallInput = z.infer<typeof buildInstallInputSchema>;
 /** Вход применения обновления установленной сборки (по умолчанию — последняя версия). */
 export const buildUpdateInputSchema = z.object({
   targetVersionId: z.string().uuid().optional(),
+  expectedInstallation: z.object({ id: z.string().uuid(), revision: z.number().int().positive() }).strict(),
 });
 export type BuildUpdateInput = z.infer<typeof buildUpdateInputSchema>;
 
@@ -219,6 +220,7 @@ export type BuildUpdateActionsDiff = {
 
 /** Превью обновления установленной сборки: что изменится при apply. */
 export type BuildUpdatePreview = {
+  installation: { id: string; revision: number };
   buildId: string;
   fromVersion: string | null;
   toVersion: string;

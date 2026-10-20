@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { publicationContentSchema } from "./notification-publications";
 
 const plainText = (max: number) =>
   z
@@ -30,6 +31,7 @@ export const announcementDraftSchema = z
   .object({
     title: plainText(160),
     body: plainText(2000),
+    content: publicationContentSchema.nullable().optional(),
     audience: announcementAudienceSchema,
     expiresAt: z.string().datetime().nullable(),
   })

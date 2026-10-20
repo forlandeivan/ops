@@ -9092,6 +9092,7 @@ export const installedBuilds = pgTable(
     pinnedVersion: boolean("pinned_version").notNull().default(false),
     status: varchar("status", { length: 32 }).$type<BuildInstallStatus>().notNull().default("installed"),
     // Доступная для обновления версия (denорм для бейджа); null — обновлений нет.
+    revision: integer("revision").notNull().default(1),
     availableVersionId: uuid("available_version_id").references(() => buildVersions.id, { onDelete: "set null" }),
     // Политика применения обновлений: manual (дефолт) | auto_patch | auto_minor | pinned.
     updatePolicy: varchar("update_policy", { length: 32 }).$type<BuildUpdatePolicy>().notNull().default("manual"),
@@ -11605,6 +11606,8 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
   cursorAt: timestamp("cursor_at", { withTimezone: true }),
   consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  pauseReason: text("pause_reason"),
+  autoPauseRunId: uuid("auto_pause_run_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -11724,6 +11727,17 @@ export const notificationEvents = pgTable("notification_events", {
   dueIdx: index("notification_events_due_idx").on(t.status, t.nextAttemptAt, t.leaseUntil),
   statusCheck: check("notification_events_status_check", sql`${t.status} IN ('pending','processing','delivered','failed')`),
 }));
+export const notificationDeliveryAudit = pgTable("notification_delivery_audit", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  eventId: uuid("event_id").notNull().references(() => notificationEvents.id, { onDelete: "cascade" }),
+  actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  result: text("result").notNull(),
+  previousAttempts: integer("previous_attempts").notNull(),
+  previousDiagnosticCode: text("previous_diagnostic_code"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({ eventIdx: index("notification_delivery_audit_event_idx").on(table.eventId, table.createdAt) }));
+
 export const notificationInbox = pgTable("notification_inbox", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   eventId: uuid("event_id").notNull().references(() => notificationEvents.id, { onDelete: "cascade" }),
@@ -11749,6 +11763,7 @@ export const notificationPreferences = pgTable("notification_preferences", {
 }));
 
 export const notificationAnnouncements = pgTable("notification_announcements", {
+  content: jsonb("content"),
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   title: varchar("title", {length:160}).notNull(),
@@ -11778,3 +11793,47 @@ export const notificationAnnouncements = pgTable("notification_announcements", {
   recipientCheck:check("notification_announcements_recipient_check",sql`${t.recipientCount} BETWEEN 0 AND 10000`),
   bodyCheck:check("notification_announcements_body_check",sql`length(${t.body}) BETWEEN 1 AND 2000`),
 }));
+
+// Instance publications use their own recipients so v1 workspace workers never claim them.
+export const notificationPublications = pgTable("notification_publications", {
+ audience:jsonb("audience").notNull().default({}),
+ expiresAt:timestamp("expires_at",{withTimezone:true}),
+ id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+ externalId: varchar("external_id", {length:120}).notNull().unique(),
+ releaseVersion: varchar("release_version", {length:64}).notNull(),
+ contentHash: varchar("content_hash", {length:64}).notNull(),
+ title: varchar("title", {length:160}).notNull(),
+ content: jsonb("content").notNull(),
+ status: text("status").notNull(),
+ createdAt: timestamp("created_at", {withTimezone:true,precision:3}).notNull().defaultNow(),
+ publishedAt: timestamp("published_at", {withTimezone:true,precision:3}),
+ updatedAt: timestamp("updated_at", {withTimezone:true}).notNull().defaultNow(),
+}, t => ({statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
+export const notificationPublicationRecipients = pgTable("notification_publication_recipients", {
+ id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+ publicationId: uuid("publication_id").notNull().references(()=>notificationPublications.id,{onDelete:"cascade"}),
+ userId: varchar("user_id").notNull().references(()=>users.id,{onDelete:"cascade"}),
+ state: text("state").notNull().default("pending"),
+ reason: text("reason"),
+ createdAt: timestamp("created_at", {withTimezone:true,precision:3}).notNull().defaultNow(),
+ deliveredAt: timestamp("delivered_at", {withTimezone:true,precision:3}),
+ readAt: timestamp("read_at", {withTimezone:true}),
+ archivedAt: timestamp("archived_at", {withTimezone:true}),
+},t=>({recipientUnique:uniqueIndex("notification_publication_recipients_publication_id_user_id_key").on(t.publicationId,t.userId),feedIdx:index("notification_publication_recipients_feed_idx").on(t.userId,t.createdAt,t.id).where(sql`${t.state}='delivered'`),dueIdx:index("notification_publication_recipients_due_idx").on(t.publicationId,t.id).where(sql`${t.state}='pending'`),stateCheck:check("notification_publication_recipients_state_check",sql`${t.state} IN ('pending','delivered','skipped','failed')`)}));
+export const notificationAccountPreferences = pgTable("notification_account_preferences", {
+ userId:varchar("user_id").primaryKey().references(()=>users.id,{onDelete:"cascade"}),
+ productNews:boolean("product_news").notNull().default(true),
+});
+export const notificationReleasePolicy = pgTable("notification_release_policy", {
+ singleton:boolean("singleton").primaryKey().default(true), mode:text("mode").notNull().default("auto"), externalLinks:boolean("external_links").notNull().default(true), activeVersion:varchar("active_version",{length:64}),updatedAt:timestamp("updated_at",{withTimezone:true}).notNull().defaultNow(),
+},t=>({singletonCheck:check("notification_release_policy_singleton_check",sql`${t.singleton}`),modeCheck:check("notification_release_policy_mode_check",sql`${t.mode} IN ('auto','approval','disabled')`)}));
+export const notificationReleaseActivations = pgTable("notification_release_activations", {
+ version:varchar("version",{length:64}).primaryKey(),bundleHash:varchar("bundle_hash",{length:64}).notNull(),publicationId:uuid("publication_id").references(()=>notificationPublications.id),activatedAt:timestamp("activated_at",{withTimezone:true}).notNull().defaultNow(),
+});
+export const notificationMedia = pgTable("notification_media", {
+ id:uuid("id").primaryKey().default(sql`gen_random_uuid()`),workspaceId:varchar("workspace_id").references(()=>workspaces.id,{onDelete:"cascade"}),ownerId:varchar("owner_id").references(()=>users.id,{onDelete:"set null"}),storageKey:text("storage_key").notNull(),mimeType:text("mime_type").notNull(),alt:text("alt").notNull(),createdAt:timestamp("created_at",{withTimezone:true}).notNull().defaultNow(),
+},t=>({mimeCheck:check("notification_media_mime_type_check",sql`${t.mimeType} IN ('image/png','image/jpeg','image/webp')`)}));
+
+export const notificationReleaseAudit = pgTable("notification_release_audit", {
+ id:uuid("id").primaryKey().default(sql`gen_random_uuid()`),actorId:varchar("actor_id").references(()=>users.id,{onDelete:"set null"}),action:text("action").notNull(),publicationId:uuid("publication_id").references(()=>notificationPublications.id,{onDelete:"set null"}),version:varchar("version",{length:64}),createdAt:timestamp("created_at",{withTimezone:true}).notNull().defaultNow(),
+},t=>({createdIdx:index("notification_release_audit_created_idx").on(t.createdAt)}));

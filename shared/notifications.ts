@@ -23,10 +23,12 @@ export const notificationEventKinds = [
   "scheduled.completed",
   "scheduled.failed",
   "scheduled.attention",
+  "scheduled.auto_paused",
   "build.update_available",
   "announcement.published",
 ] as const;
 export type NotificationEventKind = (typeof notificationEventKinds)[number];
+export const notificationActionKinds = ["scheduled.attention", "scheduled.auto_paused"] as const;
 export const NOTIFICATION_SCHEMA_VERSION = 1 as const;
 export const MAX_NOTIFICATION_SOURCE_BATCH = 100;
 export const notificationEventSchema = z
@@ -52,6 +54,7 @@ export const notificationEventSchema = z
         versionId: z.string().uuid().optional(),
         sourceCount: z.number().int().min(0).max(1_000_000).optional(),
         readyCount: z.number().int().min(0).max(1_000_000).optional(),
+        warnedCount: z.number().int().min(0).max(1_000_000).optional(),
         failedCount: z.number().int().min(0).max(1_000_000).optional(),
       })
       .strict()
@@ -82,8 +85,44 @@ export type ValidatedNotificationEvent = z.output<
   typeof notificationEventSchema
 >;
 
+/** Current, access-checked identity; never inferred from announcement copy. */
+export const notificationSourceIdentitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("unica") }).strict(),
+  z
+    .object({
+      kind: z.literal("workspace"),
+      name: z.string().min(1).max(255),
+      iconUrl: z.string().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("assistant"),
+      name: z.string().min(1).max(255),
+      icon: z.string().nullable(),
+      iconColor: z.string().nullable(),
+      isSystemAssistant: z.boolean(),
+    })
+    .strict(),
+]);
+export type NotificationSourceIdentity = z.infer<
+  typeof notificationSourceIdentitySchema
+>;
+
+export const notificationBuildUpdateSchema = z.object({
+  buildId: z.string().min(1).max(255),
+  versionId: z.string().uuid(),
+  name: z.string().min(1).max(255),
+}).strict();
+export type NotificationBuildUpdate = z.infer<typeof notificationBuildUpdateSchema>;
+
 export const resolvedNotificationSourceSchema = z
   .object({
+    severity: z.enum(["warning"]).optional(),
+    buildUpdate: notificationBuildUpdateSchema.optional(),
+    article: z.boolean().optional(),
+    withdrawn: z.boolean().optional(),
+    sourceLabel: z.string().max(240).optional(),
     title: z.string().min(1).max(160),
     body: z.string().max(2000),
     href: z
@@ -98,6 +137,7 @@ export const resolvedNotificationSourceSchema = z
       )
       .nullable(),
     actionRequired: z.boolean(),
+    identity: notificationSourceIdentitySchema.optional(),
   })
   .strict();
 export type ResolvedNotificationSource = z.output<
@@ -163,6 +203,12 @@ export type NotificationSourceBatchResponse = z.output<
   typeof notificationSourceBatchResponseSchema
 >;
 export interface NotificationDto {
+  severity?: "warning";
+  buildUpdate?: NotificationBuildUpdate;
+  article?: boolean;
+  withdrawn?: boolean;
+  sourceLabel?: string;
+  scope?: "workspace" | "instance";
   id: string;
   category: NotificationCategory;
   stream: NotificationStream;
@@ -173,6 +219,7 @@ export interface NotificationDto {
   archivedAt: string | null;
   actionRequired: boolean;
   href: string | null;
+  identity?: NotificationSourceIdentity;
 }
 export interface NotificationListDto {
   items: NotificationDto[];
@@ -203,15 +250,18 @@ export const notificationPreferencesSchema = z
     product_updates: z.boolean(),
   })
   .strict();
-export function notificationPolicy(kind: NotificationEventKind): {
+export function notificationPolicy(
+  kind: NotificationEventKind,
+  context?: { failedCount?: number },
+): {
   category: NotificationCategory;
   stream: NotificationStream;
   mandatory: boolean;
 } {
   const category: NotificationCategory =
-    kind === "scheduled.attention"
+    (notificationActionKinds as readonly string[]).includes(kind)
       ? "attention"
-      : kind === "scheduled.failed" || kind === "ingest.failed"
+      : kind === "scheduled.failed" || (kind === "ingest.failed" && context?.failedCount !== 0)
         ? "errors"
         : kind === "build.update_available"
           ? "assistant_updates"
@@ -221,13 +271,14 @@ export function notificationPolicy(kind: NotificationEventKind): {
   return {
     category,
     stream: category.endsWith("updates") ? "updates" : "work",
-    mandatory: kind === "scheduled.attention",
+    mandatory: (notificationActionKinds as readonly string[]).includes(kind),
   };
 }
 export function shouldDeliverNotification(
   kind: NotificationEventKind,
   preferences: NotificationPreferences,
+  context?: { failedCount?: number },
 ): boolean {
-  const policy = notificationPolicy(kind);
+  const policy = notificationPolicy(kind, context);
   return policy.mandatory || preferences[policy.category];
 }
