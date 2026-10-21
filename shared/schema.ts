@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { ValidatedNotificationEvent, NotificationPreferences } from "./notifications";
-import type { AnnouncementDraft } from "./notification-announcements";
+import type { AnnouncementDto } from "./notification-announcements";
 import type { PublicJobKind, PublicJobStatus } from "./public-api-jobs";
 import type { PublicApiUsageOutcome } from "./public-api-usage";
 import {
@@ -11768,7 +11768,7 @@ export const notificationAnnouncements = pgTable("notification_announcements", {
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   title: varchar("title", {length:160}).notNull(),
   body: text("body").notNull(),
-  audience: jsonb("audience").$type<AnnouncementDraft["audience"]>().notNull(),
+  audience: jsonb("audience").$type<AnnouncementDto["audience"]>().notNull(),
   recipientIds: jsonb("recipient_ids").$type<string[]>().notNull().default([]),
   recipientCount: integer("recipient_count").notNull().default(0),
   status: text("status").notNull().default("draft"),
@@ -11800,7 +11800,8 @@ export const notificationPublications = pgTable("notification_publications", {
  expiresAt:timestamp("expires_at",{withTimezone:true}),
  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
  externalId: varchar("external_id", {length:120}).notNull().unique(),
- releaseVersion: varchar("release_version", {length:64}).notNull(),
+ kind: text("kind").notNull().default("release"),
+ releaseVersion: varchar("release_version", {length:64}),
  contentHash: varchar("content_hash", {length:64}).notNull(),
  title: varchar("title", {length:160}).notNull(),
  content: jsonb("content").notNull(),
@@ -11808,7 +11809,37 @@ export const notificationPublications = pgTable("notification_publications", {
  createdAt: timestamp("created_at", {withTimezone:true,precision:3}).notNull().defaultNow(),
  publishedAt: timestamp("published_at", {withTimezone:true,precision:3}),
  updatedAt: timestamp("updated_at", {withTimezone:true}).notNull().defaultNow(),
-}, t => ({statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
+}, t => ({kindCheck:check("notification_publications_kind_check",sql`(${t.kind}='release' AND ${t.releaseVersion} IS NOT NULL) OR (${t.kind}='manual_instance' AND ${t.releaseVersion} IS NULL)`),statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
+export const notificationInstanceAnnouncements = pgTable("notification_instance_announcements", {
+  content: jsonb("content"),
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  publicationId: uuid("publication_id").unique().references(() => notificationPublications.id),
+  title: varchar("title", {length:160}).notNull(),
+  body: text("body").notNull(),
+  recipientCount: integer("recipient_count").notNull().default(0),
+  status: text("status").notNull().default("draft"),
+  revision: integer("revision").notNull().default(1),
+  expiresAt: timestamp("expires_at", {withTimezone:true}),
+  createdByUserId: varchar("created_by_user_id").references(() => users.id, {onDelete:"set null"}),
+  updatedByUserId: varchar("updated_by_user_id").references(() => users.id, {onDelete:"set null"}),
+  publishedByUserId: varchar("published_by_user_id").references(() => users.id, {onDelete:"set null"}),
+  canceledByUserId: varchar("canceled_by_user_id").references(() => users.id, {onDelete:"set null"}),
+  createdAt: timestamp("created_at", {withTimezone:true}).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", {withTimezone:true}).notNull().defaultNow(),
+  publishedAt: timestamp("published_at", {withTimezone:true}),
+  canceledAt: timestamp("canceled_at", {withTimezone:true}),
+}, (t) => ({
+  createdIdx:index("notification_instance_announcements_created_idx").on(t.createdAt),
+  creatorIdx:index("notification_instance_announcements_creator_idx").on(t.createdByUserId),
+  updaterIdx:index("notification_instance_announcements_updater_idx").on(t.updatedByUserId),
+  publisherIdx:index("notification_instance_announcements_publisher_idx").on(t.publishedByUserId),
+  cancelerIdx:index("notification_instance_announcements_canceler_idx").on(t.canceledByUserId),
+  statusCheck:check("notification_instance_announcements_status_check",sql`${t.status} IN ('draft','published','canceled')`),
+  revisionCheck:check("notification_instance_announcements_revision_check",sql`${t.revision} > 0`),
+  recipientCheck:check("notification_instance_announcements_recipient_check",sql`${t.recipientCount} >= 0`),
+  bodyCheck:check("notification_instance_announcements_body_check",sql`length(${t.body}) BETWEEN 1 AND 2000`),
+}));
+
 export const notificationPublicationRecipients = pgTable("notification_publication_recipients", {
  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
  publicationId: uuid("publication_id").notNull().references(()=>notificationPublications.id,{onDelete:"cascade"}),
@@ -11823,6 +11854,7 @@ export const notificationPublicationRecipients = pgTable("notification_publicati
 export const notificationAccountPreferences = pgTable("notification_account_preferences", {
  userId:varchar("user_id").primaryKey().references(()=>users.id,{onDelete:"cascade"}),
  productNews:boolean("product_news").notNull().default(true),
+ platformAnnouncements:boolean("platform_announcements").notNull().default(true),
 });
 export const notificationReleasePolicy = pgTable("notification_release_policy", {
  singleton:boolean("singleton").primaryKey().default(true), mode:text("mode").notNull().default("auto"), externalLinks:boolean("external_links").notNull().default(true), activeVersion:varchar("active_version",{length:64}),updatedAt:timestamp("updated_at",{withTimezone:true}).notNull().defaultNow(),

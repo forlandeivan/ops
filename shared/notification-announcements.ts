@@ -32,7 +32,7 @@ export const announcementDraftSchema = z
     title: plainText(160),
     body: plainText(2000),
     content: publicationContentSchema.nullable().optional(),
-    audience: announcementAudienceSchema,
+    audience: z.object({ kind: z.literal("all") }).strict(),
     expiresAt: z.string().datetime().nullable(),
   })
   .strict();
@@ -43,7 +43,9 @@ export const announcementPatchSchema = announcementDraftSchema.extend({
 export const announcementRevisionSchema = z
   .object({ revision: z.number().int().positive() })
   .strict();
-export interface AnnouncementDto extends AnnouncementDraft {
+export interface AnnouncementDto extends Omit<AnnouncementDraft, "audience"> {
+  /** Historical published audiences remain immutable; new writes accept all only. */
+  audience: z.infer<typeof announcementAudienceSchema>;
   id: string;
   status: "draft" | "published" | "canceled";
   revision: number;
@@ -56,14 +58,11 @@ export interface AnnouncementDto extends AnnouncementDraft {
   updatedByUserId: string | null;
   publishedByUserId: string | null;
   canceledByUserId: string | null;
+  delivery?: { status: string; delivered: number; pending: number; failed: number; skipped: number };
 }
 export interface AnnouncementPreview {
   recipientCount: number;
   deliverableCount: number;
-}
-export interface NotificationAudienceOptions {
-  users: { id: string; name: string }[];
-  builds: { id: string; name: string }[];
 }
 export const MAX_ANNOUNCEMENT_RECIPIENTS = 10_000;
 export const ANNOUNCEMENT_OUTBOX_CHUNK_SIZE = 100;
