@@ -8740,6 +8740,12 @@ export const skillRegistry = pgTable(
     // Catalog-сервис (зеркало builds.sourceWorkspaceId/originUserId). NULL = системный/глобальный скилл.
     sourceWorkspaceId: varchar("source_workspace_id"),
     originUserId: varchar("origin_user_id"),
+    // Build (Сборка): навык, который поставила сборка, обновляется её новой версией и руками не правится.
+    originRef: varchar("origin_ref", { length: 255 }),
+    originContentHash: varchar("origin_content_hash", { length: 128 }),
+    sourceBuildId: varchar("source_build_id", { length: 255 }),
+    sourceBuildVersion: varchar("source_build_version", { length: 100 }),
+    managedByBuild: boolean("managed_by_build").notNull().default(false),
     metadata: jsonb("metadata").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -8748,6 +8754,7 @@ export const skillRegistry = pgTable(
       statusIdx: index("skill_registry_status_idx").on(table.status, table.updatedAt),
       sourceIdx: index("skill_registry_source_idx").on(table.source, table.updatedAt),
       sourceWorkspaceIdx: index("skill_registry_source_workspace_idx").on(table.sourceWorkspaceId),
+      sourceBuildIdx: index("skill_registry_source_build_idx").on(table.sourceBuildId),
   }),
 );
 
@@ -8786,7 +8793,8 @@ export type SkillVersion = typeof skillVersions.$inferSelect;
 export type SkillVersionInsert = typeof skillVersions.$inferInsert;
 
 // Файлы навыка-папки: у навыка пространства нет папки на диске, поэтому его материалы лежат здесь.
-// Только текст: навык пространства пишет пользователь, исполняемому коду в нём места нет.
+// Текст — в `content`; бинарный файл (шаблон документа) — в хранилище пространства `workspace_id` по `storage_key`.
+// Ровно одно из двух (CHECK `skill_resource_files_body_chk`). Исполняемому коду в навыке пространства места нет.
 export const skillResourceFiles = pgTable(
   "skill_resource_files",
   {
@@ -8795,7 +8803,11 @@ export const skillResourceFiles = pgTable(
       .notNull()
       .references(() => skillVersions.id, { onDelete: "cascade" }),
     path: varchar("path", { length: 400 }).notNull(),
-    content: text("content").notNull(),
+    content: text("content"),
+    storageKey: varchar("storage_key", { length: 1024 }),
+    mimeType: varchar("mime_type", { length: 255 }),
+    // Пространство, в бакете которого лежит бинарный файл. Без FK — как `skill_registry.source_workspace_id`.
+    workspaceId: varchar("workspace_id"),
     sizeBytes: integer("size_bytes").notNull(),
     contentHash: varchar("content_hash", { length: 128 }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),

@@ -91,6 +91,9 @@ export const WORKSPACE_STORAGE_WRITABLE_PREFIXES = [
   // инстансами. Живут ограниченно: свип воркера переноса удаляет объект завершённого
   // задания через 7 суток и ставит archive_expired.
   "kb-transfer/",
+  // skills/<skillId>/<sha256><ext> — бинарные файлы навыков пространства (шаблоны документов). Адресуются
+  // содержимым; ставшие ненужными объекты удаляет сервис навыков при сохранении и удалении навыка.
+  "skills/",
 ] as const;
 
 /** Папки, которые пишутся мимо белого списка: картинки баз знаний image-storage кладёт сырым putObject. */
@@ -271,6 +274,14 @@ export const WORKSPACE_STORAGE_OWNERSHIP: readonly StoragePrefixOwnership[] = [
     references: [],
     pathOwners: [],
     note: "На шаблоны ссылаются настройки узлов workflow внутри JSON, отдельной колонки с ключом нет.",
+  },
+  {
+    prefix: "skills/",
+    category: null,
+    mode: "protected",
+    references: [{ table: "skill_resource_files", column: "storage_key", workspaceColumn: "workspace_id" }],
+    pathOwners: [],
+    note: "Шаблоны навыков пространства: лишние объекты сервис навыков удаляет сам при сохранении и удалении навыка.",
   },
 ];
 
