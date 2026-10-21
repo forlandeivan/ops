@@ -36,11 +36,13 @@ describe("janitor runtime API", () => {
     return `http://127.0.0.1:${server.port}`;
   }
 
-  it("v1/health отвечает без токена и репортит tokenConfigured", async () => {
+  it("v1/health отвечает без токена и не раскрывает, настроен ли токен", async () => {
     const base = await startServer(makeDeps());
     const res = await fetch(`${base}/v1/health`);
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toMatchObject({ status: "ok", tokenConfigured: true });
+    const body = await res.json();
+    expect(body).toMatchObject({ status: "ok" });
+    expect(body).not.toHaveProperty("tokenConfigured");
   });
 
   it("без сконфигурированного токена RPC отвечает 503", async () => {

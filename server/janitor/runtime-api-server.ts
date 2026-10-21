@@ -120,7 +120,8 @@ export async function startJanitorRuntimeApiServer(params: {
       sendJson(res, 200, {
         status: "ok",
         role: "janitor",
-        tokenConfigured: Boolean(expectedToken()),
+        // Признак «токен настроен» без аутентификации — подсказка для атаки; монолит снял его 25.08.2026
+        // (SEC-09, R-168).
         timestamp: new Date().toISOString(),
       });
       return;

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startJanitorHealthServer, type JanitorHealthState } from "../../server/janitor/health-server";
 import { fileArtifactCleanupQueueJobs } from "../../server/monitoring/file-artifact-cleanup-metrics";
@@ -22,6 +22,7 @@ describe("janitor health server", () => {
   afterEach(async () => {
     await close?.();
     close = null;
+    vi.unstubAllEnvs();
   });
 
   it("liveness отвечает 200 сразу, readiness — 503 до готовности БД", async () => {
@@ -79,6 +80,27 @@ describe("janitor health server", () => {
     expect(body).toContain("janitor_runs_total");
     expect(body).toContain('file_artifact_cleanup_queue_jobs{status="error"} 2');
     expect(body).toContain('file_artifact_cleanup_queue_jobs{status="dead"} 3');
+  });
+
+  it("с METRICS_TOKEN /metrics требует bearer-токен", async () => {
+    vi.stubEnv("METRICS_TOKEN", "metrics-secret");
+    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    close = server.close;
+    const url = `http://127.0.0.1:${server.port}/metrics`;
+
+    expect((await fetch(url)).status).toBe(401);
+    expect((await fetch(url, { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
+    const ok = await fetch(url, { headers: { Authorization: "Bearer metrics-secret" } });
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("janitor_runs_total");
+  });
+
+  it("METRICS_ENABLED=false выключает /metrics", async () => {
+    vi.stubEnv("METRICS_ENABLED", "false");
+    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    close = server.close;
+
+    expect((await fetch(`http://127.0.0.1:${server.port}/metrics`)).status).toBe(404);
   });
 
   it("неизвестный путь — 404", async () => {

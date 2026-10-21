@@ -7,7 +7,18 @@
  */
 import http from "http";
 
+import { timingSafeEqual } from "node:crypto";
+
 import { register } from "../monitoring/metrics";
+
+function matchesBearerToken(header: string | string[] | undefined, expected: string): boolean {
+  const value = Array.isArray(header) ? header[0] : header;
+  const provided = value?.startsWith("Bearer ") ? value.slice("Bearer ".length).trim() : "";
+  if (!provided) return false;
+  const providedBuffer = Buffer.from(provided, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
+}
 
 export interface JanitorHealthState {
   startedAt: string;
@@ -49,6 +60,20 @@ export async function startJanitorHealthServer(params: {
     }
 
     if (url === "/metrics") {
+      // Как у монолита (server/routes/metrics.routes.ts, SEC-09, R-158): METRICS_ENABLED=false выключает
+      // эндпоинт, METRICS_TOKEN — bearer-токен Prometheus. Не задан — метрики открыты, как и в монолите,
+      // чтобы обновление не оборвало настроенный скрейп.
+      if ((process.env.METRICS_ENABLED ?? "true").trim().toLowerCase() === "false") {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ status: "not_found" }));
+        return;
+      }
+      const metricsToken = process.env.METRICS_TOKEN?.trim();
+      if (metricsToken && !matchesBearerToken(req.headers.authorization, metricsToken)) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Требуется токен доступа к метрикам" }));
+        return;
+      }
       void register
         .metrics()
         .then((body) => {
