@@ -76,7 +76,6 @@ import type {
 import type {
   AnswerQualityCheckStatus,
   AnswerQualityClaim,
-  AnswerQualityCostMode,
   AnswerQualityJobStatus,
   AnswerQualityMode,
   AnswerQualitySkipReason,
@@ -3915,190 +3914,28 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default(sql`'{}'::jsonb`),
-  // Режим reasoning для агентских запусков (значение из reasoningModes); null = по умолчанию модели
-  // (inputCapabilities.reasoning.defaultMode). Применяется через провайдерский reasoningMapping —
-  // тем же механизмом, что чат (buildReasoningRequestBodyPatch).
-  agentReasoningMode: text("agent_reasoning_mode"),
-  // Debug-трейс запусков агента: при включении журнал пишет полные payload (LLM-дельты по
-  // раундам, скрипты code.execute, stdout). Тяжёлые данные, очистка по политике janitor (срок задаёт админ).
-  agentDebugTraceEnabled: boolean("agent_debug_trace_enabled").notNull().default(false),
-  agentMaxSteps: integer("agent_max_steps").notNull().default(32),
-  agentMaxToolCalls: integer("agent_max_tool_calls").notNull().default(32),
+  // Срок шага ИИ в сценариях без своего срока. Остальные лимиты прежнего агента удалены миграцией 0402.
   agentTimeoutSec: integer("agent_timeout_sec").notNull().default(600),
-  // Лимит токенов ответа на один LLM-вызов агента. NULL = «Авто» (потолок модели
-  // models.max_completion_tokens, иначе runtime-дефолт); число = явный override с клампом.
-  agentMaxCompletionTokens: integer("agent_max_completion_tokens"),
-  // --- Задача 5.1: контроль перегрузки (overload control). Все поля NULL = «Авто» (env-дефолт/
-  // выключено); число — явный админ-override. Модель: per-РЕПЛИКА лимиты (прокидываются в рантайм,
-  // защищают контейнер) vs ГЛОБАЛЬНЫЕ Redis-квоты на Node (справедливость между тенантами). ---
-  // Per-реплика (Фаза 1): лимит ОДНОВРЕМЕННЫХ агент-прогонов/code-exec на один контейнер рантайма;
-  // прокидывается per-request как runtimeCapacity, при перегрузке рантайм отвечает 503 + Retry-After.
-  agentMaxConcurrentRuns: integer("agent_max_concurrent_runs"),
-  agentMaxConcurrentCodeExec: integer("agent_max_concurrent_code_exec"),
-  // Retry-After (сек), который рантайм отдаёт при перегрузке; база backoff для переочереди на Node.
-  agentCapacityRetryAfterSec: integer("agent_capacity_retry_after_sec"),
-  // Бюджет ПОВТОРОВ переочереди одного шага агента из-за back-pressure (503/квота) до честного отказа
-  // «занято». Защита от бесконечной переочереди. NULL = дефолт.
-  agentMaxCapacityRetries: integer("agent_max_capacity_retries"),
-  // Глобальная (cross-instance, Redis) квота: потолок ОДНОВРЕМЕННЫХ агент-диспатчей на ВОРКСПЕЙС.
-  // Тенант не «голодит» других. NULL/0 = выключено.
-  agentMaxConcurrentRunsPerWorkspace: integer("agent_max_concurrent_runs_per_workspace"),
-  // Глобальный (Redis) token-bucket бюджета ПОВТОРОВ на воркспейс: ёмкость и скорость пополнения
-  // (токенов/мин). Ограничивает скорость ретраев, чтобы они не превращались в самоусиление перегрузки.
-  // capacity NULL/0 = выключено.
-  agentRetryBucketCapacity: integer("agent_retry_bucket_capacity"),
-  agentRetryBucketRefillPerMin: integer("agent_retry_bucket_refill_per_min"),
-  // --- Задача 5.2: возобновление после сбоя (resume recovery). Все поля NULL = «Авто» (env-дефолт);
-  // число — явный админ-override. Управляют сторожем зависших агент-прогонов (agent-run-lifecycle-
-  // watchdog): как часто опрашивать (интервал) и через сколько молчания heartbeat прогон считается
-  // зависшим и переводится в честный терминальный статус. Cross-instance состояние (heartbeat-отметки,
-  // idempotency-реестр) — durable в Postgres. ---
-  agentRunWatchdogIntervalSec: integer("agent_run_watchdog_interval_sec"),
-  agentRunStaleTimeoutSec: integer("agent_run_stale_timeout_sec"),
-  // Reaper залипшего pending идемпотентности (gap-analysis 5.2, AGENT-IDEMPOTENCY-STUCK-PENDING):
-  // возраст pending-строки (по started_at) старше этого порога → прогон заведомо мёртв, строка
-  // реапится классифицированно (safe_retry→failed / unknown→abandoned). NULL = «Авто» (env-дефолт).
-  agentPendingReapTtlSec: integer("agent_pending_reap_ttl_sec"),
-  // Интерим-ретенция реестра идемпотентности (AGENT-IDEMPOTENCY-RETENTION): тот же reaper удаляет
-  // completed/failed старше N дней (pending/abandoned не трогает). Интерим до janitor-сервиса.
-  agentIdempotencyRetentionDays: integer("agent_idempotency_retention_days"),
-  // --- Волна 1 D: устойчивость агента (runtime resilience). Все поля NULL = «Авто» (env-дефолт
-  // Python-реплики); число — явный админ-override, 0 = kill-switch механизма. Прокидываются
-  // per-request как runtimeResilience (паттерн runtimeCapacity 5.1), применяет Python
-  // (app/agent/resilience.py). ---
-  // Бюджет guard-повторов (повтор шага по вердикту guard'ов) на один прогон.
-  agentGuardRetryMaxPerRun: integer("agent_guard_retry_max_per_run"),
-  // Guard-повтор допускается, только если до дедлайна прогона осталось не меньше этого (сек).
-  agentGuardRetryMinRemainingSec: integer("agent_guard_retry_min_remaining_sec"),
-  // Запас Python-дедлайна к таймауту прогона (сек): рантайм завершает работу раньше отсечки Node.
-  agentDeadlineSafetyMarginSec: integer("agent_deadline_safety_margin_sec"),
-  // Новый LLM-раунд стартует, только если до дедлайна осталось не меньше этого (сек).
-  agentRoundMinRemainingSec: integer("agent_round_min_remaining_sec"),
-  // Лимит эха предыдущего ответа в промпте guard-повтора (символов). 0 = не эхировать.
-  agentRetryEchoMaxChars: integer("agent_retry_echo_max_chars"),
-  // --- Волна 4: исполнение прогона (run execution). Все поля NULL = «Авто» (env-дефолт реплики /
-  // документированный fallback). Триаж усилия и TTL продолжения применяет Node, режим мульти-tool-call
-  // и параметры стадии plan-and-execute уезжают per-request как runtimeExecution в Python. ---
-  // Триаж усилия: профиль бюджета по детерминированным сигналам запроса (потолок — лимиты узла).
-  agentEffortTriageEnabled: boolean("agent_effort_triage_enabled"),
-  // Режим обработки нескольких tool-call за один раунд: off | strict | read_parallel.
-  agentMultiToolMode: text("agent_multi_tool_mode"),
-  // Стадия «спланируй → исполни» для одной сложной многошаговой задачи и её параметры.
-  agentPlanExecuteEnabled: boolean("agent_plan_execute_enabled"),
-  agentPlanExecuteMaxReplans: integer("agent_plan_execute_max_replans"),
-  agentPlanExecuteMaxSteps: integer("agent_plan_execute_max_steps"),
-  // Сколько живёт состояние прерванного прогона, пригодное для продолжения (сек). 0 = выключено.
-  agentRunContinuationTtlSec: integer("agent_run_continuation_ttl_sec"),
-  // Сколько живёт неопубликованный черновик до принудительного снятия reaper'ом (сек). З-33: файлы
-  // агента публикуются только в конце прогона, переключатель режима снят миграцией 0373.
-  agentArtifactDraftTtlSec: integer("agent_artifact_draft_ttl_sec"),
-  // --- Step-debug D6.4: устойчивость пошаговой отладки сценариев. NULL = «Авто» (env-дефолт
-  // WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE → fallback); 0 = kill-switch (arm отклоняется).
-  // Кап живых дебаг-сессий (armed/capturing/active) на пространство — дебаг не голодит прод-ёмкость. ---
-  workflowDebugMaxOpenSessionsPerWorkspace: integer("workflow_debug_max_open_sessions_per_workspace"),
-  // Ожидание вызова армированной сессией (сек). NULL = «Авто» (env WORKFLOW_DEBUG_ARM_TTL_SECONDS →
-  // fallback 300). После захвата входа не применяется.
-  workflowDebugArmTtlSeconds: integer("workflow_debug_arm_ttl_seconds"),
-  // Жизнь дебаг-сессии после захвата (сек), скользящая от последней активности автора. NULL = «Авто»
-  // (env WORKFLOW_DEBUG_SESSION_TTL_SECONDS → fallback 3600).
-  workflowDebugSessionTtlSeconds: integer("workflow_debug_session_ttl_seconds"),
-  // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace +
-  // personal, системный сид и starters ассистентов не учитываются. NULL = «Авто»
-  // (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет создания новых. Превышение → 409.
+  // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace + personal, системный
+  // сид и starters ассистентов не учитываются. NULL = «Авто» (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет
+  // создания новых. Превышение → 409.
   promptsInstanceLimit: integer("prompts_instance_limit"),
-  // --- W2 Code Node (workflow-code-node-roadmap.md): лимиты code runner'а узла «Код (JavaScript)».
-  // Все поля NULL = «Авто» (env WORKFLOW_CODE_RUNNER_* workflow-сервиса → дефолт); число — явный
-  // админ-override. Читает workflow-сервис через gateway getUnicaChatConfig. Память и конкурентность
-  // в external-режиме принадлежат env sidecar-контейнера — админ-значения применяются к internal-пулу. ---
+  // --- W2 Code Node: лимиты code runner'а узла «Код (JavaScript)». NULL = «Авто» (дефолт кода workflow-сервиса). Память
+  // в external-режиме задаёт развёртывание раннера — админ-значение применяется к internal-пулу. ---
   workflowCodeExecTimeoutMs: integer("workflow_code_exec_timeout_ms"),
   workflowCodeExecMemoryMb: integer("workflow_code_exec_memory_mb"),
-  workflowCodeExecConcurrency: integer("workflow_code_exec_concurrency"),
-  workflowCodeExecMaxPayloadMb: integer("workflow_code_exec_max_payload_mb"),
-  workflowCodeExecQueueWaitMs: integer("workflow_code_exec_queue_wait_ms"),
-  // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание),
-  // false = только платформенный админ. Шов под будущую лицензионную проверку.
+  // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание), false = только
+  // платформенный админ. Шов под будущую лицензионную проверку.
   workflowCodeExecDelegationEnabled: boolean("workflow_code_exec_delegation_enabled"),
-  // --- Узел checklist_verify: параллельность батч-судьи /v1/checklist-judge. NULL = «Авто»
-  // (дефолт КОДА 4 — env-фолбэка нет намеренно); число — явный админ-override (1..16). Читает
-  // workflow-сервис через getUnicaChatConfig и шлёт per-request полем concurrency (паттерн
-  // runtimeCapacity). Применяется без рестарта. ---
-  workflowChecklistJudgeConcurrency: integer("workflow_checklist_judge_concurrency"),
-  // --- Волна 2A: Prefetch базы знаний. Все поля NULL = «Авто» (env-дефолт/fallback); значение — явный
-  // админ-override. Управляют автоподгрузкой документов привязанной БЗ в контекст агента до первого
-  // вызова модели (Node-сторона, resolveKbPrefetchConfig; в Python не прокидывается). ---
-  // Мастер-рубильник prefetch: NULL = env/дефолт (вкл), true/false — явный override.
-  agentKbPrefetchEnabled: boolean("agent_kb_prefetch_enabled"),
-  // Бюджет символов на инлайн содержимого документов. 0 = kill-switch: в контекст идёт только оглавление.
-  agentKbPrefetchCharLimit: integer("agent_kb_prefetch_char_limit"),
-  // Максимум документов, инлайнящихся в контекст.
-  agentKbPrefetchMaxDocs: integer("agent_kb_prefetch_max_docs"),
-  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md,
-  // миграция 0360). Все поля NULL = «Авто» (дефолт кода, env-фолбэка нет намеренно); значение —
-  // явный админ-override. Роутер (chat_router_*): kill-switch LLM-слоя, отдельная модель (NULL =
-  // fast-path модель агента), таймаут решения и порог уверенности для эскалации в агента. Гейт
-  // честности: директивы «только с опорой на источники / источников нет — скажи прямо» и
-  // детерминированная пост-проверка чисел и цитат. ---
-  chatRouterEnabled: boolean("chat_router_enabled"),
-  chatRouterModelId: text("chat_router_model_id"),
-  chatRouterTimeoutMs: integer("chat_router_timeout_ms"),
-  // Д-57 (0367): пауза модели после транспортного сбоя, с; NULL = «Авто» (дефолт кода), 0 = выключено.
-  chatRouterCooldownSec: integer("chat_router_cooldown_sec"),
+  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md). NULL = «Авто»
+  // (дефолт кода). Модель роутера, выключатель, таймаут и пауза удалены миграцией 0402: выбор пути идёт на быстрой
+  // служебной модели. ---
   chatRouterAgentConfidenceThresholdPct: integer("chat_router_agent_confidence_threshold_pct"),
   chatAnswerGroundingGateEnabled: boolean("chat_answer_grounding_gate_enabled"),
-  chatAnswerGroundingPostcheckEnabled: boolean("chat_answer_grounding_postcheck_enabled"),
-  /**
-   * Системные базы знаний (служебное пространство `workspaces.is_system`) участвуют в ответах Уники AI
-   * (0362, волна С2). NULL = «Авто» = включено, когда такие базы есть; false — явное отключение.
-   */
-  systemKnowledgeEnabled: boolean("system_knowledge_enabled"),
-  // --- Проверка достоверности после ответа (docs/rag-answer-quality-metrics-strategy-2026-09.md,
-  // миграция 0372). Все поля NULL = «Авто» (дефолты `answerQualityDefaults` в shared/answer-quality.ts);
-  // значение — явный админ-override из карточки «Честность ответов чата». ---
+  // --- Проверка ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md): одна ручка из четырёх положений хранится
+  // в режиме и видимости (shared/answer-quality.ts, `answerQualityLevelToStored`). NULL = «Авто» = отметка для всех. ---
   answerQualityMode: text("answer_quality_mode").$type<AnswerQualityMode>(),
-  answerQualityJudgeModelId: text("answer_quality_judge_model_id"),
-  answerQualityWorkerConcurrency: integer("answer_quality_worker_concurrency"),
-  answerQualitySupportedThreshold: doublePrecision("answer_quality_supported_threshold"),
-  answerQualityPartialThreshold: doublePrecision("answer_quality_partial_threshold"),
   answerQualityVisibility: text("answer_quality_visibility").$type<AnswerQualityVisibility>(),
-  answerQualityClaimsRetentionDays: integer("answer_quality_claims_retention_days"),
-  answerQualityCostMode: text("answer_quality_cost_mode").$type<AnswerQualityCostMode>(),
-  answerQualityArenaJudgeEnabled: boolean("answer_quality_arena_judge_enabled"),
-  answerQualityArenaJudgeModelId: text("answer_quality_arena_judge_model_id"),
-  // --- Блок 8, задача 8.1: Tool-RAG (поиск по инструментам), Phase A. Все поля NULL = «Авто» (env-дефолт/
-  // документированный fallback), значение — явный админ-override. Сужают ВНЕШНИЙ хвост (mcpTools/actions/
-  // operations) ретривалом перед показом модели; ниже порога промоции ретривал — no-op (нулевой регресс). ---
-  // Мастер-рубильник: NULL = env/дефолт (вкл), true/false — явный override.
-  agentToolRagEnabled: boolean("agent_tool_rag_enabled"),
-  // Порог промоции: применять ретривал только при числе резидентных внешних инструментов >= порога.
-  agentToolRagPromotionThreshold: integer("agent_tool_rag_promotion_threshold"),
-  // Жёсткий потолок кандидатного набора (адаптивная глубина не превышает).
-  agentToolRagMaxCandidates: integer("agent_tool_rag_max_candidates"),
-  // Адаптивная глубина: добор кандидатов, пока RRF-скор >= ratio * (скор лидера). Храним целые проценты.
-  agentToolRagAdaptiveScoreRatioPct: integer("agent_tool_rag_adaptive_score_ratio_pct"),
-  // RRF-константа слияния sparse+dense (как в search-профилях КБ).
-  agentToolRagRrfK: integer("agent_tool_rag_rrf_k"),
-  // Веса половин слияния (целые проценты; сервер нормализует к сумме 1).
-  agentToolRagBm25WeightPct: integer("agent_tool_rag_bm25_weight_pct"),
-  agentToolRagVectorWeightPct: integer("agent_tool_rag_vector_weight_pct"),
-  // Recall-floor офлайн-гейта приёмки (наблюдаемость/документированный порог; рантайм не применяет).
-  agentToolRagRecallFloorPct: integer("agent_tool_rag_recall_floor_pct"),
-  // Возраст (сек), после которого запись индекса считается stale (сверщик/индикатор).
-  agentToolRagStaleAgeSec: integer("agent_tool_rag_stale_age_sec"),
-  // Интервал фонового хэш-сверщика (reconciler), сек.
-  agentToolRagReconcilerIntervalSec: integer("agent_tool_rag_reconciler_interval_sec"),
-  // TTL tenant-scoped кэша результата ретривала (getCache), сек. 0 = не кэшировать.
-  agentToolRagCacheTtlSec: integer("agent_tool_rag_cache_ttl_sec"),
-  // --- Блок 8, задача 8.2: реестр кластеров + двухстадийный (домен→инструмент) роутинг поверх 8.1. Все поля
-  // NULL = «Авто» (env-дефолт/fallback), значение — явный админ-override. Реестр кластеров и членство —
-  // data-driven из каталога (БЕЗ таблицы); здесь только тюнеры конвейера. ---
-  // Мастер-рубильник иерархического роутинга: NULL = env/дефолт, true/false — явный override.
-  agentToolClusterRoutingEnabled: boolean("agent_tool_cluster_routing_enabled"),
-  // Число кластеров-кандидатов стадии 1 (жёсткий потолок адаптивной глубины доменного отбора).
-  agentToolClusterMaxCandidateClusters: integer("agent_tool_cluster_max_candidate_clusters"),
-  // Адаптивная глубина стадии 1: добор кластеров, пока RRF-скор >= ratio * (скор лидера). Целые проценты.
-  agentToolClusterStage1ScoreRatioPct: integer("agent_tool_cluster_stage1_score_ratio_pct"),
-  // Бюджет пере-запроса (operation agent.find_tools): потолок кандидатов при higher-recall повторе.
-  agentToolClusterRequeryMaxCandidates: integer("agent_tool_cluster_requery_max_candidates"),
   agentSmalltalkPhrases: text("agent_smalltalk_phrases").notNull().default(""),
   systemPrompt: text("system_prompt").notNull().default(""),
   temperature: doublePrecision("temperature").default(0.7),

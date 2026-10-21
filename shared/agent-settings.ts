@@ -1,7 +1,7 @@
 import { z } from "zod";
+import { answerQualitySettingsSchema } from "./answer-quality";
 
 import { confirmationPolicyValues, type JsonObject } from "./plugin-system";
-import { reasoningModes } from "./schema";
 import { systemOperationCategoryValues } from "./system-operations";
 
 export const agentCapabilityKindValues = [
@@ -77,20 +77,85 @@ export const agentCapabilityCatalogResponseSchema = z.object({
 });
 
 export const agentRuntimeLimitsDefaults = {
-  maxSteps: 32,
+  // З-04: `maxSteps` строго больше `maxToolCalls` — при включённом «один инструмент за ход»
+  // (`single_tool_per_turn`, дефолт рантайма) каждый вызов инструмента съедает целый раунд модели.
+  // При равных значениях последний раунд уходит на последний вызов, цикл выходит по исчерпанию
+  // раундов и ставит `llm_budget_exhausted`: финальный ответ структурно недостижим.
+  maxSteps: 40,
   maxToolCalls: 32,
   timeoutSec: 600,
-  // null = «Авто»: потолок генерации берём из реестра модели (models.max_completion_tokens),
-  // иначе runtime-дефолт рантайма. Число = явный override (клампится к диапазону ниже).
-  maxCompletionTokens: null as number | null,
 } as const;
+
+/**
+ * З-04: сколько раундов модели резервируется сверх бюджета вызовов инструментов. Один — на сам
+ * финальный ответ, один — на хвост (раунд с отброшенным лишним вызовом, повтор невалидных
+ * аргументов). Меньше двух — прогон регулярно упирается в потолок раундов вместо финала.
+ */
+export const AGENT_RUNTIME_STEP_RESERVE = 2;
 
 export const agentRuntimeLimitRanges = {
   maxSteps: { min: 1, max: 100 },
   maxToolCalls: { min: 1, max: 100 },
   timeoutSec: { min: 30, max: 3600 },
-  maxCompletionTokens: { min: 256, max: 32000 },
 } as const;
+
+// --- З-12: одна семантика цепочки лимитов «узел сценария → Настройки агента» ---------------------
+// Пусто в узле → значение из «Настроек агента». Число в узле → не выше админского потолка
+// (min(узел, админ)). Инвариант резерва шагов (З-04) восстанавливается после слияния: если шагов
+// меньше, чем вызовов плюс резерв, срезается число вызовов — потолок шагов остаётся главным.
+// Раньше админские значения применялись только как «пол» для universal-агента при вложениях
+// json/csv/tsv (регулярное выражение по расширению файла), а для остального не читались вовсе —
+// владелец поднимал лимит в консоли и не получал эффекта.
+
+export type AgentRuntimeLimitSource = "node" | "admin" | "node_capped_by_admin" | "reserve_invariant";
+
+export type AgentRuntimeNodeLimits = {
+  maxSteps?: number | null;
+  maxToolCalls?: number | null;
+  timeoutSec?: number | null;
+};
+
+export type AgentRuntimeAdminLimits = {
+  maxSteps: number;
+  maxToolCalls: number;
+  timeoutSec: number;
+};
+
+export type AgentRuntimeEffectiveLimits = {
+  limits: AgentRuntimeAdminLimits;
+  sources: Record<keyof AgentRuntimeAdminLimits, AgentRuntimeLimitSource>;
+};
+
+function resolveOneAgentRuntimeLimit(
+  nodeValue: number | null | undefined,
+  adminValue: number,
+): { value: number; source: AgentRuntimeLimitSource } {
+  if (typeof nodeValue !== "number" || !Number.isFinite(nodeValue) || nodeValue <= 0) {
+    return { value: adminValue, source: "admin" };
+  }
+  const floored = Math.floor(nodeValue);
+  if (floored > adminValue) {
+    return { value: adminValue, source: "node_capped_by_admin" };
+  }
+  return { value: floored, source: "node" };
+}
+
+export function resolveEffectiveAgentRuntimeLimits(
+  node: AgentRuntimeNodeLimits | null | undefined,
+  admin: AgentRuntimeAdminLimits,
+): AgentRuntimeEffectiveLimits {
+  const maxSteps = resolveOneAgentRuntimeLimit(node?.maxSteps, admin.maxSteps);
+  const maxToolCalls = resolveOneAgentRuntimeLimit(node?.maxToolCalls, admin.maxToolCalls);
+  const timeoutSec = resolveOneAgentRuntimeLimit(node?.timeoutSec, admin.timeoutSec);
+  if (maxSteps.value < maxToolCalls.value + AGENT_RUNTIME_STEP_RESERVE) {
+    maxToolCalls.value = Math.max(maxSteps.value - AGENT_RUNTIME_STEP_RESERVE, 0);
+    maxToolCalls.source = "reserve_invariant";
+  }
+  return {
+    limits: { maxSteps: maxSteps.value, maxToolCalls: maxToolCalls.value, timeoutSec: timeoutSec.value },
+    sources: { maxSteps: maxSteps.source, maxToolCalls: maxToolCalls.source, timeoutSec: timeoutSec.source },
+  };
+}
 
 function integerSettingSchema(min: number, max: number) {
   return z.preprocess((value) => {
@@ -116,115 +181,21 @@ function nullableIntegerSettingSchema(min: number, max: number) {
   }, z.number().int().min(min).max(max).nullable());
 }
 
-// Режим reasoning для агентских запусков. "model_default" = брать defaultMode из
-// inputCapabilities.reasoning модели; конкретный режим клампится к поддерживаемым моделью.
-export const agentReasoningModeValues = ["model_default", ...reasoningModes] as const;
-export type AgentReasoningModeSetting = (typeof agentReasoningModeValues)[number];
-
-// Slim reasoning-конфиг ВЫБРАННОЙ модели агента: те же поля, что чат-композер отдаёт своему
-// reasoning-пикеру (минус request/output). Источник на сервере — getChatReasoningConfigForModel.
-// Нужен клиенту, т.к. публичный /api/models не отдаёт metadata моделей. Опции селектора reasoning
-// строятся из него: «По умолчанию модели» + modes (с labels модели).
-export const modelReasoningConfigSchema = z.object({
-  supported: z.boolean(),
-  modes: z.array(z.enum(reasoningModes)),
-  defaultMode: z.enum(reasoningModes),
-  labels: z.record(z.string(), z.string()).optional(),
-});
-export type ModelReasoningConfigDto = z.infer<typeof modelReasoningConfigSchema>;
-
 export const agentSettingsMainSectionSchema = z.object({
   agentDefaultModelId: z.string().trim().max(255).optional().nullable(),
+  // Быстрая служебная модель: выбор пути в «Авто», вердикт гейта честности, судья качества, описание баз знаний.
   fastPathModelId: z.string().trim().max(255).optional().nullable(),
-  reasoningMode: z.enum(agentReasoningModeValues).optional(),
-  // Debug-трейс запусков агента: журнал пишет полные payload (LLM-дельты, скрипты, stdout).
-  debugTraceEnabled: z.boolean().optional(),
 });
 
+// Срок шага ИИ в сценариях без своего срока. Шаги и вызовы инструментов читал только прежний агент — ручек нет.
 export const agentSettingsRuntimeLimitsSectionSchema = z.object({
-  maxSteps: integerSettingSchema(
-    agentRuntimeLimitRanges.maxSteps.min,
-    agentRuntimeLimitRanges.maxSteps.max,
-  ).default(agentRuntimeLimitsDefaults.maxSteps),
-  maxToolCalls: integerSettingSchema(
-    agentRuntimeLimitRanges.maxToolCalls.min,
-    agentRuntimeLimitRanges.maxToolCalls.max,
-  ).default(agentRuntimeLimitsDefaults.maxToolCalls),
   timeoutSec: integerSettingSchema(
     agentRuntimeLimitRanges.timeoutSec.min,
     agentRuntimeLimitRanges.timeoutSec.max,
   ).default(agentRuntimeLimitsDefaults.timeoutSec),
-  maxCompletionTokens: nullableIntegerSettingSchema(
-    agentRuntimeLimitRanges.maxCompletionTokens.min,
-    agentRuntimeLimitRanges.maxCompletionTokens.max,
-  ).default(null),
 });
 
-// --- Задача 5.1: контроль перегрузки (overload control) ---
-// Все поля «Авто»-стиля (nullable): null = взять env-дефолт/«выключено», число = явный админ-override.
-// Числовые фолбэки (когда и админ, и env молчат) применяет СЕРВЕР (resolveAgentOverloadConfig);
-// здесь они нужны для подсказок-плейсхолдеров UI и как документированный baseline.
-export const agentOverloadControlFallbacks = {
-  // per-реплика (прокидываются в рантайм): 0 = выключено (поведение рантайма не меняется).
-  maxConcurrentRuns: 0,
-  maxConcurrentCodeExec: 0,
-  capacityRetryAfterSec: 5,
-  // бюджет переочереди одного шага из-за back-pressure до честного «занято».
-  maxCapacityRetries: 5,
-  // глобальная (Redis) квота тенанта: 0 = выключено.
-  maxConcurrentRunsPerWorkspace: 0,
-  // глобальный (Redis) token-bucket повторов: capacity 0 = выключено.
-  retryBucketCapacity: 0,
-  retryBucketRefillPerMin: 60,
-} as const;
-
-export const agentOverloadControlRanges = {
-  maxConcurrentRuns: { min: 0, max: 1024 },
-  maxConcurrentCodeExec: { min: 0, max: 1024 },
-  capacityRetryAfterSec: { min: 1, max: 3600 },
-  maxCapacityRetries: { min: 0, max: 100 },
-  maxConcurrentRunsPerWorkspace: { min: 0, max: 1024 },
-  retryBucketCapacity: { min: 0, max: 100_000 },
-  retryBucketRefillPerMin: { min: 1, max: 100_000 },
-} as const;
-
-// Все семь полей nullable: пусто/null → «Авто» (env-дефолт), иначе целое в диапазоне. Пустой
-// number-инпут админки = «Авто», а не ошибка валидации (как maxCompletionTokens).
-export const agentSettingsOverloadControlSectionSchema = z.object({
-  maxConcurrentRuns: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.maxConcurrentRuns.min,
-    agentOverloadControlRanges.maxConcurrentRuns.max,
-  ).default(null),
-  maxConcurrentCodeExec: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.maxConcurrentCodeExec.min,
-    agentOverloadControlRanges.maxConcurrentCodeExec.max,
-  ).default(null),
-  capacityRetryAfterSec: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.capacityRetryAfterSec.min,
-    agentOverloadControlRanges.capacityRetryAfterSec.max,
-  ).default(null),
-  maxCapacityRetries: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.maxCapacityRetries.min,
-    agentOverloadControlRanges.maxCapacityRetries.max,
-  ).default(null),
-  maxConcurrentRunsPerWorkspace: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.maxConcurrentRunsPerWorkspace.min,
-    agentOverloadControlRanges.maxConcurrentRunsPerWorkspace.max,
-  ).default(null),
-  retryBucketCapacity: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.retryBucketCapacity.min,
-    agentOverloadControlRanges.retryBucketCapacity.max,
-  ).default(null),
-  retryBucketRefillPerMin: nullableIntegerSettingSchema(
-    agentOverloadControlRanges.retryBucketRefillPerMin.min,
-    agentOverloadControlRanges.retryBucketRefillPerMin.max,
-  ).default(null),
-});
-
-// --- Задача 5.2: возобновление после сбоя (resume recovery) ---
-// Пороги сторожа зависших агент-прогонов. Поля «Авто»-стиля (nullable): null = env-дефолт, число =
-// явный админ-override. Числовые фолбэки применяет СЕРВЕР (resolveAgentRunRecoveryConfig); здесь —
-// подсказки-плейсхолдеры UI и документированный baseline.
+// --- Возобновление после сбоя: пороги сторожа зависших прогонов. Константы кода, ручек нет (ревизия 21.10.2026). ---
 export const agentRunRecoveryFallbacks = {
   // как часто опрашивать незавершённые прогоны (сек). Той же каденцией работает и reaper залипшего
   // pending идемпотентности (он — сестринский воркер сторожа).
@@ -241,137 +212,81 @@ export const agentRunRecoveryFallbacks = {
   idempotencyRetentionDays: 30,
 } as const;
 
-export const agentRunRecoveryRanges = {
-  watchdogIntervalSec: { min: 10, max: 3600 },
-  staleHeartbeatTimeoutSec: { min: 60, max: 86400 },
-  pendingReapTtlSec: { min: 60, max: 86400 },
-  idempotencyRetentionDays: { min: 1, max: 3650 },
+// --- Черновики файлов агента: файл уходит в чат только в конце прогона (З-33), до этого лежит черновиком. ---
+export const agentRunExecutionFallbacks = {
+  // Сколько живёт неопубликованный черновик файла до снятия reaper'ом (сек). З-33: файлы агента
+  // публикуются только в конце прогона, после проверок — переключателя режима с 14.09.2026 нет.
+  artifactDraftTtlSec: 3600,
 } as const;
 
-// Все поля nullable: пусто/null → «Авто» (env-дефолт), иначе целое в диапазоне.
-export const agentSettingsRunRecoverySectionSchema = z.object({
-  watchdogIntervalSec: nullableIntegerSettingSchema(
-    agentRunRecoveryRanges.watchdogIntervalSec.min,
-    agentRunRecoveryRanges.watchdogIntervalSec.max,
-  ).default(null),
-  staleHeartbeatTimeoutSec: nullableIntegerSettingSchema(
-    agentRunRecoveryRanges.staleHeartbeatTimeoutSec.min,
-    agentRunRecoveryRanges.staleHeartbeatTimeoutSec.max,
-  ).default(null),
-  pendingReapTtlSec: nullableIntegerSettingSchema(
-    agentRunRecoveryRanges.pendingReapTtlSec.min,
-    agentRunRecoveryRanges.pendingReapTtlSec.max,
-  ).default(null),
-  idempotencyRetentionDays: nullableIntegerSettingSchema(
-    agentRunRecoveryRanges.idempotencyRetentionDays.min,
-    agentRunRecoveryRanges.idempotencyRetentionDays.max,
-  ).default(null),
-});
+/**
+ * Потолок окна контекста, который платформа отдаёт рантайму агента (токены).
+ *
+ * Реестр моделей хранит полное окно (`models.max_prompt_tokens_budget`) — у qwen3.8-27b это 500 000.
+ * Брать его целиком нельзя по двум причинам: на длинном контексте модель теряет начало разговора и
+ * начинает путать источники, а один вызов становится непредсказуемо дорогим. Брать библиотечный
+ * дефолт (58 000) — тоже плохо: история прогона упирается в него на середине задачи, и агент режет
+ * собственный контекст там, где модель ещё справилась бы.
+ *
+ * 128 000 — рабочая середина: помещается многошаговый прогон с документами, но окно остаётся в
+ * пределах, на которых модель держит внимание. Настройкой в админке потолок станет в волне 1,
+ * вместе с остальными параметрами сессий.
+ */
+export const AGENT_CONTEXT_WINDOW_CAP_TOKENS = 128_000;
 
-// --- Волна 1 D: устойчивость агента (runtime resilience) ---
-// Бюджет guard-повторов и deadline-запасы Python-рантайма. Поля «Авто»-стиля (nullable): null =
-// env-дефолт реплики, число = явный админ-override. 0 — валидное значение (kill-switch механизма),
-// а не «Авто». Числовые фолбэки применяет СЕРВЕР (resolveAgentResilienceConfig); здесь —
-// подсказки-плейсхолдеры UI и документированный baseline.
-export const agentResilienceFallbacks = {
-  // бюджет guard-повторов (повтор шага по вердикту guard'ов) на один прогон. 0 = без повторов.
-  guardRetryMaxPerRun: 2,
-  // guard-повтор допускается, только если до дедлайна прогона осталось не меньше этого (сек).
-  guardRetryMinRemainingSec: 60,
-  // запас Python-дедлайна к таймауту прогона (сек): рантайм завершает работу раньше отсечки Node,
-  // чтобы успеть отдать честный частичный результат.
-  deadlineSafetyMarginSec: 20,
-  // новый LLM-раунд стартует, только если до дедлайна осталось не меньше этого (сек).
-  roundMinRemainingSec: 30,
-  // лимит эха предыдущего ответа в промпте guard-повтора (символов). 0 = не эхировать.
-  retryEchoMaxChars: 1500,
-} as const;
-
-export const agentResilienceRanges = {
-  guardRetryMaxPerRun: { min: 0, max: 5 },
-  guardRetryMinRemainingSec: { min: 0, max: 600 },
-  deadlineSafetyMarginSec: { min: 0, max: 120 },
-  roundMinRemainingSec: { min: 0, max: 300 },
-  retryEchoMaxChars: { min: 0, max: 20_000 },
-} as const;
-
-// --- Step-debug D6.4: устойчивость пошаговой отладки сценариев ---
-// Кап живых дебаг-сессий (armed/capturing/active) на пространство: дебаг не должен голодить
-// прод-ёмкость воркеров. NULL = «Авто» (env WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE →
-// fallback); 0 — валидный kill-switch (arm всегда отклоняется). Применяет сервер
-// (resolveWorkflowDebugConfig) на каждом arm — правка действует без рестарта.
-//
-// Два РАЗНЫХ таймаута сессии (один общий TTL смешивал несмешиваемое):
-//  • armTtlSeconds — сколько армированная сессия ждёт входящий вызов в выбранном канале. Короткий:
-//    брошенный arm не должен занимать кап пространства. После захвата не применяется.
-//  • sessionTtlSeconds — сколько живёт САМА сессия после захвата входа. Скользящий: каждая
-//    активность автора (шаг/перезапуск/правка узла/пин/сабмит формы) продлевает срок; истечение
-//    закрывает сессию и отменяет захваченный прогон (иначе он вечно висит в waiting_debug_step).
-// 0 в этих полях недопустим (сессия без времени жизни бессмысленна) — min задан ненулевым.
+// --- Step-debug D6.4: кап живых дебаг-сессий на пространство и два срока сессии. Константы кода, ручек нет.
+//  • armTtlSeconds — сколько армированная сессия ждёт входящий вызов; после захвата не применяется.
+//  • sessionTtlSeconds — сколько живёт сессия после захвата; каждая активность автора продлевает срок.
 export const workflowDebugFallbacks = {
   maxOpenSessionsPerWorkspace: 3,
   armTtlSeconds: 5 * 60,
   sessionTtlSeconds: 60 * 60,
 } as const;
 
-export const workflowDebugRanges = {
-  maxOpenSessionsPerWorkspace: { min: 0, max: 50 },
-  armTtlSeconds: { min: 60, max: 60 * 60 },
-  sessionTtlSeconds: { min: 5 * 60, max: 8 * 60 * 60 },
+// --- W2 Code Node (workflow-code-node-roadmap.md): лимиты code runner'а узла «Код (JavaScript)». ---
+// В админке — таймаут и память (null = «Авто» = дефолт ниже); остальное — константы кода. Применяет workflow-сервис
+// (resolveCodeRunnerConfig) на каждом исполнении. В external-режиме (sidecar в k8s) память и конкурентность задаёт
+// деплой раннера (env контейнера); админ-значение памяти действует только на internal-пул.
+export const workflowCodeExecFallbacks = {
+  timeoutMs: 5_000,
+  memoryMb: 128,
+  concurrency: 4,
+  maxPayloadMb: 5,
+  queueWaitMs: 10_000,
 } as const;
 
-export const agentSettingsWorkflowDebugSectionSchema = z.object({
-  maxOpenSessionsPerWorkspace: nullableIntegerSettingSchema(
-    workflowDebugRanges.maxOpenSessionsPerWorkspace.min,
-    workflowDebugRanges.maxOpenSessionsPerWorkspace.max,
+export const workflowCodeExecRanges = {
+  timeoutMs: { min: 50, max: 300_000 },
+  memoryMb: { min: 32, max: 4_096 },
+} as const;
+
+// --- Узел checklist_verify: параллельность батч-судьи /v1/checklist-judge Python-рантайма. Константа кода. ---
+export const workflowChecklistJudgeFallbacks = {
+  concurrency: 4,
+} as const;
+
+export const agentSettingsWorkflowCodeExecSectionSchema = z.object({
+  /**
+   * W3.1: разрешено ли править код узла в сценариях ПРОСТРАНСТВ (право `workflows:edit_code`).
+   * null = «Авто» (умолчание — разрешено), false = только платформенный админ.
+   * Это же поле — шов под будущую лицензионную проверку: лицензия ANDится к рубильнику,
+   * остальной контур (гейт, UI-зеркало, аудит) не меняется.
+   */
+  delegationEnabled: z.boolean().nullable().default(null),
+  timeoutMs: nullableIntegerSettingSchema(
+    workflowCodeExecRanges.timeoutMs.min,
+    workflowCodeExecRanges.timeoutMs.max,
   ).default(null),
-  armTtlSeconds: nullableIntegerSettingSchema(
-    workflowDebugRanges.armTtlSeconds.min,
-    workflowDebugRanges.armTtlSeconds.max,
-  ).default(null),
-  sessionTtlSeconds: nullableIntegerSettingSchema(
-    workflowDebugRanges.sessionTtlSeconds.min,
-    workflowDebugRanges.sessionTtlSeconds.max,
+  memoryMb: nullableIntegerSettingSchema(
+    workflowCodeExecRanges.memoryMb.min,
+    workflowCodeExecRanges.memoryMb.max,
   ).default(null),
 });
 
-// Все поля nullable: пусто/null → «Авто» (env-дефолт), иначе целое в диапазоне (0 валиден).
-export const agentSettingsResilienceSectionSchema = z.object({
-  guardRetryMaxPerRun: nullableIntegerSettingSchema(
-    agentResilienceRanges.guardRetryMaxPerRun.min,
-    agentResilienceRanges.guardRetryMaxPerRun.max,
-  ).default(null),
-  guardRetryMinRemainingSec: nullableIntegerSettingSchema(
-    agentResilienceRanges.guardRetryMinRemainingSec.min,
-    agentResilienceRanges.guardRetryMinRemainingSec.max,
-  ).default(null),
-  deadlineSafetyMarginSec: nullableIntegerSettingSchema(
-    agentResilienceRanges.deadlineSafetyMarginSec.min,
-    agentResilienceRanges.deadlineSafetyMarginSec.max,
-  ).default(null),
-  roundMinRemainingSec: nullableIntegerSettingSchema(
-    agentResilienceRanges.roundMinRemainingSec.min,
-    agentResilienceRanges.roundMinRemainingSec.max,
-  ).default(null),
-  retryEchoMaxChars: nullableIntegerSettingSchema(
-    agentResilienceRanges.retryEchoMaxChars.min,
-    agentResilienceRanges.retryEchoMaxChars.max,
-  ).default(null),
-});
-
-// --- Блок 8, задача 8.1: Tool-RAG (поиск по инструментам), Phase A ---
-// Ретривал-сужение ВНЕШНЕГО хвоста (mcpTools/actions/operations) по смыслу запроса перед показом модели.
-// Все поля «Авто»-стиля (nullable): null = взять env-дефолт/документированный fallback, значение = явный
-// админ-override. Числовые фолбэки (когда и админ, и env молчат) применяет СЕРВЕР
-// (resolveAgentToolRagConfig); здесь — подсказки-плейсхолдеры UI и документированный baseline.
-//
-// Инвариант нулевого регресса: при числе резидентных внешних инструментов < promotionThreshold ретривал
-// НЕ применяется (снимок не меняется). На малом/встроенном каталоге Tool-RAG — no-op; включается только на
-// больших MCP/action-насыщенных тенантах (там это надёжность, P1). enabled по умолчанию ВКЛ, но порог
-// промоции защищает типового тенанта.
+// --- Блок 8, задача 8.1: Tool-RAG — сужение внешнего хвоста инструментов (mcpTools/actions/operations) по смыслу
+// запроса. Константы кода, ручек нет (ревизия 21.10.2026): отбор включён всегда, а при числе внешних инструментов ниже
+// порога промоции не применяется вовсе — на типовом пространстве это no-op.
 export const agentToolRagFallbacks = {
-  // Мастер-рубильник Tool-RAG. true = ретривал активен (выше порога промоции), false = всегда полный хвост.
-  enabled: true,
   // Порог промоции: ретривал применяется, только если резидентных внешних инструментов >= этого числа
   // (ориентир дизайна ~40–50 — за зоной деградации внимания слабой модели, но в пределах окна).
   promotionThreshold: 40,
@@ -386,28 +301,10 @@ export const agentToolRagFallbacks = {
   // Веса слияния половин (целые проценты для UI; сервер нормализует к сумме 1). По умолчанию равные.
   bm25WeightPct: 50,
   vectorWeightPct: 50,
-  // Recall-floor гейта приёмки (офлайн-замер на эталоне): целевой минимальный recall@k. Наблюдаемость/
-  // документированный порог; рантайм его не применяет (это офлайн-гейт).
-  recallFloorPct: 80,
-  // Возраст (сек), после которого проиндексированная запись считается stale при сверке/индикаторе.
-  staleAgeSec: 7 * 24 * 60 * 60,
   // Интервал фонового хэш-сверщика (reconciler), сек.
   reconcilerIntervalSec: 15 * 60,
   // TTL кэша результата ретривала (getCache, tenant-scoped), сек. 0 = не кэшировать.
   cacheTtlSec: 60,
-} as const;
-
-export const agentToolRagRanges = {
-  promotionThreshold: { min: 1, max: 1000 },
-  maxCandidates: { min: 1, max: 200 },
-  adaptiveScoreRatioPct: { min: 0, max: 100 },
-  rrfK: { min: 1, max: 1000 },
-  bm25WeightPct: { min: 0, max: 100 },
-  vectorWeightPct: { min: 0, max: 100 },
-  recallFloorPct: { min: 0, max: 100 },
-  staleAgeSec: { min: 60, max: 90 * 24 * 60 * 60 },
-  reconcilerIntervalSec: { min: 60, max: 24 * 60 * 60 },
-  cacheTtlSec: { min: 0, max: 24 * 60 * 60 },
 } as const;
 
 // nullable boolean: пусто/null/undefined → null (= «Авто»/env-дефолт), иначе boolean.
@@ -426,159 +323,172 @@ function nullableBooleanSettingSchema() {
   }, z.boolean().nullable());
 }
 
-// Все поля nullable: пусто/null → «Авто» (env-дефолт/fallback), иначе значение в диапазоне.
-export const agentSettingsToolRagSectionSchema = z.object({
-  enabled: nullableBooleanSettingSchema().default(null),
-  promotionThreshold: nullableIntegerSettingSchema(
-    agentToolRagRanges.promotionThreshold.min,
-    agentToolRagRanges.promotionThreshold.max,
-  ).default(null),
-  maxCandidates: nullableIntegerSettingSchema(
-    agentToolRagRanges.maxCandidates.min,
-    agentToolRagRanges.maxCandidates.max,
-  ).default(null),
-  adaptiveScoreRatioPct: nullableIntegerSettingSchema(
-    agentToolRagRanges.adaptiveScoreRatioPct.min,
-    agentToolRagRanges.adaptiveScoreRatioPct.max,
-  ).default(null),
-  rrfK: nullableIntegerSettingSchema(
-    agentToolRagRanges.rrfK.min,
-    agentToolRagRanges.rrfK.max,
-  ).default(null),
-  bm25WeightPct: nullableIntegerSettingSchema(
-    agentToolRagRanges.bm25WeightPct.min,
-    agentToolRagRanges.bm25WeightPct.max,
-  ).default(null),
-  vectorWeightPct: nullableIntegerSettingSchema(
-    agentToolRagRanges.vectorWeightPct.min,
-    agentToolRagRanges.vectorWeightPct.max,
-  ).default(null),
-  recallFloorPct: nullableIntegerSettingSchema(
-    agentToolRagRanges.recallFloorPct.min,
-    agentToolRagRanges.recallFloorPct.max,
-  ).default(null),
-  staleAgeSec: nullableIntegerSettingSchema(
-    agentToolRagRanges.staleAgeSec.min,
-    agentToolRagRanges.staleAgeSec.max,
-  ).default(null),
-  reconcilerIntervalSec: nullableIntegerSettingSchema(
-    agentToolRagRanges.reconcilerIntervalSec.min,
-    agentToolRagRanges.reconcilerIntervalSec.max,
-  ).default(null),
-  cacheTtlSec: nullableIntegerSettingSchema(
-    agentToolRagRanges.cacheTtlSec.min,
-    agentToolRagRanges.cacheTtlSec.max,
+// Режим «Авто»: порог уверенности модели выбора пути для передачи задачи агенту. NULL = «Авто» = дефолт кода.
+// Модели роутера и выключателя нет: выбор пути идёт на быстрой служебной модели (ревизия 21.10.2026).
+export const chatRouterFallbacks = {
+  // Эскалация в агента только при уверенности не ниже порога — чат дешевле и быстрее.
+  agentConfidenceThresholdPct: 70,
+} as const;
+
+export const chatRouterRanges = {
+  // 0 значил бы «всегда агент», 100 — «никогда»: оба положения ломают «Авто», поэтому диапазон сужен.
+  agentConfidenceThresholdPct: { min: 30, max: 95 },
+} as const;
+
+export const agentSettingsChatRouterSectionSchema = z.object({
+  agentConfidenceThresholdPct: nullableIntegerSettingSchema(
+    chatRouterRanges.agentConfidenceThresholdPct.min,
+    chatRouterRanges.agentConfidenceThresholdPct.max,
   ).default(null),
 });
 
-// --- Блок 8, задача 8.2: реестр кластеров + двухстадийный (домен→инструмент) роутинг поверх Tool-RAG 8.1 ---
-// Иерархический select-then-call: стадия 1 ранжирует ОПИСАНИЯ кластеров (домены) → сужает до нескольких
-// доменов; стадия 2 ранжирует инструменты ВНУТРИ выбранных кластеров (переиспользует ретривал 8.1). Реестр
-// кластеров и членство выводятся data-driven из каталога (БЕЗ таблицы); здесь только тюнеры конвейера.
-// Все поля nullable: null = «Авто» (env-дефолт/fallback), значение = явный админ-override (resolveAgent-
-// ToolClusterRoutingConfig применяет числовые fallback'и). Порог промоции и пороги стадии 2 наследуются от
-// секции toolRag (тот же ретривал-субстрат); ниже порога / при выключенном рубильнике — плоский 8.1 (no-op).
-export const agentToolClusterRoutingFallbacks = {
-  // Мастер-рубильник иерархического роутинга. false → роутинг плоский (8.1 над всем хвостом, без стадии 1).
-  enabled: true,
-  // Число кластеров-кандидатов стадии 1 (жёсткий потолок адаптивной глубины доменного отбора; CORE сверх него).
-  maxCandidateClusters: 3,
-  // Адаптивная глубина стадии 1: добор кластеров, пока RRF-скор >= ratio * (скор лидера). Меньше → шире/выше
-  // recall (промах домена опаснее промаха инструмента: домен скрывает все свои инструменты). Целые проценты.
-  stage1ScoreRatioPct: 35,
-  // Бюджет пере-запроса (operation agent.find_tools): потолок кандидатов при higher-recall повторе по намерению.
-  // Шире, чем потолок стадии 2 (toolRag.maxCandidates) — пере-запрос намеренно жертвует точностью ради recall.
-  requeryMaxCandidates: 48,
+// Гейт честности ответов чата: запрос, требующий точной опоры на источники, получает директиву «только из контекста
+// с маркером источника / источников нет — скажи прямо». NULL = «Авто» = дефолт кода.
+export const chatAnswerGroundingFallbacks = {
+  // Выключен по умолчанию: служебный вызов вердикта добавляет модельный вызов на каждое сообщение чата.
+  // Включение — решение администратора.
+  gateEnabled: false,
 } as const;
 
-export const agentToolClusterRoutingRanges = {
-  maxCandidateClusters: { min: 1, max: 20 },
-  stage1ScoreRatioPct: { min: 0, max: 100 },
-  requeryMaxCandidates: { min: 1, max: 200 },
-} as const;
-
-// Все поля nullable: пусто/null → «Авто» (env-дефолт/fallback), иначе значение в диапазоне.
-export const agentSettingsToolClusterRoutingSectionSchema = z.object({
-  enabled: nullableBooleanSettingSchema().default(null),
-  maxCandidateClusters: nullableIntegerSettingSchema(
-    agentToolClusterRoutingRanges.maxCandidateClusters.min,
-    agentToolClusterRoutingRanges.maxCandidateClusters.max,
-  ).default(null),
-  stage1ScoreRatioPct: nullableIntegerSettingSchema(
-    agentToolClusterRoutingRanges.stage1ScoreRatioPct.min,
-    agentToolClusterRoutingRanges.stage1ScoreRatioPct.max,
-  ).default(null),
-  requeryMaxCandidates: nullableIntegerSettingSchema(
-    agentToolClusterRoutingRanges.requeryMaxCandidates.min,
-    agentToolClusterRoutingRanges.requeryMaxCandidates.max,
-  ).default(null),
+export const agentSettingsAnswerGroundingSectionSchema = z.object({
+  gateEnabled: nullableBooleanSettingSchema().default(null),
 });
 
-// --- Волна 2A: Prefetch базы знаний (KB prefetch) ---
-// Автоматическая подгрузка документов привязанной БЗ в контекст агента до первого вызова модели.
-// Все поля «Авто»-стиля (nullable): null = env-дефолт/fallback, значение = явный админ-override.
-// Числовые фолбэки применяет СЕРВЕР (resolveKbPrefetchConfig, Node-сторона — в Python не прокидывается);
-// здесь — подсказки-плейсхолдеры UI и документированный baseline.
-export const agentKbPrefetchFallbacks = {
-  // Мастер-рубильник prefetch. true = документы БЗ инлайнятся в контекст до первого вызова модели.
-  enabled: true,
-  // Бюджет символов на инлайн содержимого документов. 0 = kill-switch: в контекст идёт только оглавление.
-  charLimit: 60_000,
-  // Максимум документов, инлайнящихся в контекст.
-  maxDocs: 30,
-} as const;
-
-export const agentKbPrefetchRanges = {
-  charLimit: { min: 0, max: 500_000 },
-  maxDocs: { min: 1, max: 200 },
-} as const;
-
-// Все поля nullable: пусто/null → «Авто» (env-дефолт/fallback), иначе значение в диапазоне
-// (0 у charLimit валиден — «только оглавление», не «Авто»).
-export const agentSettingsKbPrefetchSectionSchema = z.object({
-  enabled: nullableBooleanSettingSchema().default(null),
-  charLimit: nullableIntegerSettingSchema(
-    agentKbPrefetchRanges.charLimit.min,
-    agentKbPrefetchRanges.charLimit.max,
-  ).default(null),
-  maxDocs: nullableIntegerSettingSchema(
-    agentKbPrefetchRanges.maxDocs.min,
-    agentKbPrefetchRanges.maxDocs.max,
-  ).default(null),
-});
+// Проверка достоверности после ответа (docs/rag-answer-quality-metrics-strategy-2026-09.md, §5.4): одна ручка
+// «Проверка ответов», положения — в shared/answer-quality.ts.
+export const agentSettingsAnswerQualitySectionSchema = answerQualitySettingsSchema;
 
 export const agentSettingsSmalltalkSectionSchema = z.object({
   phrases: z.array(z.string().trim().min(1)).default([]),
 });
 
-export const agentSettingsReplyLibrariesSectionSchema = z.object({
-  smalltalk: agentSettingsSmalltalkSectionSchema.default({ phrases: [] }),
+// --- Каскадный fallback: ОБЩИЙ пул запасных LLM-моделей (2 ступени) для fast-path и основной роли.
+// Списки model id по приоритету; порядок = очередь каскада (tier1 → tier2). Пусто = каскада нет
+// (только основная модель роли). Мягкие ссылки: недоступную модель каскад пропускает в рантайме.
+export const agentSettingsModelPoolSectionSchema = z.object({
+  tier1: z.array(z.string().trim().min(1)).default([]),
+  tier2: z.array(z.string().trim().min(1)).default([]),
 });
+
+// --- Сессии агента: сервис сессий агента (волна 1, docs/agent-session-service-design.md §3.14) ---
+// Группа «Сессии агента» в «Настройках агента». Хранится одной jsonb-колонкой unica_chat_config.agent_session_settings
+// (миграция 0386). null в числовом поле = «Авто» = значение из agentSessionFallbacks. Агент в Унике один — все его
+// задачи выполняет сервис сессий, поэтому списка ассистентов в разделе нет: сохранённый ранее `assistantIds`
+// при чтении пропускается.
+// Потолки на установку сервис читает у монолита, потолки на сессию монолит кладёт в команду старта.
+// Адреса сервиса в разделе нет: связь между сервисами задаёт DevOps переменной окружения монолита
+// (server/agent-runtime/agent-session-config.ts). Сохранённый ранее `serviceUrl` при чтении пропускается.
+/** Провайдер агента (сервис сессий) в журнале запусков и в конверте прогона (`metadata.agentProvider`). */
+export const AGENT_SESSION_PROVIDER_ID = "unica_agent_session" as const;
+
+export const agentSessionFallbacks = {
+  // Сессия в работе почти ничего не стоит: потолок защищает базу и песочницы, а не модель. 0 — пауза приёма: новые
+  // сессии ждут в очереди, начатые дорабатывают.
+  maxActiveSessions: 200,
+  maxActivePerWorkspace: 20,
+  // Один человек не занимает все места установки.
+  maxActivePerUser: 3,
+  // Одновременные вызовы модели на всю установку — по ёмкости GPU.
+  maxModelCalls: 16,
+  sandboxIdleMinutes: 3,
+  sessionTokenCeiling: 30_000_000,
+  sessionMaxDurationHours: 8,
+  // Модель недоступна дольше — сессия завершается понятной ошибкой, а не ждёт вечно.
+  modelWaitMaxMinutes: 15,
+  sandboxCpu: 2,
+  sandboxMemoryGib: 2,
+  // Место на диске сессий (SEC-08.2): предел папки сессии и одного файла, МБ; свободного места на томе ниже порога —
+  // команды не запускаются. Сроки хранения данных сессий — не здесь, а в «Политиках очистки».
+  sessionWorkspaceMaxMb: 5120,
+  maxFileMb: 1024,
+  minFreeDiskPercent: 10,
+  contextWindowCapTokens: AGENT_CONTEXT_WINDOW_CAP_TOKENS,
+  // Исполнители одной сессии: сколько работают разом (каждый занимает слот модели) и сколько раз одно поручение
+  // зовёт модель — зациклившийся исполнитель возвращает поручение, а не расходует бюджет сессии.
+  parallelWorkers: 3,
+  workerModelCalls: 20,
+} as const;
+
+// Ручки администратора — только нагрузка (ревизия 21.10.2026); остальные потолки — константы `agentSessionFallbacks`.
+export const agentSessionRanges = {
+  maxActiveSessions: { min: 0, max: 5000 },
+  maxActivePerWorkspace: { min: 1, max: 5000 },
+  maxActivePerUser: { min: 1, max: 1000 },
+  maxModelCalls: { min: 1, max: 1000 },
+  sandboxMemoryGib: { min: 1, max: 128 },
+  sessionWorkspaceMaxMb: { min: 100, max: 1_048_576 },
+} as const;
+
+type AgentSessionNumericKey = keyof typeof agentSessionFallbacks;
+type AgentSessionAdminKey = keyof typeof agentSessionRanges;
+
+function agentSessionNumber(key: AgentSessionAdminKey) {
+  return nullableIntegerSettingSchema(agentSessionRanges[key].min, agentSessionRanges[key].max).default(null);
+}
+
+export const agentSettingsAgentSessionSectionSchema = z.object({
+  maxActiveSessions: agentSessionNumber("maxActiveSessions"),
+  maxActivePerWorkspace: agentSessionNumber("maxActivePerWorkspace"),
+  maxActivePerUser: agentSessionNumber("maxActivePerUser"),
+  maxModelCalls: agentSessionNumber("maxModelCalls"),
+  sandboxMemoryGib: agentSessionNumber("sandboxMemoryGib"),
+  sessionWorkspaceMaxMb: agentSessionNumber("sessionWorkspaceMaxMb"),
+});
+
+export type AgentSessionSettingsSectionDto = z.infer<typeof agentSettingsAgentSessionSectionSchema>;
+export type AgentSessionSettingsResolved = {
+  [K in AgentSessionNumericKey]: number;
+};
+
+/**
+ * Сохранённый раздел как задан администратором: поле, не прошедшее проверку, читается как «Авто» (null), а не роняет
+ * страницу или прогон. Ключи вне схемы, например `assistantIds` прежнего списка ассистентов, пропускаются.
+ */
+export function readAgentSessionSettingsSection(raw: unknown): AgentSessionSettingsSectionDto {
+  const stored = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const shape = agentSettingsAgentSessionSectionSchema.shape;
+  return Object.fromEntries(
+    (Object.keys(shape) as (keyof typeof shape)[]).map((key) => {
+      const parsed = shape[key].safeParse(stored[key]);
+      return [key, parsed.success ? parsed.data : null];
+    }),
+  ) as AgentSessionSettingsSectionDto;
+}
+
+/**
+ * Действующие настройки сессий агента из сохранённого jsonb: заданное администратором, остальное — по умолчанию.
+ * Битое или устаревшее значение не роняет прогон: поле, не прошедшее проверку, берётся по умолчанию.
+ */
+export function resolveAgentSessionSettings(raw: unknown): AgentSessionSettingsResolved {
+  const section = readAgentSessionSettingsSection(raw);
+  return Object.fromEntries(
+    (Object.keys(agentSessionFallbacks) as AgentSessionNumericKey[]).map((key) => [
+      key,
+      (key in section ? section[key as AgentSessionAdminKey] : null) ?? agentSessionFallbacks[key],
+    ]),
+  ) as AgentSessionSettingsResolved;
+}
 
 export const updateAgentSettingsConfigSchema = z.object({
   main: agentSettingsMainSectionSchema.optional(),
   runtimeLimits: agentSettingsRuntimeLimitsSectionSchema.optional(),
-  overloadControl: agentSettingsOverloadControlSectionSchema.optional(),
-  runRecovery: agentSettingsRunRecoverySectionSchema.optional(),
-  resilience: agentSettingsResilienceSectionSchema.optional(),
-  workflowDebug: agentSettingsWorkflowDebugSectionSchema.optional(),
-  kbPrefetch: agentSettingsKbPrefetchSectionSchema.optional(),
-  toolRag: agentSettingsToolRagSectionSchema.optional(),
-  toolClusterRouting: agentSettingsToolClusterRoutingSectionSchema.optional(),
-  replyLibraries: agentSettingsReplyLibrariesSectionSchema.optional(),
+  workflowCodeExec: agentSettingsWorkflowCodeExecSectionSchema.optional(),
+  chatRouter: agentSettingsChatRouterSectionSchema.optional(),
+  answerGrounding: agentSettingsAnswerGroundingSectionSchema.optional(),
+  answerQuality: agentSettingsAnswerQualitySectionSchema.optional(),
   smalltalk: agentSettingsSmalltalkSectionSchema.optional(),
+  modelPool: agentSettingsModelPoolSectionSchema.optional(),
+  agentSession: agentSettingsAgentSessionSectionSchema.optional(),
 }).refine((value) => (
   value.main !== undefined ||
   value.runtimeLimits !== undefined ||
-  value.overloadControl !== undefined ||
-  value.runRecovery !== undefined ||
-  value.resilience !== undefined ||
-  value.workflowDebug !== undefined ||
-  value.kbPrefetch !== undefined ||
-  value.toolRag !== undefined ||
-  value.toolClusterRouting !== undefined ||
-  value.replyLibraries !== undefined ||
-  value.smalltalk !== undefined
+  value.workflowCodeExec !== undefined ||
+  value.chatRouter !== undefined ||
+  value.answerGrounding !== undefined ||
+  value.answerQuality !== undefined ||
+  value.smalltalk !== undefined ||
+  value.modelPool !== undefined ||
+  value.agentSession !== undefined
 ), {
   message: "At least one agent settings section must be provided.",
 });
@@ -627,24 +537,27 @@ export const agentSettingsConfigSchema = z.object({
   main: z.object({
     agentDefaultModelId: z.string().trim(),
     fastPathModelId: z.string().trim(),
-    reasoningMode: z.enum(agentReasoningModeValues),
-    debugTraceEnabled: z.boolean(),
   }),
   runtimeLimits: agentSettingsRuntimeLimitsSectionSchema,
-  overloadControl: agentSettingsOverloadControlSectionSchema,
-  runRecovery: agentSettingsRunRecoverySectionSchema,
-  resilience: agentSettingsResilienceSectionSchema,
-  workflowDebug: agentSettingsWorkflowDebugSectionSchema,
-  kbPrefetch: agentSettingsKbPrefetchSectionSchema,
-  toolRag: agentSettingsToolRagSectionSchema,
-  toolClusterRouting: agentSettingsToolClusterRoutingSectionSchema,
+  workflowCodeExec: agentSettingsWorkflowCodeExecSectionSchema,
+  chatRouter: agentSettingsChatRouterSectionSchema,
+  answerGrounding: agentSettingsAnswerGroundingSectionSchema,
+  answerQuality: agentSettingsAnswerQualitySectionSchema,
   smalltalk: z.object({
     phrases: z.array(z.string().trim().min(1)).default([]),
   }),
-  replyLibraries: agentSettingsReplyLibrariesSectionSchema,
-  // Reasoning-конфиг СОХРАНЁННОЙ основной модели агента (или null). Необязательно: обратная
-  // совместимость со старым клиентом. Для несохранённого выбора в пикере — отдельный эндпоинт.
-  modelReasoningConfig: modelReasoningConfigSchema.nullable().optional(),
+  modelPool: agentSettingsModelPoolSectionSchema,
+  agentSession: agentSettingsAgentSessionSectionSchema,
+  // Модель, которую наследуют ПУСТЫЕ селекты агента («По умолчанию») — эффективный дефолт
+  // ассистентов. Селекты показывают её имя и следуют за сменой дефолта без пересохранения.
+  inheritedDefaultModel: z
+    .object({
+      modelId: z.string(),
+      displayName: z.string().nullable(),
+      providerName: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export type AgentCapabilityCatalogQueryDto = z.infer<typeof agentCapabilityCatalogQuerySchema>;
@@ -652,14 +565,12 @@ export type AgentCapabilityCatalogItemDto = z.infer<typeof agentCapabilityCatalo
 export type AgentCapabilityCatalogResponseDto = z.infer<typeof agentCapabilityCatalogResponseSchema>;
 export type AgentSettingsMainSectionDto = z.infer<typeof agentSettingsConfigSchema>["main"];
 export type AgentSettingsRuntimeLimitsSectionDto = z.infer<typeof agentSettingsConfigSchema>["runtimeLimits"];
-export type AgentSettingsOverloadControlSectionDto = z.infer<typeof agentSettingsConfigSchema>["overloadControl"];
-export type AgentSettingsRunRecoverySectionDto = z.infer<typeof agentSettingsConfigSchema>["runRecovery"];
-export type AgentSettingsResilienceSectionDto = z.infer<typeof agentSettingsConfigSchema>["resilience"];
-export type AgentSettingsWorkflowDebugSectionDto = z.infer<typeof agentSettingsConfigSchema>["workflowDebug"];
-export type AgentSettingsKbPrefetchSectionDto = z.infer<typeof agentSettingsConfigSchema>["kbPrefetch"];
-export type AgentSettingsToolRagSectionDto = z.infer<typeof agentSettingsConfigSchema>["toolRag"];
-export type AgentSettingsToolClusterRoutingSectionDto = z.infer<typeof agentSettingsConfigSchema>["toolClusterRouting"];
+export type AgentSettingsWorkflowCodeExecSectionDto = z.infer<typeof agentSettingsConfigSchema>["workflowCodeExec"];
+export type AgentSettingsChatRouterSectionDto = z.infer<typeof agentSettingsConfigSchema>["chatRouter"];
+export type AgentSettingsAnswerGroundingSectionDto = z.infer<typeof agentSettingsConfigSchema>["answerGrounding"];
+export type AgentSettingsAnswerQualitySectionDto = z.infer<typeof agentSettingsConfigSchema>["answerQuality"];
 export type AgentSettingsSmalltalkSectionDto = z.infer<typeof agentSettingsConfigSchema>["smalltalk"];
-export type AgentSettingsReplyLibrariesSectionDto = z.infer<typeof agentSettingsConfigSchema>["replyLibraries"];
+export type AgentSettingsModelPoolSectionDto = z.infer<typeof agentSettingsConfigSchema>["modelPool"];
+export type AgentSettingsAgentSessionSectionDto = z.infer<typeof agentSettingsConfigSchema>["agentSession"];
 export type AgentSettingsConfigDto = z.infer<typeof agentSettingsConfigSchema>;
 export type UpdateAgentSettingsConfigDto = z.infer<typeof updateAgentSettingsConfigSchema>;

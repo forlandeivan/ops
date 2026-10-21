@@ -64,13 +64,7 @@ export const ANSWER_QUALITY_JUDGE_PROMPT_VERSION = "2026-09-14.v1";
 /** Потолок глубины очереди — константа кода, не настройка (решение 2в). */
 export const ANSWER_QUALITY_QUEUE_CAP = 5_000;
 
-export const answerQualityRanges = {
-  workerConcurrency: { min: 1, max: 8 },
-  threshold: { min: 0, max: 1 },
-  claimsRetentionDays: { min: 7, max: 400 },
-} as const;
-
-/** Дефолты кода: NULL в `unica_chat_config` = «Авто» = это значение. */
+/** Дефолты кода. Из настроек приходят только режим и видимость (`answerQualityLevels`). */
 export const answerQualityDefaults = {
   mode: "judge" as AnswerQualityMode,
   judgeModelId: null as string | null,
@@ -79,7 +73,8 @@ export const answerQualityDefaults = {
   partialThreshold: 0.5,
   visibility: "everyone" as AnswerQualityVisibility,
   claimsRetentionDays: 90,
-  costMode: "platform" as AnswerQualityCostMode,
+  // За проверку всегда платит пространство (решение владельца 21.10.2026).
+  costMode: "workspace" as AnswerQualityCostMode,
   arenaJudgeEnabled: true,
   arenaJudgeModelId: null as string | null,
 };
@@ -235,45 +230,66 @@ export function mapArenaReviewToQualityVerdict(review: {
   }
 }
 
-// --- Админ-настройки (секция `answerQuality` конфига настроек агента) ---
+// --- Админ-настройка «Проверка ответов» (ревизия «Настроек агента» 21.10.2026) ---
+// Одна ручка из четырёх положений вместо десяти. Хранится в двух колонках `unica_chat_config`
+// (`answer_quality_mode`, `answer_quality_visibility`): NULL = «Авто» = отметка для всех. Модель судьи — быстрая
+// служебная, пороги, параллельность и срок хранения — константы кода, за проверку всегда платит пространство.
+
+/**
+ * - `off` — проверки нет;
+ * - `stats` — дешёвые сигналы без модели, отметка не показывается, копится статистика;
+ * - `admins` / `everyone` — судья на каждом ответе с источниками, отметку видят администраторы или все.
+ */
+export const answerQualityLevels = ["off", "stats", "admins", "everyone"] as const;
+export type AnswerQualityLevel = (typeof answerQualityLevels)[number];
 
 export const answerQualitySettingsSchema = z.object({
-  mode: z.enum(answerQualityModes).nullable().default(null),
-  judgeModelId: z.string().trim().min(1).nullable().default(null),
-  workerConcurrency: z
-    .number()
-    .int()
-    .min(answerQualityRanges.workerConcurrency.min)
-    .max(answerQualityRanges.workerConcurrency.max)
-    .nullable()
-    .default(null),
-  supportedThreshold: z
-    .number()
-    .min(answerQualityRanges.threshold.min)
-    .max(answerQualityRanges.threshold.max)
-    .nullable()
-    .default(null),
-  partialThreshold: z
-    .number()
-    .min(answerQualityRanges.threshold.min)
-    .max(answerQualityRanges.threshold.max)
-    .nullable()
-    .default(null),
-  visibility: z.enum(answerQualityVisibilities).nullable().default(null),
-  claimsRetentionDays: z
-    .number()
-    .int()
-    .min(answerQualityRanges.claimsRetentionDays.min)
-    .max(answerQualityRanges.claimsRetentionDays.max)
-    .nullable()
-    .default(null),
-  costMode: z.enum(answerQualityCostModes).nullable().default(null),
-  arenaJudgeEnabled: z.boolean().nullable().default(null),
-  arenaJudgeModelId: z.string().trim().min(1).nullable().default(null),
+  level: z.enum(answerQualityLevels).nullable().default(null),
 });
 export type AnswerQualitySettingsDto = z.infer<typeof answerQualitySettingsSchema>;
 
-/** Эффективные настройки после подстановки дефолтов (`null` → `answerQualityDefaults`). */
+/** Положение ручки → режим проверки и видимость отметки, как их читают постановка и воркер. */
+export function answerQualityLevelToStored(level: AnswerQualityLevel | null): {
+  mode: AnswerQualityMode | null;
+  visibility: AnswerQualityVisibility | null;
+} {
+  switch (level) {
+    case "off":
+      return { mode: "off", visibility: null };
+    case "stats":
+      return { mode: "signals", visibility: "nobody" };
+    case "admins":
+      return { mode: "judge", visibility: "admins" };
+    case "everyone":
+      return { mode: "judge", visibility: "everyone" };
+    default:
+      return { mode: null, visibility: null };
+  }
+}
+
+/** Сохранённые режим и видимость → положение ручки; оба NULL = «Авто» (null). */
+export function answerQualityStoredToLevel(
+  mode: AnswerQualityMode | null | undefined,
+  visibility: AnswerQualityVisibility | null | undefined,
+): AnswerQualityLevel | null {
+  if (!mode && !visibility) {
+    return null;
+  }
+  const effectiveMode = mode ?? answerQualityDefaults.mode;
+  if (effectiveMode === "off") {
+    return "off";
+  }
+  if (effectiveMode === "signals") {
+    return "stats";
+  }
+  const effectiveVisibility = visibility ?? answerQualityDefaults.visibility;
+  if (effectiveVisibility === "admins") {
+    return "admins";
+  }
+  return effectiveVisibility === "nobody" ? "stats" : "everyone";
+}
+
+/** Эффективные настройки проверки: режим и видимость — из ручки, остальное — константы кода. */
 export interface ResolvedAnswerQualityConfig {
   mode: AnswerQualityMode;
   judgeModelId: string | null;
@@ -287,25 +303,14 @@ export interface ResolvedAnswerQualityConfig {
   arenaJudgeModelId: string | null;
 }
 
-export function resolveAnswerQualityConfigFromSettings(
-  settings: Partial<AnswerQualitySettingsDto> | null | undefined,
-): ResolvedAnswerQualityConfig {
-  const supportedThreshold = settings?.supportedThreshold ?? answerQualityDefaults.supportedThreshold;
-  const partialThreshold = Math.min(
-    settings?.partialThreshold ?? answerQualityDefaults.partialThreshold,
-    supportedThreshold,
-  );
+export function resolveAnswerQualityConfigFromStored(stored: {
+  mode?: AnswerQualityMode | null;
+  visibility?: AnswerQualityVisibility | null;
+} | null | undefined): ResolvedAnswerQualityConfig {
   return {
-    mode: settings?.mode ?? answerQualityDefaults.mode,
-    judgeModelId: settings?.judgeModelId ?? answerQualityDefaults.judgeModelId,
-    workerConcurrency: settings?.workerConcurrency ?? answerQualityDefaults.workerConcurrency,
-    supportedThreshold,
-    partialThreshold,
-    visibility: settings?.visibility ?? answerQualityDefaults.visibility,
-    claimsRetentionDays: settings?.claimsRetentionDays ?? answerQualityDefaults.claimsRetentionDays,
-    costMode: settings?.costMode ?? answerQualityDefaults.costMode,
-    arenaJudgeEnabled: settings?.arenaJudgeEnabled ?? answerQualityDefaults.arenaJudgeEnabled,
-    arenaJudgeModelId: settings?.arenaJudgeModelId ?? answerQualityDefaults.arenaJudgeModelId,
+    ...answerQualityDefaults,
+    mode: stored?.mode ?? answerQualityDefaults.mode,
+    visibility: stored?.visibility ?? answerQualityDefaults.visibility,
   };
 }
 
