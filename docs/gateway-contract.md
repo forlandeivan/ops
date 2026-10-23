@@ -83,6 +83,19 @@ bearer `UNICA_JANITOR_GATEWAY_TOKEN` (fallback `UNICA_JANITOR_RUNTIME_TOKEN` —
 URL или токен пуст → ops завершается с понятной ошибкой: доменную операцию исполнить нечем.
 
 - `GET /health` — без токена; `{status, tokenConfigured}`.
+- `POST /agent-session-folders/purge` — body `{olderThanDays:1..3650, limit:1..5000, dryRun:boolean}`;
+  ответ `200 {ok:true,purged:number,remaining:number}` с целыми неотрицательными счётчиками.
+  `purged` — фактически удалённые папки (не больше limit), `remaining` — оставшиеся просроченные.
+  Preview вызывает endpoint один раз с `dryRun:true`, требует `purged:0`, показывает `remaining`;
+  удаление повторяет порции без offset до remaining=0, остановки или лимита порций.
+  Исполнение идёт только через владельца, PG-fallback отсутствует. Ошибки/неподдерживаемый endpoint,
+  неверный JSON и отсутствие прогресса не превращаются в успешный нулевой результат; уже подтверждённое
+  удаление предыдущих порций сохраняется в журнале при последующей ошибке.
+  Требуется совместимый agent с `/v1/session-folders/purge`; наличие HTTP readiness его не доказывает.
+  Агент считает только обычные UUID-папки завершённых сессий, строго старше срока, с подтверждённой
+  доставкой результата и без аренды. Недоставленные результаты и активные сессии сохраняются. Записи БД,
+  checkpoints и песочницы этот RPC не удаляет. Занятость уборщика или небезопасный корень — 409;
+  заблокированные/неудаляемые папки остаются в remaining и повторяются следующим проходом.
 - `POST /chat-attachments/purge-artifacts` — body `{workspaceId, attachment: {id, chatId,
   filename, mimeType, storageKey, documentVersion, derivedManifestObjectKey, previewObjectKey}}`;
   удаляет объект и все производные (превью/манифест/шарды). `200 {ok:true}`.

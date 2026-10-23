@@ -53,6 +53,9 @@ describe("janitor task registry", () => {
         // (pg.agent_execution_events.logs) оставлены opt-in.
         "pg.agent_execution_events.debug_payloads",
         "pg.agent_executions",
+        // SEC-08.2: session history and working folders follow the shared retention policy.
+        "pg.agent_sessions",
+        "agent.session_folders",
         // Следы публичного API: до 1.1.0 их не чистила ни одна политика, поэтому реестр
         // заданий и ключи повтора росли бессрочно. Включены из коробки — удаляются только
         // задания старше 90 дней (вызывающий их уже не опрашивает) и УЖЕ истёкшие ключи
@@ -75,6 +78,7 @@ describe("janitor task registry", () => {
         "pg.ingest_unit_outcomes",
         // Суточные агрегаты журнала приёма (волна 5): сводные числа, 400 дней, как у учёта публичного API.
         "pg.ingest_stage_stats_day",
+        "pg.directory_sync_events",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию

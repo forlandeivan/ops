@@ -78,7 +78,6 @@ import type {
 import type {
   AnswerQualityCheckStatus,
   AnswerQualityClaim,
-  AnswerQualityCostMode,
   AnswerQualityJobStatus,
   AnswerQualityMode,
   AnswerQualitySkipReason,
@@ -3559,12 +3558,15 @@ export const UNICA_EMBEDDING_RESPONSE_CONFIG: EmbeddingResponseConfig = {
  * платформенная директива `math_latex` (`packages/llm-client-core/src/platform-directives.ts`) и только там,
  * где ответ рендерим мы сами. Дублировать её сюда нельзя: во внешних каналах и текстовых
  * ответах RAG формулы уехали бы сырыми долларами, а в чат пришли бы дважды.
+ *
+ * Про фрагменты базы знаний здесь тоже ни слова: промпт провайдера уходит и в обычный чат, где
+ * фрагментов нет. Инструкцию к ним ставит блок «Контекст» (`RETRIEVED_CONTEXT_INSTRUCTION`).
  */
 export const DEFAULT_LLM_REQUEST_CONFIG = {
   modelField: "model",
   messagesField: "messages",
   systemPrompt:
-    "Ты — помощник для базы знаний. Отвечай на вопросы пользователя на основе предоставленных фрагментов контента. Если в фрагментах нет ответа, честно сообщи об этом.",
+    "Ты — полезный ассистент. Отвечай точно и по существу. Если не знаешь ответа или не уверен в нём, честно скажи об этом.",
   additionalBodyFields: {
     stream: false,
   },
@@ -3914,190 +3916,28 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default(sql`'{}'::jsonb`),
-  // Режим reasoning для агентских запусков (значение из reasoningModes); null = по умолчанию модели
-  // (inputCapabilities.reasoning.defaultMode). Применяется через провайдерский reasoningMapping —
-  // тем же механизмом, что чат (buildReasoningRequestBodyPatch).
-  agentReasoningMode: text("agent_reasoning_mode"),
-  // Debug-трейс запусков агента: при включении журнал пишет полные payload (LLM-дельты по
-  // раундам, скрипты code.execute, stdout). Тяжёлые данные, очистка по политике janitor (срок задаёт админ).
-  agentDebugTraceEnabled: boolean("agent_debug_trace_enabled").notNull().default(false),
-  agentMaxSteps: integer("agent_max_steps").notNull().default(32),
-  agentMaxToolCalls: integer("agent_max_tool_calls").notNull().default(32),
+  // Срок шага ИИ в сценариях без своего срока. Остальные лимиты прежнего агента удалены миграцией 0402.
   agentTimeoutSec: integer("agent_timeout_sec").notNull().default(600),
-  // Лимит токенов ответа на один LLM-вызов агента. NULL = «Авто» (потолок модели
-  // models.max_completion_tokens, иначе runtime-дефолт); число = явный override с клампом.
-  agentMaxCompletionTokens: integer("agent_max_completion_tokens"),
-  // --- Задача 5.1: контроль перегрузки (overload control). Все поля NULL = «Авто» (env-дефолт/
-  // выключено); число — явный админ-override. Модель: per-РЕПЛИКА лимиты (прокидываются в рантайм,
-  // защищают контейнер) vs ГЛОБАЛЬНЫЕ Redis-квоты на Node (справедливость между тенантами). ---
-  // Per-реплика (Фаза 1): лимит ОДНОВРЕМЕННЫХ агент-прогонов/code-exec на один контейнер рантайма;
-  // прокидывается per-request как runtimeCapacity, при перегрузке рантайм отвечает 503 + Retry-After.
-  agentMaxConcurrentRuns: integer("agent_max_concurrent_runs"),
-  agentMaxConcurrentCodeExec: integer("agent_max_concurrent_code_exec"),
-  // Retry-After (сек), который рантайм отдаёт при перегрузке; база backoff для переочереди на Node.
-  agentCapacityRetryAfterSec: integer("agent_capacity_retry_after_sec"),
-  // Бюджет ПОВТОРОВ переочереди одного шага агента из-за back-pressure (503/квота) до честного отказа
-  // «занято». Защита от бесконечной переочереди. NULL = дефолт.
-  agentMaxCapacityRetries: integer("agent_max_capacity_retries"),
-  // Глобальная (cross-instance, Redis) квота: потолок ОДНОВРЕМЕННЫХ агент-диспатчей на ВОРКСПЕЙС.
-  // Тенант не «голодит» других. NULL/0 = выключено.
-  agentMaxConcurrentRunsPerWorkspace: integer("agent_max_concurrent_runs_per_workspace"),
-  // Глобальный (Redis) token-bucket бюджета ПОВТОРОВ на воркспейс: ёмкость и скорость пополнения
-  // (токенов/мин). Ограничивает скорость ретраев, чтобы они не превращались в самоусиление перегрузки.
-  // capacity NULL/0 = выключено.
-  agentRetryBucketCapacity: integer("agent_retry_bucket_capacity"),
-  agentRetryBucketRefillPerMin: integer("agent_retry_bucket_refill_per_min"),
-  // --- Задача 5.2: возобновление после сбоя (resume recovery). Все поля NULL = «Авто» (env-дефолт);
-  // число — явный админ-override. Управляют сторожем зависших агент-прогонов (agent-run-lifecycle-
-  // watchdog): как часто опрашивать (интервал) и через сколько молчания heartbeat прогон считается
-  // зависшим и переводится в честный терминальный статус. Cross-instance состояние (heartbeat-отметки,
-  // idempotency-реестр) — durable в Postgres. ---
-  agentRunWatchdogIntervalSec: integer("agent_run_watchdog_interval_sec"),
-  agentRunStaleTimeoutSec: integer("agent_run_stale_timeout_sec"),
-  // Reaper залипшего pending идемпотентности (gap-analysis 5.2, AGENT-IDEMPOTENCY-STUCK-PENDING):
-  // возраст pending-строки (по started_at) старше этого порога → прогон заведомо мёртв, строка
-  // реапится классифицированно (safe_retry→failed / unknown→abandoned). NULL = «Авто» (env-дефолт).
-  agentPendingReapTtlSec: integer("agent_pending_reap_ttl_sec"),
-  // Интерим-ретенция реестра идемпотентности (AGENT-IDEMPOTENCY-RETENTION): тот же reaper удаляет
-  // completed/failed старше N дней (pending/abandoned не трогает). Интерим до janitor-сервиса.
-  agentIdempotencyRetentionDays: integer("agent_idempotency_retention_days"),
-  // --- Волна 1 D: устойчивость агента (runtime resilience). Все поля NULL = «Авто» (env-дефолт
-  // Python-реплики); число — явный админ-override, 0 = kill-switch механизма. Прокидываются
-  // per-request как runtimeResilience (паттерн runtimeCapacity 5.1), применяет Python
-  // (app/agent/resilience.py). ---
-  // Бюджет guard-повторов (повтор шага по вердикту guard'ов) на один прогон.
-  agentGuardRetryMaxPerRun: integer("agent_guard_retry_max_per_run"),
-  // Guard-повтор допускается, только если до дедлайна прогона осталось не меньше этого (сек).
-  agentGuardRetryMinRemainingSec: integer("agent_guard_retry_min_remaining_sec"),
-  // Запас Python-дедлайна к таймауту прогона (сек): рантайм завершает работу раньше отсечки Node.
-  agentDeadlineSafetyMarginSec: integer("agent_deadline_safety_margin_sec"),
-  // Новый LLM-раунд стартует, только если до дедлайна осталось не меньше этого (сек).
-  agentRoundMinRemainingSec: integer("agent_round_min_remaining_sec"),
-  // Лимит эха предыдущего ответа в промпте guard-повтора (символов). 0 = не эхировать.
-  agentRetryEchoMaxChars: integer("agent_retry_echo_max_chars"),
-  // --- Волна 4: исполнение прогона (run execution). Все поля NULL = «Авто» (env-дефолт реплики /
-  // документированный fallback). Триаж усилия и TTL продолжения применяет Node, режим мульти-tool-call
-  // и параметры стадии plan-and-execute уезжают per-request как runtimeExecution в Python. ---
-  // Триаж усилия: профиль бюджета по детерминированным сигналам запроса (потолок — лимиты узла).
-  agentEffortTriageEnabled: boolean("agent_effort_triage_enabled"),
-  // Режим обработки нескольких tool-call за один раунд: off | strict | read_parallel.
-  agentMultiToolMode: text("agent_multi_tool_mode"),
-  // Стадия «спланируй → исполни» для одной сложной многошаговой задачи и её параметры.
-  agentPlanExecuteEnabled: boolean("agent_plan_execute_enabled"),
-  agentPlanExecuteMaxReplans: integer("agent_plan_execute_max_replans"),
-  agentPlanExecuteMaxSteps: integer("agent_plan_execute_max_steps"),
-  // Сколько живёт состояние прерванного прогона, пригодное для продолжения (сек). 0 = выключено.
-  agentRunContinuationTtlSec: integer("agent_run_continuation_ttl_sec"),
-  // Сколько живёт неопубликованный черновик до принудительного снятия reaper'ом (сек). З-33: файлы
-  // агента публикуются только в конце прогона, переключатель режима снят миграцией 0373.
-  agentArtifactDraftTtlSec: integer("agent_artifact_draft_ttl_sec"),
-  // --- Step-debug D6.4: устойчивость пошаговой отладки сценариев. NULL = «Авто» (env-дефолт
-  // WORKFLOW_DEBUG_MAX_OPEN_SESSIONS_PER_WORKSPACE → fallback); 0 = kill-switch (arm отклоняется).
-  // Кап живых дебаг-сессий (armed/capturing/active) на пространство — дебаг не голодит прод-ёмкость. ---
-  workflowDebugMaxOpenSessionsPerWorkspace: integer("workflow_debug_max_open_sessions_per_workspace"),
-  // Ожидание вызова армированной сессией (сек). NULL = «Авто» (env WORKFLOW_DEBUG_ARM_TTL_SECONDS →
-  // fallback 300). После захвата входа не применяется.
-  workflowDebugArmTtlSeconds: integer("workflow_debug_arm_ttl_seconds"),
-  // Жизнь дебаг-сессии после захвата (сек), скользящая от последней активности автора. NULL = «Авто»
-  // (env WORKFLOW_DEBUG_SESSION_TTL_SECONDS → fallback 3600).
-  workflowDebugSessionTtlSeconds: integer("workflow_debug_session_ttl_seconds"),
-  // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace +
-  // personal, системный сид и starters ассистентов не учитываются. NULL = «Авто»
-  // (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет создания новых. Превышение → 409.
+  // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace + personal, системный
+  // сид и starters ассистентов не учитываются. NULL = «Авто» (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет
+  // создания новых. Превышение → 409.
   promptsInstanceLimit: integer("prompts_instance_limit"),
-  // --- W2 Code Node (workflow-code-node-roadmap.md): лимиты code runner'а узла «Код (JavaScript)».
-  // Все поля NULL = «Авто» (env WORKFLOW_CODE_RUNNER_* workflow-сервиса → дефолт); число — явный
-  // админ-override. Читает workflow-сервис через gateway getUnicaChatConfig. Память и конкурентность
-  // в external-режиме принадлежат env sidecar-контейнера — админ-значения применяются к internal-пулу. ---
+  // --- W2 Code Node: лимиты code runner'а узла «Код (JavaScript)». NULL = «Авто» (дефолт кода workflow-сервиса). Память
+  // в external-режиме задаёт развёртывание раннера — админ-значение применяется к internal-пулу. ---
   workflowCodeExecTimeoutMs: integer("workflow_code_exec_timeout_ms"),
   workflowCodeExecMemoryMb: integer("workflow_code_exec_memory_mb"),
-  workflowCodeExecConcurrency: integer("workflow_code_exec_concurrency"),
-  workflowCodeExecMaxPayloadMb: integer("workflow_code_exec_max_payload_mb"),
-  workflowCodeExecQueueWaitMs: integer("workflow_code_exec_queue_wait_ms"),
-  // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание),
-  // false = только платформенный админ. Шов под будущую лицензионную проверку.
+  // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание), false = только
+  // платформенный админ. Шов под будущую лицензионную проверку.
   workflowCodeExecDelegationEnabled: boolean("workflow_code_exec_delegation_enabled"),
-  // --- Узел checklist_verify: параллельность батч-судьи /v1/checklist-judge. NULL = «Авто»
-  // (дефолт КОДА 4 — env-фолбэка нет намеренно); число — явный админ-override (1..16). Читает
-  // workflow-сервис через getUnicaChatConfig и шлёт per-request полем concurrency (паттерн
-  // runtimeCapacity). Применяется без рестарта. ---
-  workflowChecklistJudgeConcurrency: integer("workflow_checklist_judge_concurrency"),
-  // --- Волна 2A: Prefetch базы знаний. Все поля NULL = «Авто» (env-дефолт/fallback); значение — явный
-  // админ-override. Управляют автоподгрузкой документов привязанной БЗ в контекст агента до первого
-  // вызова модели (Node-сторона, resolveKbPrefetchConfig; в Python не прокидывается). ---
-  // Мастер-рубильник prefetch: NULL = env/дефолт (вкл), true/false — явный override.
-  agentKbPrefetchEnabled: boolean("agent_kb_prefetch_enabled"),
-  // Бюджет символов на инлайн содержимого документов. 0 = kill-switch: в контекст идёт только оглавление.
-  agentKbPrefetchCharLimit: integer("agent_kb_prefetch_char_limit"),
-  // Максимум документов, инлайнящихся в контекст.
-  agentKbPrefetchMaxDocs: integer("agent_kb_prefetch_max_docs"),
-  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md,
-  // миграция 0360). Все поля NULL = «Авто» (дефолт кода, env-фолбэка нет намеренно); значение —
-  // явный админ-override. Роутер (chat_router_*): kill-switch LLM-слоя, отдельная модель (NULL =
-  // fast-path модель агента), таймаут решения и порог уверенности для эскалации в агента. Гейт
-  // честности: директивы «только с опорой на источники / источников нет — скажи прямо» и
-  // детерминированная пост-проверка чисел и цитат. ---
-  chatRouterEnabled: boolean("chat_router_enabled"),
-  chatRouterModelId: text("chat_router_model_id"),
-  chatRouterTimeoutMs: integer("chat_router_timeout_ms"),
-  // Д-57 (0367): пауза модели после транспортного сбоя, с; NULL = «Авто» (дефолт кода), 0 = выключено.
-  chatRouterCooldownSec: integer("chat_router_cooldown_sec"),
+  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md). NULL = «Авто»
+  // (дефолт кода). Модель роутера, выключатель, таймаут и пауза удалены миграцией 0402: выбор пути идёт на быстрой
+  // служебной модели. ---
   chatRouterAgentConfidenceThresholdPct: integer("chat_router_agent_confidence_threshold_pct"),
   chatAnswerGroundingGateEnabled: boolean("chat_answer_grounding_gate_enabled"),
-  chatAnswerGroundingPostcheckEnabled: boolean("chat_answer_grounding_postcheck_enabled"),
-  /**
-   * Системные базы знаний (служебное пространство `workspaces.is_system`) участвуют в ответах Уники AI
-   * (0362, волна С2). NULL = «Авто» = включено, когда такие базы есть; false — явное отключение.
-   */
-  systemKnowledgeEnabled: boolean("system_knowledge_enabled"),
-  // --- Проверка достоверности после ответа (docs/rag-answer-quality-metrics-strategy-2026-09.md,
-  // миграция 0372). Все поля NULL = «Авто» (дефолты `answerQualityDefaults` в shared/answer-quality.ts);
-  // значение — явный админ-override из карточки «Честность ответов чата». ---
+  // --- Проверка ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md): одна ручка из четырёх положений хранится
+  // в режиме и видимости (shared/answer-quality.ts, `answerQualityLevelToStored`). NULL = «Авто» = отметка для всех. ---
   answerQualityMode: text("answer_quality_mode").$type<AnswerQualityMode>(),
-  answerQualityJudgeModelId: text("answer_quality_judge_model_id"),
-  answerQualityWorkerConcurrency: integer("answer_quality_worker_concurrency"),
-  answerQualitySupportedThreshold: doublePrecision("answer_quality_supported_threshold"),
-  answerQualityPartialThreshold: doublePrecision("answer_quality_partial_threshold"),
   answerQualityVisibility: text("answer_quality_visibility").$type<AnswerQualityVisibility>(),
-  answerQualityClaimsRetentionDays: integer("answer_quality_claims_retention_days"),
-  answerQualityCostMode: text("answer_quality_cost_mode").$type<AnswerQualityCostMode>(),
-  answerQualityArenaJudgeEnabled: boolean("answer_quality_arena_judge_enabled"),
-  answerQualityArenaJudgeModelId: text("answer_quality_arena_judge_model_id"),
-  // --- Блок 8, задача 8.1: Tool-RAG (поиск по инструментам), Phase A. Все поля NULL = «Авто» (env-дефолт/
-  // документированный fallback), значение — явный админ-override. Сужают ВНЕШНИЙ хвост (mcpTools/actions/
-  // operations) ретривалом перед показом модели; ниже порога промоции ретривал — no-op (нулевой регресс). ---
-  // Мастер-рубильник: NULL = env/дефолт (вкл), true/false — явный override.
-  agentToolRagEnabled: boolean("agent_tool_rag_enabled"),
-  // Порог промоции: применять ретривал только при числе резидентных внешних инструментов >= порога.
-  agentToolRagPromotionThreshold: integer("agent_tool_rag_promotion_threshold"),
-  // Жёсткий потолок кандидатного набора (адаптивная глубина не превышает).
-  agentToolRagMaxCandidates: integer("agent_tool_rag_max_candidates"),
-  // Адаптивная глубина: добор кандидатов, пока RRF-скор >= ratio * (скор лидера). Храним целые проценты.
-  agentToolRagAdaptiveScoreRatioPct: integer("agent_tool_rag_adaptive_score_ratio_pct"),
-  // RRF-константа слияния sparse+dense (как в search-профилях КБ).
-  agentToolRagRrfK: integer("agent_tool_rag_rrf_k"),
-  // Веса половин слияния (целые проценты; сервер нормализует к сумме 1).
-  agentToolRagBm25WeightPct: integer("agent_tool_rag_bm25_weight_pct"),
-  agentToolRagVectorWeightPct: integer("agent_tool_rag_vector_weight_pct"),
-  // Recall-floor офлайн-гейта приёмки (наблюдаемость/документированный порог; рантайм не применяет).
-  agentToolRagRecallFloorPct: integer("agent_tool_rag_recall_floor_pct"),
-  // Возраст (сек), после которого запись индекса считается stale (сверщик/индикатор).
-  agentToolRagStaleAgeSec: integer("agent_tool_rag_stale_age_sec"),
-  // Интервал фонового хэш-сверщика (reconciler), сек.
-  agentToolRagReconcilerIntervalSec: integer("agent_tool_rag_reconciler_interval_sec"),
-  // TTL tenant-scoped кэша результата ретривала (getCache), сек. 0 = не кэшировать.
-  agentToolRagCacheTtlSec: integer("agent_tool_rag_cache_ttl_sec"),
-  // --- Блок 8, задача 8.2: реестр кластеров + двухстадийный (домен→инструмент) роутинг поверх 8.1. Все поля
-  // NULL = «Авто» (env-дефолт/fallback), значение — явный админ-override. Реестр кластеров и членство —
-  // data-driven из каталога (БЕЗ таблицы); здесь только тюнеры конвейера. ---
-  // Мастер-рубильник иерархического роутинга: NULL = env/дефолт, true/false — явный override.
-  agentToolClusterRoutingEnabled: boolean("agent_tool_cluster_routing_enabled"),
-  // Число кластеров-кандидатов стадии 1 (жёсткий потолок адаптивной глубины доменного отбора).
-  agentToolClusterMaxCandidateClusters: integer("agent_tool_cluster_max_candidate_clusters"),
-  // Адаптивная глубина стадии 1: добор кластеров, пока RRF-скор >= ratio * (скор лидера). Целые проценты.
-  agentToolClusterStage1ScoreRatioPct: integer("agent_tool_cluster_stage1_score_ratio_pct"),
-  // Бюджет пере-запроса (operation agent.find_tools): потолок кандидатов при higher-recall повторе.
-  agentToolClusterRequeryMaxCandidates: integer("agent_tool_cluster_requery_max_candidates"),
   agentSmalltalkPhrases: text("agent_smalltalk_phrases").notNull().default(""),
   systemPrompt: text("system_prompt").notNull().default(""),
   temperature: doublePrecision("temperature").default(0.7),
@@ -8739,6 +8579,12 @@ export const skillRegistry = pgTable(
     // Catalog-сервис (зеркало builds.sourceWorkspaceId/originUserId). NULL = системный/глобальный скилл.
     sourceWorkspaceId: varchar("source_workspace_id"),
     originUserId: varchar("origin_user_id"),
+    // Build (Сборка): навык, который поставила сборка, обновляется её новой версией и руками не правится.
+    originRef: varchar("origin_ref", { length: 255 }),
+    originContentHash: varchar("origin_content_hash", { length: 128 }),
+    sourceBuildId: varchar("source_build_id", { length: 255 }),
+    sourceBuildVersion: varchar("source_build_version", { length: 100 }),
+    managedByBuild: boolean("managed_by_build").notNull().default(false),
     metadata: jsonb("metadata").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -8747,6 +8593,7 @@ export const skillRegistry = pgTable(
       statusIdx: index("skill_registry_status_idx").on(table.status, table.updatedAt),
       sourceIdx: index("skill_registry_source_idx").on(table.source, table.updatedAt),
       sourceWorkspaceIdx: index("skill_registry_source_workspace_idx").on(table.sourceWorkspaceId),
+      sourceBuildIdx: index("skill_registry_source_build_idx").on(table.sourceBuildId),
   }),
 );
 
@@ -8785,7 +8632,8 @@ export type SkillVersion = typeof skillVersions.$inferSelect;
 export type SkillVersionInsert = typeof skillVersions.$inferInsert;
 
 // Файлы навыка-папки: у навыка пространства нет папки на диске, поэтому его материалы лежат здесь.
-// Только текст: навык пространства пишет пользователь, исполняемому коду в нём места нет.
+// Текст — в `content`; бинарный файл (шаблон документа) — в хранилище пространства `workspace_id` по `storage_key`.
+// Ровно одно из двух (CHECK `skill_resource_files_body_chk`). Исполняемому коду в навыке пространства места нет.
 export const skillResourceFiles = pgTable(
   "skill_resource_files",
   {
@@ -8794,7 +8642,11 @@ export const skillResourceFiles = pgTable(
       .notNull()
       .references(() => skillVersions.id, { onDelete: "cascade" }),
     path: varchar("path", { length: 400 }).notNull(),
-    content: text("content").notNull(),
+    content: text("content"),
+    storageKey: varchar("storage_key", { length: 1024 }),
+    mimeType: varchar("mime_type", { length: 255 }),
+    // Пространство, в бакете которого лежит бинарный файл. Без FK — как `skill_registry.source_workspace_id`.
+    workspaceId: varchar("workspace_id"),
     sizeBytes: integer("size_bytes").notNull(),
     contentHash: varchar("content_hash", { length: 128 }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -10168,6 +10020,309 @@ export const workspaceMemberRoleAssignments = pgTable(
 
 export type WorkspaceMemberRoleAssignment = typeof workspaceMemberRoleAssignments.$inferSelect;
 export type WorkspaceMemberRoleAssignmentInsert = typeof workspaceMemberRoleAssignments.$inferInsert;
+
+// ─── Корпоративный каталог (LDAP / AD) ──────────────────────────────────────
+// docs/dev/directory-login.md. Подключение и политика каталога, правила «группа → пространство + роль»,
+// связь учётки Уники с записью каталога, участие, выданное правилами, и журнал синхронизаций.
+
+export const directoryPresets = ["active_directory", "freeipa", "generic_ldap"] as const;
+export type DirectoryPreset = (typeof directoryPresets)[number];
+export const directoryTlsModes = ["ldaps", "starttls"] as const;
+export type DirectoryTlsMode = (typeof directoryTlsModes)[number];
+export const directoryUnmatchedPolicies = ["default_workspace", "deny"] as const;
+export type DirectoryUnmatchedPolicy = (typeof directoryUnmatchedPolicies)[number];
+export const directoryPersonalWorkspaceModes = ["off", "on_first_login"] as const;
+export type DirectoryPersonalWorkspaceMode = (typeof directoryPersonalWorkspaceModes)[number];
+export const directorySyncKinds = ["delta", "full"] as const;
+export type DirectorySyncKind = (typeof directorySyncKinds)[number];
+export const directorySyncTriggers = ["schedule", "manual"] as const;
+export type DirectorySyncTrigger = (typeof directorySyncTriggers)[number];
+export const directorySyncStatuses = ["running", "succeeded", "failed", "halted_threshold"] as const;
+export type DirectorySyncStatus = (typeof directorySyncStatuses)[number];
+export const localLoginModes = ["all", "admins_only"] as const;
+export type LocalLoginMode = (typeof localLoginModes)[number];
+
+export type DirectoryHost = { host: string; port: number };
+/** Группа каталога: неизменный идентификатор, текущий DN и имя для показа. */
+export type DirectoryGroupRef = { id: string; dn: string; name: string };
+/** Переопределения атрибутов пресета: ключ — роль атрибута (login, email, …), значение — имя в каталоге. */
+export type DirectoryAttributeMap = Partial<Record<string, string>>;
+/** Курсор прохода изменений: номер USN конкретного контроллера (AD) или метка времени (остальные). */
+export type DirectoryDeltaCursor = { host: string; usn: string } | { timestamp: string };
+export type DirectorySyncCounters = {
+  seen: number;
+  created: number;
+  updated: number;
+  disabled: number;
+  enabled: number;
+  membershipsAdded: number;
+  membershipsRemoved: number;
+  conflicts: number;
+  limitBlocked: number;
+};
+export type DirectorySyncIssue = {
+  kind: "email_conflict" | "member_limit" | "invalid_entry";
+  externalId?: string;
+  userId?: string;
+  workspaceId?: string;
+  detail?: string;
+};
+
+export const directoryProviders = pgTable("directory_providers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  displayName: text("display_name").notNull(),
+  isEnabled: boolean("is_enabled").notNull().default(false),
+  /** Каталог для логина без домена (`ivanov`). */
+  isDefault: boolean("is_default").notNull().default(false),
+  preset: text("preset").$type<DirectoryPreset>().notNull().default("active_directory"),
+  hosts: jsonb("hosts").$type<DirectoryHost[]>().notNull().default(sql`'[]'::jsonb`),
+  tlsMode: text("tls_mode").$type<DirectoryTlsMode>().notNull().default("ldaps"),
+  caPem: text("ca_pem").notNull().default(""),
+  bindDn: text("bind_dn").notNull().default(""),
+  /** Пароль служебной учётки, зашифрованный `server/secret-storage.ts`. */
+  bindPasswordEncrypted: text("bind_password_encrypted").notNull().default(""),
+  userBaseDn: text("user_base_dn").notNull().default(""),
+  userFilter: text("user_filter").notNull().default(""),
+  groupBaseDn: text("group_base_dn").notNull().default(""),
+  /** UPN-суффиксы и NetBIOS-имена, по которым логин направляется в этот каталог. */
+  loginDomains: jsonb("login_domains").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  attributeMap: jsonb("attribute_map").$type<DirectoryAttributeMap>().notNull().default(sql`'{}'::jsonb`),
+  accessGroup: jsonb("access_group").$type<DirectoryGroupRef | null>(),
+  unmatchedPolicy: text("unmatched_policy").$type<DirectoryUnmatchedPolicy>().notNull().default("deny"),
+  defaultWorkspaceId: varchar("default_workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+  defaultRoleId: varchar("default_role_id").references(() => workspaceRoles.id, { onDelete: "set null" }),
+  personalWorkspaceMode: text("personal_workspace_mode")
+    .$type<DirectoryPersonalWorkspaceMode>()
+    .notNull()
+    .default("off"),
+  syncIntervalMinutes: integer("sync_interval_minutes").notNull().default(15),
+  fullSyncHour: integer("full_sync_hour").notNull().default(3),
+  fullSyncMinute: integer("full_sync_minute").notNull().default(0),
+  disableThresholdPercent: integer("disable_threshold_percent").notNull().default(10),
+  loginFailuresLimit: integer("login_failures_limit").notNull().default(5),
+  connectTimeoutMs: integer("connect_timeout_ms").notNull().default(5000),
+  operationTimeoutMs: integer("operation_timeout_ms").notNull().default(10000),
+  poolSize: integer("pool_size").notNull().default(4),
+  deltaCursor: jsonb("delta_cursor").$type<DirectoryDeltaCursor | null>(),
+  lastFullSyncAt: timestamp("last_full_sync_at", { withTimezone: true }),
+  lastDeltaSyncAt: timestamp("last_delta_sync_at", { withTimezone: true }),
+  syncRequestedKind: text("sync_requested_kind").$type<DirectorySyncKind | null>(),
+  /** Когда синхронизацию поставили в очередь: по нему экран замечает, что запуск задерживается. */
+  syncRequestedAt: timestamp("sync_requested_at", { withTimezone: true }),
+  /** Разовое разрешение превысить порог отключений в следующей полной сверке. */
+  syncForceThreshold: boolean("sync_force_threshold").notNull().default(false),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => ({
+  presetChk: check("directory_providers_preset_chk", sql`${table.preset} IN ('active_directory', 'freeipa', 'generic_ldap')`),
+  tlsModeChk: check("directory_providers_tls_mode_chk", sql`${table.tlsMode} IN ('ldaps', 'starttls')`),
+  unmatchedPolicyChk: check(
+    "directory_providers_unmatched_policy_chk",
+    sql`${table.unmatchedPolicy} IN ('default_workspace', 'deny')`,
+  ),
+  personalWorkspaceModeChk: check(
+    "directory_providers_personal_workspace_mode_chk",
+    sql`${table.personalWorkspaceMode} IN ('off', 'on_first_login')`,
+  ),
+  defaultWorkspaceIdx: index("directory_providers_default_workspace_idx").on(table.defaultWorkspaceId),
+  defaultRoleIdx: index("directory_providers_default_role_idx").on(table.defaultRoleId),
+}));
+
+export type DirectoryProvider = typeof directoryProviders.$inferSelect;
+export type DirectoryProviderInsert = typeof directoryProviders.$inferInsert;
+
+export const directoryGroupRules = pgTable(
+  "directory_group_rules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    groupExternalId: text("group_external_id").notNull(),
+    groupDn: text("group_dn").notNull(),
+    groupName: text("group_name").notNull(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    roleId: varchar("role_id")
+      .notNull()
+      .references(() => workspaceRoles.id, { onDelete: "cascade" }),
+    createdByAdminId: varchar("created_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    ruleUniq: uniqueIndex("directory_group_rules_uq").on(
+      table.providerId,
+      table.groupExternalId,
+      table.workspaceId,
+      table.roleId,
+    ),
+    workspaceIdx: index("directory_group_rules_workspace_idx").on(table.workspaceId),
+    roleIdx: index("directory_group_rules_role_idx").on(table.roleId),
+  }),
+);
+
+export type DirectoryGroupRule = typeof directoryGroupRules.$inferSelect;
+export type DirectoryGroupRuleInsert = typeof directoryGroupRules.$inferInsert;
+
+export const userDirectoryLinks = pgTable(
+  "user_directory_links",
+  {
+    userId: varchar("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    dn: text("dn").notNull(),
+    login: text("login").notNull(),
+    upn: text("upn").notNull().default(""),
+    /** Истина, только если `users.email` взят из почтового атрибута каталога: на остальные адреса письма не шлём. */
+    emailIsMailbox: boolean("email_is_mailbox").notNull().default(false),
+    attributesHash: text("attributes_hash").notNull().default(""),
+    /** Учётку заблокировал каталог: синхронизация вправе снять блокировку, ручную — нет. */
+    disabledByDirectory: boolean("disabled_by_directory").notNull().default(false),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    externalUniq: uniqueIndex("user_directory_links_provider_external_uq").on(table.providerId, table.externalId),
+  }),
+);
+
+export type UserDirectoryLink = typeof userDirectoryLinks.$inferSelect;
+export type UserDirectoryLinkInsert = typeof userDirectoryLinks.$inferInsert;
+
+/** Участие и роли, выданные правилами каталога: синхронизация снимает только их. */
+export const directoryMembershipGrants = pgTable(
+  "directory_membership_grants",
+  {
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    roleId: varchar("role_id")
+      .notNull()
+      .references(() => workspaceRoles.id, { onDelete: "cascade" }),
+    /** Правило создало само участие, а не только добавило роль к уже существующему. */
+    createdMembership: boolean("created_membership").notNull().default(false),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.providerId, table.userId, table.workspaceId, table.roleId] }),
+    userIdx: index("directory_membership_grants_user_idx").on(table.userId),
+    workspaceIdx: index("directory_membership_grants_workspace_idx").on(table.workspaceId),
+    roleIdx: index("directory_membership_grants_role_idx").on(table.roleId),
+  }),
+);
+
+export type DirectoryMembershipGrant = typeof directoryMembershipGrants.$inferSelect;
+export type DirectoryMembershipGrantInsert = typeof directoryMembershipGrants.$inferInsert;
+
+export const directorySyncRuns = pgTable(
+  "directory_sync_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<DirectorySyncKind>().notNull(),
+    trigger: text("trigger").$type<DirectorySyncTrigger>().notNull(),
+    status: text("status").$type<DirectorySyncStatus>().notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    counters: jsonb("counters").$type<Partial<DirectorySyncCounters>>().notNull().default(sql`'{}'::jsonb`),
+    issues: jsonb("issues").$type<DirectorySyncIssue[]>().notNull().default(sql`'[]'::jsonb`),
+    errorMessage: text("error_message"),
+  },
+  (table) => ({
+    providerStartedIdx: index("directory_sync_runs_provider_started_idx").on(table.providerId, table.startedAt),
+  }),
+);
+
+export type DirectorySyncRun = typeof directorySyncRuns.$inferSelect;
+export type DirectorySyncRunInsert = typeof directorySyncRuns.$inferInsert;
+
+/** Политика входа уровня установки (singleton). */
+export const authPolicySettings = pgTable("auth_policy_settings", {
+  id: varchar("id").primaryKey().default("auth_policy_settings_singleton"),
+  localLoginMode: text("local_login_mode").$type<LocalLoginMode>().notNull().default("all"),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => ({
+  localLoginModeChk: check("auth_policy_settings_local_login_mode_chk", sql`${table.localLoginMode} IN ('all', 'admins_only')`),
+}));
+
+export type AuthPolicySettings = typeof authPolicySettings.$inferSelect;
+
+export const directorySyncEventOrigins = ["sync", "login", "admin"] as const;
+export type DirectorySyncEventOrigin = (typeof directorySyncEventOrigins)[number];
+export const directorySyncEventKinds = [
+  "user_created",
+  "user_updated",
+  "user_disabled",
+  "user_enabled",
+  "user_linked",
+  "access_granted",
+  "access_revoked",
+  "issue",
+] as const;
+export type DirectorySyncEventKind = (typeof directorySyncEventKinds)[number];
+/** Подробности события: изменённые поля «было → стало», причина выдачи доступа, текст замечания. */
+export type DirectorySyncEventDetails = {
+  login?: string;
+  changes?: Array<{ field: "fullName" | "email" | "login" | "dn"; from: string; to: string }>;
+  reason?: "rule" | "default_workspace" | "disabled" | "out_of_scope" | "rule_removed";
+  groupName?: string;
+  email?: string;
+  emailIsMailbox?: boolean;
+  issue?: string;
+};
+
+/** Журнал событий каталога. Срок хранения — политика janitor `pg.directory_sync_events`. */
+export const directorySyncEvents = pgTable(
+  "directory_sync_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => directoryProviders.id, { onDelete: "cascade" }),
+    runId: varchar("run_id").references(() => directorySyncRuns.id, { onDelete: "set null" }),
+    origin: text("origin").$type<DirectorySyncEventOrigin>().notNull(),
+    kind: text("kind").$type<DirectorySyncEventKind>().notNull(),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ФИО и логин на момент события: журнал читаем и после удаления учётной записи. */
+    userLabel: text("user_label").notNull().default(""),
+    workspaceId: varchar("workspace_id"),
+    workspaceName: text("workspace_name"),
+    roleName: text("role_name"),
+    details: jsonb("details").$type<DirectorySyncEventDetails>().notNull().default(sql`'{}'::jsonb`),
+    actorId: varchar("actor_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    originChk: check("directory_sync_events_origin_chk", sql`${table.origin} IN ('sync', 'login', 'admin')`),
+    kindChk: check(
+      "directory_sync_events_kind_chk",
+      sql`${table.kind} IN ('user_created', 'user_updated', 'user_disabled', 'user_enabled', 'user_linked', 'access_granted', 'access_revoked', 'issue')`,
+    ),
+    runKindIdx: index("directory_sync_events_run_kind_idx").on(table.runId, table.kind, table.occurredAt),
+    providerOccurredIdx: index("directory_sync_events_provider_occurred_idx").on(table.providerId, table.occurredAt),
+    userOccurredIdx: index("directory_sync_events_user_occurred_idx").on(table.userId, table.occurredAt),
+    occurredAtIdx: index("directory_sync_events_occurred_at_idx").on(table.occurredAt),
+  }),
+);
+
+export type DirectorySyncEvent = typeof directorySyncEvents.$inferSelect;
+export type DirectorySyncEventInsert = typeof directorySyncEvents.$inferInsert;
 
 // ─── Resource-Level Access Control (Epic 6) ─────────────────────────────────
 

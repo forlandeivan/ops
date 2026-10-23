@@ -41,6 +41,7 @@ import {
 } from "./tasks/s3-retention-task";
 import { runQdrantOrphanGcTask } from "./tasks/qdrant-orphan-gc-task";
 import { runStorageOrphanTask } from "./tasks/storage-orphan-task";
+import { runAgentSessionFoldersTask } from "./tasks/agent-session-folders-task";
 
 // Тип сторов живёт в default-stores; реэкспорт сохраняет прежние импорты потребителей.
 export type { JanitorStores } from "./default-stores";
@@ -256,7 +257,14 @@ export async function runPolicy(
   let report: CleanupRunReportDto | null = null;
 
   try {
-    if (storageOf(task) === "qdrant") {
+    if (storageOf(task) === "agent_session_folders") {
+      const result = await runAgentSessionFoldersTask(
+        { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize }, stores.agentSessionFolders,
+        { maxBatchesPerRun: MAX_BATCHES_PER_RUN, shouldAbort, onProgress: (count) => { matched += count; deleted += count; } },
+      );
+      aborted = result.aborted;
+      if (result.reason === "batch_limit") errorMessage = "достигнут лимит порций; хвост доберёт следующий тик";
+    } else if (storageOf(task) === "qdrant") {
       const result = await runQdrantOrphanGcTask(
         { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
         stores.qdrant,
@@ -337,7 +345,7 @@ export async function runPolicy(
 
     if (aborted) {
       status = "partial";
-      errorMessage = "прерван при остановке процесса; хвост доберёт следующий тик";
+      errorMessage ??= "прерван при остановке процесса; хвост доберёт следующий тик";
     }
   } catch (error) {
     status = "failed";
@@ -635,6 +643,13 @@ export async function previewPolicy(
     return started.started ? { matched, started: true } : { matched, started: false, reason: started.reason };
   }
 
+  if (storageOf(taskDef) === "agent_session_folders") {
+    const result = await runAgentSessionFoldersTask(
+      { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize }, stores.agentSessionFolders,
+      { maxBatchesPerRun: 1 },
+    );
+    return { matched: result.matched };
+  }
   if (storageOf(taskDef) === "qdrant") {
     const result = await runQdrantOrphanGcTask(
       { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },

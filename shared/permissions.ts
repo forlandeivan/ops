@@ -209,7 +209,8 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     // Управление MCP-инструментами у участника снято (план remote-MCP §5.4): политики инструментов
     // чужих серверов и их подключение — у менеджера и владельца.
     P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE,
-    P.VECTOR_VIEW, P.VECTOR_MANAGE,
+    // Векторный API (страница «Векторные коллекции») у участника снят (SEC-05): он отдавал сырые фрагменты
+    // баз и позволял удалять коллекции пространства — это инструмент владельца и менеджера.
     P.DASHBOARD_VIEW,
     P.BUILDS_VIEW, P.BUILDS_INSTALL,
     P.SKILLS_AUTHOR,
@@ -226,7 +227,6 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.WORKSPACE_VIEW, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW,
     P.MEMBERS_VIEW,
     P.INTEGRATIONS_VIEW,
-    P.VECTOR_VIEW,
     P.DASHBOARD_VIEW,
     P.BUILDS_VIEW,
     P.GLOBAL_VARIABLES_READ,
