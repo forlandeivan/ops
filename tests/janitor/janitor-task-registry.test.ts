@@ -28,7 +28,7 @@ describe("janitor task registry", () => {
     }
   });
 
-  it("enables exactly the absorbed-job + agent-journal policies by default; other new coverage stays off", () => {
+  it("enables exactly the expected policies by default; opt-in coverage stays off", () => {
     const enabled = JANITOR_TASKS.filter((task) => task.defaultEnabled).map((task) => task.key).sort();
     expect(enabled).toEqual(
       [
@@ -80,6 +80,8 @@ describe("janitor task registry", () => {
         // Журнал действий участников (0397): строка на действие, без уборки рос бы бессрочно; 400 дней —
         // решение владельца, отчёт за год с запасом.
         "pg.user_action_events",
+        // История синхронизации корпоративного каталога — 90 дней.
+        "pg.directory_sync_events",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
@@ -89,6 +91,18 @@ describe("janitor task registry", () => {
     // новые storage-политики по типу — выключены (opt-in)
     expect(getJanitorTask("s3.chat_attachments.audio_video")?.defaultEnabled).toBe(false);
     expect(getJanitorTask("s3.chat_attachments.other")?.defaultEnabled).toBe(false);
+  });
+
+  it("enables directory sync event retention for 90 days by occurrence time", () => {
+    expect(getJanitorTask("pg.directory_sync_events")).toMatchObject({
+      category: "events",
+      storage: "postgres",
+      action: "delete_rows",
+      table: "directory_sync_events",
+      timeColumn: "occurred_at",
+      defaultEnabled: true,
+      defaultRetentionDays: 90,
+    });
   });
 
   it("exposes exactly two policies per heavy domain (logs + run rows)", () => {
