@@ -170,9 +170,7 @@ export function defaultStores(): JanitorStores {
   return {
     pg: createPgRetentionStore(),
     s3: {
-      chat_attachments: createChatAttachmentS3Store(undefined, {
-        enqueueCleanup: (input) => cleanupJobs.enqueue(input),
-      }),
+      chat_attachments: createChatAttachmentS3Store(),
       chat_feedback_attachments: createChatFeedbackAttachmentS3Store(undefined, {
         deleteObject: (workspaceId, storageKey) => gateway.deleteWorkspaceFile(workspaceId, storageKey),
       }),

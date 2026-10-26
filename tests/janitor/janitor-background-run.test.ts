@@ -281,3 +281,70 @@ describe("фоновые прогоны уборки", { timeout: 30_000 }, () =
     });
   });
 });
+
+describe("ручной запуск файловой политики «по базе»", { timeout: 30_000 }, () => {
+  const AV_KEY = "s3.chat_attachments.audio_video";
+
+  it("отвечает сразу running, батчи идут в фоне, итог — в журнал", async () => {
+    const orchestrator = await loadOrchestrator();
+    const task = getJanitorTask(AV_KEY)!;
+    mocks.listResolvedPolicies.mockResolvedValue([
+      orphanPolicy({
+        resourceKey: AV_KEY,
+        label: task.label,
+        category: task.category,
+        action: task.action,
+        table: task.table,
+        retentionDays: 5,
+        batchSize: 10,
+        runsInBackground: false,
+      }),
+    ]);
+    const gate = deferred();
+    const { stores } = makeStores();
+    let batches = 0;
+    stores.s3.chat_attachments = {
+      countMatches: vi.fn(async () => 0),
+      purgeBatch: vi.fn(async () => {
+        await gate.promise;
+        batches += 1;
+        return batches === 1 ? { deleted: 10, freedBytes: 1000 } : { deleted: 3, freedBytes: 300 };
+      }),
+    };
+
+    const outcome = await orchestrator.runPolicyNow(AV_KEY, stores, "admin-1");
+
+    expect(outcome).toEqual({ status: "running", matched: 0, deleted: 0, freedBytes: 0 });
+    expect(mocks.recordRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceKey: AV_KEY, mode: "enforce", triggeredBy: "manual", triggeredByAdminId: "admin-1" }),
+    );
+    expect(mocks.recordRun).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await orchestrator.waitForBackgroundRuns();
+
+    expect(batches).toBe(2);
+    expect(mocks.recordRunFinish).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ status: "success", matchedCount: 13, deletedCount: 13, freedBytes: 1300 }),
+    );
+    expect(mocks.releaseLock).toHaveBeenCalled();
+  });
+
+  it("предпросмотр сообщает, что счёт упёрся в объём одного прогона", async () => {
+    const orchestrator = await loadOrchestrator();
+    const task = getJanitorTask(AV_KEY)!;
+    mocks.listResolvedPolicies.mockResolvedValue([
+      orphanPolicy({ resourceKey: AV_KEY, table: task.table, action: task.action, batchSize: 10, runsInBackground: false }),
+    ]);
+    const { stores } = makeStores();
+    stores.s3.chat_attachments = {
+      countMatches: vi.fn(async ({ cap }: { cap: number }) => cap),
+      purgeBatch: vi.fn(async () => ({ deleted: 0, freedBytes: 0 })),
+    };
+
+    const preview = await orchestrator.previewPolicy(AV_KEY, stores, "admin-1");
+
+    expect(preview).toEqual({ matched: 500, capped: true });
+  });
+});

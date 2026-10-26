@@ -156,6 +156,8 @@ export interface CleanupPolicyDto {
  */
 export interface CleanupPreviewResultDto {
   matched: number;
+  /** Счёт упёрся в объём одного прогона: кандидатов не меньше matched, остаток доберут следующие прогоны. */
+  capped?: boolean;
   started?: boolean;
   reason?: "already_running" | "locked";
 }

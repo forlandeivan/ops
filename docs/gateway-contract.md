@@ -58,15 +58,17 @@ Durable-очередь ручной и плановой очистки опис�
 ### Runtime-RPC (`JANITOR_RUNTIME_PORT`, bearer `UNICA_JANITOR_RUNTIME_TOKEN`, timingSafeEqual)
 
 - `GET /v1/health` — без токена; `{status, tokenConfigured}`.
-- `POST /v1/cleanup-policies/:key/preview` — body `{actorId?: string}`; dry-run; `200 {matched}`.
+- `POST /v1/cleanup-policies/:key/preview` — body `{actorId?: string}`; dry-run; `200 {matched, capped?}`.
+  `capped: true` — счёт упёрся в объём одного прогона (`JANITOR_MAX_BATCHES_PER_RUN` × размер батча).
   Фоновая политика (`backgroundRun` в реестре, сейчас только `s3.storage.orphans`) запускает
   проверку и отвечает сразу: `200 {matched, started, reason?}`. `matched` — число из последнего
   прогона; `started=false` с `reason` ∈ already_running|locked — проверка уже идёт здесь или в
   другом экземпляре. Отчёт и итог пишутся в `cleanup_run_log`, `actorId` — инициатор в журнале.
 - `POST /v1/cleanup-policies/:key/run-now` — body `{actorId?: string}`; синхронно до конца
   прогона; `200 {status, matched, deleted, freedBytes}` (`status` ∈ success|partial|failed|
-  skipped_locked|skipped_disabled). Фоновая политика отвечает сразу `status: running`, при занятом
-  локе — `skipped_locked` с `reason`.
+  skipped_locked|skipped_disabled). Фоновая политика и файловая политика «по базе» (`storage: s3`)
+  отвечают сразу `status: running`, при занятом локе — `skipped_locked` с `reason`; итог — в
+  `cleanup_run_log`.
 - Ошибки: токен не задан → `503 JANITOR_RUNTIME_TOKEN_NOT_CONFIGURED`; неверный →
   `401 JANITOR_RUNTIME_UNAUTHORIZED`; неизвестный ключ → `404 CLEANUP_POLICY_ERROR`.
 

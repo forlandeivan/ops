@@ -3,6 +3,10 @@ import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import type { CleanupMode } from "@shared/cleanup-policies";
 
+import {
+  FILE_ARTIFACT_CLEANUP_PAYLOAD_VERSION,
+  FILE_ARTIFACT_CLEANUP_REDRIVE_DELAY_MS,
+} from "../file-artifact-cleanup-job-store";
 import { computeCutoff, DEFAULT_MAX_BATCHES_PER_RUN } from "./pg-retention-task";
 
 /**
@@ -161,9 +165,37 @@ function whereFragment(filter: S3CandidateFilter, cutoff: Date) {
   return sql`${base}${isNull}${mime}`;
 }
 
+/** Адрес Files-копии вложения: участвует в ключе задания и в снимке. */
+const attachmentExternalUri = sql`(SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id)`;
+
+/**
+ * SQL-двойник scheduledCleanupIdempotencyKey для строки chat_attachments: тот же формат
+ * повторяют каскадные PG-политики (pg-retention-task). Расхождение формата сломало бы
+ * и защиту от повторной постановки, и ON CONFLICT.
+ */
+const janitorAttachmentKey = sql`'janitor:' || md5(concat_ws(chr(31),
+  chat_attachments.workspace_id,
+  'chat_attachment',
+  chat_attachments.id,
+  COALESCE(chat_attachments.storage_key, ''),
+  COALESCE(${attachmentExternalUri}, ''),
+  COALESCE(chat_attachments.document_version::text, '')
+))`;
+
+/**
+ * Ключ, под которым снимок вложения ставит монолит при удалении чата, пространства или
+ * пользователя (file-artifact-cleanup-job-service, enqueueAttachmentSnapshots). Строки
+ * мягко удалённого чата живут до физического удаления и попадают в кандидаты.
+ */
+const monolithAttachmentKey = sql`'chat-attachment:' || chat_attachments.id || ':v' || chat_attachments.document_version::text`;
+
 /**
  * Вложения чата не планируются повторно и не планируются во время активной ASR.
- * Финальная проверка повторяется исполнителем очереди и монолитом, поэтому гонка
+ * Снимок вложения ставят под двумя ключами — уборщик и монолит, — поэтому проверка
+ * ищет задание точечно по уникальному индексу idempotency_key, а не перебором payload
+ * всей очереди на каждую строку-кандидата. Сверка адресов в payload сохраняет прежний
+ * смысл: новый файл под тем же ключом монолита снова попадёт в очередь.
+ * Финальная проверка ASR повторяется исполнителем очереди и монолитом, поэтому гонка
  * между SELECT и стартом транскрибации безопасна.
  */
 function chatAttachmentQueueGuardFragment() {
@@ -171,11 +203,9 @@ function chatAttachmentQueueGuardFragment() {
     AND NOT EXISTS (
       SELECT 1
       FROM file_artifact_cleanup_jobs AS cleanup
-      WHERE COALESCE(cleanup.payload->>'attachmentId', '') = chat_attachments.id
+      WHERE cleanup.idempotency_key IN (${janitorAttachmentKey}, ${monolithAttachmentKey})
         AND COALESCE(cleanup.payload->>'storageKey', '') = chat_attachments.storage_key
-        AND COALESCE(cleanup.payload->>'externalUri', '') = COALESCE((
-          SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id
-        ), '')
+        AND COALESCE(cleanup.payload->>'externalUri', '') = COALESCE(${attachmentExternalUri}, '')
         AND NOT (cleanup.status = 'error' AND cleanup.next_retry_at IS NULL)
     )
     AND NOT EXISTS (
@@ -186,9 +216,7 @@ function chatAttachmentQueueGuardFragment() {
           (chat_attachments.file_id IS NOT NULL AND completion.file_id = chat_attachments.file_id)
           OR (
             completion.external_file_uri IS NOT NULL
-            AND completion.external_file_uri = (
-              SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id
-            )
+            AND completion.external_file_uri = ${attachmentExternalUri}
           )
         )
     )
@@ -202,9 +230,7 @@ function chatAttachmentQueueGuardFragment() {
           OR execution.attachment_id::text = chat_attachments.id
           OR (
             execution.external_file_uri IS NOT NULL
-            AND execution.external_file_uri = (
-              SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id
-            )
+            AND execution.external_file_uri = ${attachmentExternalUri}
           )
         )
     )
@@ -223,38 +249,14 @@ export interface ChatAttachmentArtifactRef {
   previewObjectKey: string | null;
 }
 
-export interface ChatAttachmentCleanupSnapshot {
-  attachmentId: string;
-  chatId: string;
-  fileId: string | null;
-  filename: string;
-  mimeType: string | null;
-  storageKey: string;
-  documentVersion: number;
-  derivedManifestObjectKey: string | null;
-  previewObjectKey: string | null;
-  externalUri: string | null;
-}
-
-/** Доменные операции удаления вложений чата — боевая сборка в default-stores.ts. */
-export interface ChatAttachmentS3StoreDeps {
-  /** Создаёт durable snapshot; фактическое удаление исполняется через gateway монолита. */
-  enqueueCleanup: (params: {
-    workspaceId: string;
-    resourceType: "chat_attachment";
-    resourceId: string;
-    reason: string;
-    payload: ChatAttachmentCleanupSnapshot;
-  }) => Promise<boolean>;
-}
-
 /**
  * Стор для вложений чата (таблица chat_attachments). Политика только ставит durable
  * snapshot в очередь; единый worker позже вызывает версионированный gateway монолита.
+ * Батч ставится одним стейтментом: отбор кандидатов и INSERT в очередь — в одном CTE,
+ * без отдельного запроса на каждое вложение.
  */
 export function createChatAttachmentS3Store(
   database: S3Executor = db as unknown as S3Executor,
-  deps: ChatAttachmentS3StoreDeps,
 ): S3RetentionStore {
   return {
     async countMatches({ filter, cutoff, cap }) {
@@ -267,46 +269,61 @@ export function createChatAttachmentS3Store(
 
     async purgeBatch({ filter, cutoff, batchSize }) {
       const timeId = sql.identifier(filter.timeColumn);
-      const query = sql`SELECT id, workspace_id, chat_id, file_id, filename, mime_type, storage_key,
-          document_version, derived_manifest_object_key, preview_object_key, size_bytes,
-          (SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id) AS external_uri
-        FROM chat_attachments WHERE ${whereFragment(
-        filter,
-        cutoff,
-      )}${chatAttachmentQueueGuardFragment()} ORDER BY ${timeId} LIMIT ${batchSize}`;
+      const reason = filter.policyKey ?? "scheduled_retention";
+      const query = sql`
+        WITH candidates AS MATERIALIZED (
+          SELECT id, workspace_id, chat_id, file_id, filename, mime_type, storage_key,
+            document_version, derived_manifest_object_key, preview_object_key, size_bytes,
+            ${attachmentExternalUri} AS external_uri,
+            ${janitorAttachmentKey} AS idempotency_key
+          FROM chat_attachments
+          WHERE ${whereFragment(filter, cutoff)}${chatAttachmentQueueGuardFragment()}
+          ORDER BY ${timeId}
+          LIMIT ${batchSize}
+        ), enqueued AS (
+          INSERT INTO file_artifact_cleanup_jobs (
+            idempotency_key, workspace_id, resource_type, resource_id, reason,
+            payload_version, payload, status, attempts, created_at, updated_at
+          )
+          SELECT
+            candidates.idempotency_key,
+            candidates.workspace_id,
+            'chat_attachment',
+            candidates.id,
+            ${reason},
+            ${FILE_ARTIFACT_CLEANUP_PAYLOAD_VERSION},
+            jsonb_build_object(
+              'attachmentId', candidates.id,
+              'chatId', candidates.chat_id,
+              'fileId', candidates.file_id,
+              'filename', COALESCE(candidates.filename, ''),
+              'mimeType', candidates.mime_type,
+              'storageKey', candidates.storage_key,
+              'documentVersion', COALESCE(candidates.document_version, 0),
+              'derivedManifestObjectKey', candidates.derived_manifest_object_key,
+              'previewObjectKey', candidates.preview_object_key,
+              'externalUri', candidates.external_uri
+            ),
+            'pending', 0, NOW(), NOW()
+          FROM candidates
+          ON CONFLICT (idempotency_key) DO UPDATE
+          SET status = 'pending',
+              worker_id = NULL,
+              lease_expires_at = NULL,
+              next_retry_at = NOW() + (${FILE_ARTIFACT_CLEANUP_REDRIVE_DELAY_MS} * INTERVAL '1 millisecond'),
+              updated_at = NOW()
+          WHERE file_artifact_cleanup_jobs.status = 'error'
+            AND file_artifact_cleanup_jobs.next_retry_at IS NULL
+          RETURNING idempotency_key
+        )
+        SELECT count(*)::int AS deleted, COALESCE(sum(candidates.size_bytes), 0)::bigint AS freed_bytes
+        FROM candidates
+        JOIN enqueued ON enqueued.idempotency_key = candidates.idempotency_key
+      `;
       const result = (await database.execute(query)) as { rows?: Array<Record<string, unknown>> };
-      const rows = result.rows ?? [];
-
-      let deleted = 0;
-      let freedBytes = 0;
-      for (const row of rows) {
-        const workspaceId = String(row.workspace_id);
-        const enqueued = await deps.enqueueCleanup({
-          workspaceId,
-          resourceType: "chat_attachment",
-          resourceId: String(row.id),
-          reason: filter.policyKey ?? "scheduled_retention",
-          payload: {
-            attachmentId: String(row.id),
-            chatId: String(row.chat_id),
-            fileId: row.file_id == null ? null : String(row.file_id),
-            filename: String(row.filename ?? ""),
-            mimeType: row.mime_type == null ? null : String(row.mime_type),
-            storageKey: String(row.storage_key),
-            documentVersion: toNumber(row.document_version),
-            derivedManifestObjectKey:
-              row.derived_manifest_object_key == null ? null : String(row.derived_manifest_object_key),
-            previewObjectKey: row.preview_object_key == null ? null : String(row.preview_object_key),
-            externalUri: row.external_uri == null ? null : String(row.external_uri),
-          },
-        });
-        if (enqueued) {
-          deleted += 1;
-          // Это оценка будущего освобождения; фактическую успешность показывает queue metric.
-          freedBytes += toNumber(row.size_bytes);
-        }
-      }
-      return { deleted, freedBytes };
+      const row = result.rows?.[0] ?? {};
+      // freed_bytes — оценка будущего освобождения; фактическую успешность показывает queue metric.
+      return { deleted: toNumber(row.deleted), freedBytes: toNumber(row.freed_bytes) };
     },
   };
 }

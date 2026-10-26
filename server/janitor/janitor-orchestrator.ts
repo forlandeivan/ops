@@ -157,6 +157,44 @@ function resolveReconcileRunner(
   return runner;
 }
 
+/**
+ * Ручной запуск идёт в фоне у сверки хранилища и у файловых политик «по базе»: их прогон —
+ * до maxBatches батчей с проверкой каждого файла — не укладывается в ожидание HTTP-запроса
+ * из админки. Плановый тик файловые политики по-прежнему ждёт синхронно.
+ */
+function runsManuallyInBackground(task: JanitorTaskDefinition): boolean {
+  return task.backgroundRun === true || storageOf(task) === "s3";
+}
+
+/** Исполнитель фонового прогона: сверка хранилища либо файловая политика «по базе». */
+function resolveBackgroundRunner(
+  task: JanitorTaskDefinition,
+): (stores: JanitorStores, context: ReconcileRunContext) => Promise<ReconcileRunResult> {
+  if (storageOf(task) !== "s3") {
+    return resolveReconcileRunner(task);
+  }
+  return async (stores, context) => {
+    const result = await runS3RetentionTask(
+      s3FilterOf(task),
+      { mode: context.mode, retentionDays: context.retentionDays, batchSize: context.batchSize },
+      resolveS3Store(stores, task),
+      {
+        now: context.now,
+        maxBatchesPerRun: MAX_BATCHES_PER_RUN,
+        pauseBetweenBatchesMs: BATCH_PAUSE_MS,
+        shouldAbort: context.shouldAbort,
+      },
+    );
+    return {
+      matched: result.matched,
+      deleted: result.deleted,
+      freedBytes: result.freedBytes,
+      aborted: result.aborted,
+      report: null,
+    };
+  };
+}
+
 function resolveS3Store(stores: JanitorStores, task: JanitorTaskDefinition): S3RetentionStore {
   const store = stores.s3[task.table];
   if (!store) {
@@ -408,8 +446,8 @@ export async function runPolicy(
 
 // ── Фоновые прогоны ───────────────────────────────────────────────────────────
 //
-// Сверка хранилища занимает минуты и не укладывается в синхронный вызов из админки. Такой
-// прогон стартует в фоне: журнал сразу получает строку со статусом running, по ходу — отчёт,
+// Сверка хранилища занимает минуты и не укладывается в синхронный вызов из админки; ручной
+// запуск файловой политики «по базе» — тоже (runsManuallyInBackground). Такой прогон стартует в фоне: журнал сразу получает строку со статусом running, по ходу — отчёт,
 // в конце — итог. Предпросмотр фоновой политики — такой же прогон в режиме dry_run.
 
 const backgroundRuns = new Map<string, Promise<void>>();
@@ -446,7 +484,7 @@ async function executeBackgroundRun(params: BackgroundRunParams): Promise<void> 
   let errorMessage: string | null = null;
   let result: ReconcileRunResult | null = null;
   try {
-    result = await resolveReconcileRunner(task)(stores, {
+    result = await resolveBackgroundRunner(task)(stores, {
       mode,
       retentionDays: policy.retentionDays,
       batchSize: policy.batchSize,
@@ -587,7 +625,7 @@ export async function stopBackgroundRuns(): Promise<void> {
  */
 async function reapStaleBackgroundRuns(): Promise<void> {
   for (const task of JANITOR_TASKS) {
-    if (!task.backgroundRun || backgroundRuns.has(task.key) || startingRuns.has(task.key)) {
+    if (!runsManuallyInBackground(task) || backgroundRuns.has(task.key) || startingRuns.has(task.key)) {
       continue;
     }
     const lock = await tryAcquireLock(`janitor:${task.key}`, MINUTE_MS, { failClosed: lockFailClosed() });
@@ -614,7 +652,8 @@ export async function runPolicyNow(
     return { status: "skipped_disabled", matched: 0, deleted: 0, freedBytes: 0 };
   }
   const trigger: RunPolicyTrigger = { triggeredBy: "manual", actorId };
-  if (getJanitorTask(resourceKey)?.backgroundRun) {
+  const taskDef = getJanitorTask(resourceKey);
+  if (taskDef && runsManuallyInBackground(taskDef)) {
     const started = await startPolicyInBackground(policy, stores, trigger, "enforce");
     return started.started
       ? { status: "running", matched: 0, deleted: 0, freedBytes: 0 }
@@ -673,6 +712,10 @@ export async function previewPolicy(
     return { matched: result.matched };
   }
 
+  // Счёт кандидатов упирается в объём одного прогона (maxBatches × размер батча): упёрся —
+  // значит, кандидатов не меньше, а остаток доберут следующие прогоны.
+  const runCap = MAX_BATCHES_PER_RUN * policy.batchSize;
+
   if (storageOf(taskDef) === "s3") {
     const result = await runS3RetentionTask(
       s3FilterOf(taskDef),
@@ -680,10 +723,11 @@ export async function previewPolicy(
       resolveS3Store(stores, taskDef),
       { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
     );
-    return { matched: result.matched };
+    return { matched: result.matched, ...(result.matched >= runCap ? { capped: true } : {}) };
   }
 
   let matched = 0;
+  let capped = false;
   for (const op of operationsOf(taskDef)) {
     const result = await runRetentionTask(
       op,
@@ -697,8 +741,9 @@ export async function previewPolicy(
       { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
     );
     matched += result.matched;
+    capped = capped || result.matched >= runCap;
   }
-  return { matched };
+  return { matched, ...(capped ? { capped: true } : {}) };
 }
 
 /**
