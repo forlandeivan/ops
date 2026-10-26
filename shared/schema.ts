@@ -8886,6 +8886,10 @@ export const builds = pgTable(
     latestVersion: varchar("latest_version", { length: 100 }),
     installCount: integer("install_count").notNull().default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    // Инструкция к сборке (Markdown) — одна на сборку, правится без выпуска версии; картинки — в каталожном хранилище.
+    instructionMarkdown: text("instruction_markdown"),
+    instructionUpdatedAt: timestamp("instruction_updated_at", { withTimezone: true }),
+    instructionUpdatedBy: varchar("instruction_updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
