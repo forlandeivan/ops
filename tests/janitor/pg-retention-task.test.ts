@@ -173,6 +173,34 @@ describe("runRetentionTask enforce strip_columns", () => {
     expect(store.rows.filter((row) => row.payload !== null && row.time < ageDays(30))).toHaveLength(0);
     expect(store.rows.find((row) => row.id === 100)?.payload).toBe("fresh");
   });
+
+  it("следующий батч продолжает с отметки предыдущего, а не перебирает обнулённое заново", async () => {
+    const calls: Array<string | undefined> = [];
+    const progress = [
+      { affected: 10, resumeFrom: "2026-03-01 10:00:00.123456" },
+      { affected: 10, resumeFrom: "2026-03-02 11:00:00.654321" },
+      { affected: 4, resumeFrom: "2026-03-03 12:00:00" },
+    ];
+    const store: RetentionStore = {
+      countMatches: async () => 0,
+      deleteBatch: async () => 0,
+      stripBatch: async ({ resumeFrom }) => {
+        calls.push(resumeFrom);
+        return progress[calls.length - 1];
+      },
+    };
+
+    const result = await runRetentionTask(
+      stripTask,
+      { action: "strip_columns", mode: "enforce", retentionDays: 30, batchSize: 10 },
+      store,
+      { now: NOW },
+    );
+
+    expect(result).toMatchObject({ deleted: 24, batches: 3 });
+    // Первый батч — от самых старых строк; дальше отметка идёт текстом PostgreSQL как есть.
+    expect(calls).toEqual([undefined, "2026-03-01 10:00:00.123456", "2026-03-02 11:00:00.654321"]);
+  });
 });
 
 describe("runRetentionTask enforce delete_rows", () => {

@@ -32,6 +32,8 @@ export interface DeleteBatchParams {
   cutoff: Date;
   equalsFilter?: ColumnEquals;
   batchSize: number;
+  /** Нижняя граница колонки-времени (включительно): с неё продолжает следующий батч того же прогона. */
+  resumeFrom?: string;
 }
 export interface StripBatchParams {
   table: string;
@@ -41,11 +43,22 @@ export interface StripBatchParams {
   cutoff: Date;
   equalsFilter?: ColumnEquals;
   batchSize: number;
+  /** Нижняя граница колонки-времени (включительно): с неё продолжает следующий батч того же прогона. */
+  resumeFrom?: string;
+}
+/**
+ * Итог батча с отметкой, докуда он дошёл. resumeFrom — значение колонки-времени последней
+ * взятой строки в текстовом виде PostgreSQL: обратно оно уходит без перевода в Date, иначе
+ * микросекунды и часовой пояс колонки без зоны сдвинули бы границу и батч пропустил бы строки.
+ */
+export interface BatchProgress {
+  affected: number;
+  resumeFrom: string | null;
 }
 export interface RetentionStore {
   countMatches(params: CountMatchesParams): Promise<number>;
-  deleteBatch(params: DeleteBatchParams): Promise<number>;
-  stripBatch(params: StripBatchParams): Promise<number>;
+  deleteBatch(params: DeleteBatchParams): Promise<number | BatchProgress>;
+  stripBatch(params: StripBatchParams): Promise<number | BatchProgress>;
   /**
    * Фаза A двухфазного purge (target.drainChildrenFirst): один стейтмент дренажа —
    * удаляет до batchSize ДОЧЕРНИХ строк (chat_sessions) у корней-кандидатов, чтобы
@@ -87,6 +100,10 @@ export function computeCutoff(now: Date, retentionDays: number): Date {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function progressOf(result: number | BatchProgress): BatchProgress {
+  return typeof result === "number" ? { affected: result, resumeFrom: null } : result;
 }
 
 /**
@@ -132,6 +149,11 @@ export async function runRetentionTask(
   let aborted = false;
   // Фаза A активна, пока дренажные стейтменты возвращают полный батч; неполный
   // батч означает «дренировать больше нечего» — переключаемся на фазу B (корни).
+  // Батчи идут от старых строк к новым. Обнулённые строки остаются в таблице и старше
+  // срока, поэтому без отметки каждый следующий батч заново перебирал бы всё, что обнулили
+  // предыдущие. Отметка живёт в пределах прогона: новый прогон начинает с самых старых
+  // строк и не пропустит строку, которую предыдущий не взял.
+  let resumeFrom: string | undefined;
   let draining =
     resolved.action === "delete_rows" &&
     target.drainChildrenFirst === true &&
@@ -156,7 +178,7 @@ export async function runRetentionTask(
         draining = false;
       }
     } else {
-      const affected =
+      const progress = progressOf(
         resolved.action === "delete_rows"
           ? await store.deleteBatch({
               table: target.table,
@@ -165,6 +187,7 @@ export async function runRetentionTask(
               cutoff,
               equalsFilter,
               batchSize: resolved.batchSize,
+              resumeFrom,
             })
           : await store.stripBatch({
               table: target.table,
@@ -174,7 +197,11 @@ export async function runRetentionTask(
               cutoff,
               equalsFilter,
               batchSize: resolved.batchSize,
-            });
+              resumeFrom,
+            }),
+      );
+      const affected = progress.affected;
+      resumeFrom = progress.resumeFrom ?? resumeFrom;
       deleted += affected;
       batches += 1;
       if (affected < resolved.batchSize) {
@@ -190,22 +217,22 @@ export async function runRetentionTask(
 
 type RetentionExecutor = { execute(query: SQL): Promise<unknown> };
 
-function affectedRows(result: unknown): number {
-  const typed = result as { rowCount?: number | null; rows?: unknown[] };
-  if (typeof typed.rowCount === "number") {
-    return typed.rowCount;
-  }
-  if (Array.isArray(typed.rows)) {
-    return typed.rows.length;
-  }
-  return 0;
-}
-
 function firstCount(result: unknown): number {
   const typed = result as { rows?: Array<Record<string, unknown>> };
   const raw = typed.rows?.[0]?.count;
   const parsed = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function batchProgress(result: unknown): BatchProgress {
+  const row = (result as { rows?: Array<Record<string, unknown>> }).rows?.[0];
+  const raw = row?.affected;
+  const affected = typeof raw === "number" ? raw : Number(raw);
+  const resumeFrom = row?.resume_from;
+  return {
+    affected: Number.isFinite(affected) ? affected : 0,
+    resumeFrom: typeof resumeFrom === "string" && resumeFrom.length > 0 ? resumeFrom : null,
+  };
 }
 
 function firstAffected(result: unknown): number {
@@ -529,6 +556,9 @@ export function createPgRetentionStore(
 ): RetentionStore {
   const equalsFragment = (equalsFilter?: ColumnEquals) =>
     equalsFilter ? sql` AND ${sql.identifier(equalsFilter.column)} = ${equalsFilter.value}` : sql``;
+  // Параметр без типа: PostgreSQL выводит его из колонки, поэтому текст отметки сравнивается точно.
+  const resumeFragment = (timeId: ReturnType<typeof sql.identifier>, resumeFrom?: string) =>
+    resumeFrom ? sql` AND ${timeId} >= ${resumeFrom}` : sql``;
 
   return {
     async countMatches({ table, timeColumn, cutoff, requireNonNullAny, equalsFilter, cap }) {
@@ -573,7 +603,7 @@ export function createPgRetentionStore(
       });
     },
 
-    async deleteBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize }) {
+    async deleteBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize, resumeFrom }) {
       if (table === CHUNK_SETS_TABLE) {
         return deleteSupersededChunkSets(database, { table, timeColumn, pkColumn, cutoff, batchSize });
       }
@@ -591,11 +621,21 @@ export function createPgRetentionStore(
       const timeId = sql.identifier(timeColumn);
       const pkId = sql.identifier(pkColumn);
       const equals = equalsFragment(equalsFilter);
-      const query = sql`DELETE FROM ${tableId} WHERE ${pkId} IN (SELECT ${pkId} FROM ${tableId} WHERE ${timeId} < ${cutoff}${equals} ORDER BY ${timeId} LIMIT ${batchSize})`;
-      return affectedRows(await database.execute(query));
+      const resume = resumeFragment(timeId, resumeFrom);
+      const query = sql`
+        WITH picked AS MATERIALIZED (
+          SELECT ${pkId} AS pk, ${timeId} AS at FROM ${tableId}
+          WHERE ${timeId} < ${cutoff}${equals}${resume}
+          ORDER BY ${timeId} LIMIT ${batchSize}
+        ), affected_rows AS (
+          DELETE FROM ${tableId} USING picked WHERE ${tableId}.${pkId} = picked.pk RETURNING 1
+        )
+        SELECT (SELECT count(*)::int FROM affected_rows) AS affected, (SELECT max(at)::text FROM picked) AS resume_from
+      `;
+      return batchProgress(await database.execute(query));
     },
 
-    async stripBatch({ table, timeColumn, pkColumn, columns, cutoff, equalsFilter, batchSize }) {
+    async stripBatch({ table, timeColumn, pkColumn, columns, cutoff, equalsFilter, batchSize, resumeFrom }) {
       const tableId = sql.identifier(table);
       const timeId = sql.identifier(timeColumn);
       const pkId = sql.identifier(pkColumn);
@@ -608,8 +648,18 @@ export function createPgRetentionStore(
         columns.map((column) => sql`${sql.identifier(column)} IS NOT NULL`),
         sql` OR `,
       );
-      const query = sql`UPDATE ${tableId} SET ${setList} WHERE ${pkId} IN (SELECT ${pkId} FROM ${tableId} WHERE ${timeId} < ${cutoff}${equals} AND (${nonNull}) ORDER BY ${timeId} LIMIT ${batchSize})`;
-      return affectedRows(await database.execute(query));
+      const resume = resumeFragment(timeId, resumeFrom);
+      const query = sql`
+        WITH picked AS MATERIALIZED (
+          SELECT ${pkId} AS pk, ${timeId} AS at FROM ${tableId}
+          WHERE ${timeId} < ${cutoff}${equals}${resume} AND (${nonNull})
+          ORDER BY ${timeId} LIMIT ${batchSize}
+        ), affected_rows AS (
+          UPDATE ${tableId} SET ${setList} FROM picked WHERE ${tableId}.${pkId} = picked.pk RETURNING 1
+        )
+        SELECT (SELECT count(*)::int FROM affected_rows) AS affected, (SELECT max(at)::text FROM picked) AS resume_from
+      `;
+      return batchProgress(await database.execute(query));
     },
   };
 }

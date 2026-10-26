@@ -64,11 +64,10 @@ Durable-очередь ручной и плановой очистки опис�
   проверку и отвечает сразу: `200 {matched, started, reason?}`. `matched` — число из последнего
   прогона; `started=false` с `reason` ∈ already_running|locked — проверка уже идёт здесь или в
   другом экземпляре. Отчёт и итог пишутся в `cleanup_run_log`, `actorId` — инициатор в журнале.
-- `POST /v1/cleanup-policies/:key/run-now` — body `{actorId?: string}`; синхронно до конца
-  прогона; `200 {status, matched, deleted, freedBytes}` (`status` ∈ success|partial|failed|
-  skipped_locked|skipped_disabled). Фоновая политика и файловая политика «по базе» (`storage: s3`)
-  отвечают сразу `status: running`, при занятом локе — `skipped_locked` с `reason`; итог — в
-  `cleanup_run_log`.
+- `POST /v1/cleanup-policies/:key/run-now` — body `{actorId?: string}`; прогон любой политики
+  стартует в фоне: `200 {status: running, matched: 0, deleted: 0, freedBytes: 0}`, при занятом
+  локе — `skipped_locked` с `reason` ∈ already_running|locked, неизвестный ключ — `skipped_disabled`.
+  Итог (success|partial|failed) пишется в `cleanup_run_log`.
 - Ошибки: токен не задан → `503 JANITOR_RUNTIME_TOKEN_NOT_CONFIGURED`; неверный →
   `401 JANITOR_RUNTIME_UNAUTHORIZED`; неизвестный ключ → `404 CLEANUP_POLICY_ERROR`.
 

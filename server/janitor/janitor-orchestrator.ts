@@ -157,42 +157,86 @@ function resolveReconcileRunner(
   return runner;
 }
 
-/**
- * Ручной запуск идёт в фоне у сверки хранилища и у файловых политик «по базе»: их прогон —
- * до maxBatches батчей с проверкой каждого файла — не укладывается в ожидание HTTP-запроса
- * из админки. Плановый тик файловые политики по-прежнему ждёт синхронно.
- */
-function runsManuallyInBackground(task: JanitorTaskDefinition): boolean {
-  return task.backgroundRun === true || storageOf(task) === "s3";
-}
-
-/** Исполнитель фонового прогона: сверка хранилища либо файловая политика «по базе». */
+/** Исполнитель фонового прогона: сверка хранилища либо обычный enforce-прогон политики. */
 function resolveBackgroundRunner(
   task: JanitorTaskDefinition,
 ): (stores: JanitorStores, context: ReconcileRunContext) => Promise<ReconcileRunResult> {
-  if (storageOf(task) !== "s3") {
+  if (storageOf(task) === "s3_reconcile") {
     return resolveReconcileRunner(task);
   }
   return async (stores, context) => {
-    const result = await runS3RetentionTask(
-      s3FilterOf(task),
-      { mode: context.mode, retentionDays: context.retentionDays, batchSize: context.batchSize },
-      resolveS3Store(stores, task),
-      {
-        now: context.now,
-        maxBatchesPerRun: MAX_BATCHES_PER_RUN,
-        pauseBetweenBatchesMs: BATCH_PAUSE_MS,
-        shouldAbort: context.shouldAbort,
-      },
-    );
-    return {
-      matched: result.matched,
-      deleted: result.deleted,
-      freedBytes: result.freedBytes,
-      aborted: result.aborted,
-      report: null,
-    };
+    if (context.mode !== "enforce") {
+      throw new Error(`janitor: background dry_run is supported only for storage reconcile (policy "${task.key}")`);
+    }
+    return enforcePolicy(task, context, stores, context.now, context.shouldAbort);
   };
+}
+
+interface EnforceResult {
+  matched: number;
+  deleted: number;
+  freedBytes: number;
+  /** Чаты, удалённые дренажной фазой двухфазного purge; в deleted (корни) не входят. */
+  drainedChats: number;
+  aborted: boolean;
+  report: CleanupRunReportDto | null;
+}
+
+/** Enforce-прогон политики без лока и журнала: общий для планового тика и фонового запуска. */
+async function enforcePolicy(
+  task: JanitorTaskDefinition,
+  settings: { retentionDays: number; batchSize: number },
+  stores: JanitorStores,
+  now: Date,
+  shouldAbort?: () => boolean,
+): Promise<EnforceResult> {
+  const result: EnforceResult = { matched: 0, deleted: 0, freedBytes: 0, drainedChats: 0, aborted: false, report: null };
+  const resolved = { mode: "enforce" as const, retentionDays: settings.retentionDays, batchSize: settings.batchSize };
+  const batching = { now, maxBatchesPerRun: MAX_BATCHES_PER_RUN, pauseBetweenBatchesMs: BATCH_PAUSE_MS, shouldAbort };
+
+  if (storageOf(task) === "qdrant") {
+    const run = await runQdrantOrphanGcTask(resolved, stores.qdrant, batching);
+    return { ...result, matched: run.matched, deleted: run.deleted, freedBytes: run.freedBytes, aborted: run.aborted };
+  }
+  if (storageOf(task) === "agent_session_folders") {
+    const run = await runAgentSessionFoldersTask(resolved, stores.agentSessionFolders, {
+      maxBatchesPerRun: MAX_BATCHES_PER_RUN,
+      shouldAbort,
+    });
+    return { ...result, matched: run.matched, deleted: run.deleted, aborted: run.aborted };
+  }
+  if (storageOf(task) === "s3_reconcile") {
+    const run = await resolveReconcileRunner(task)(stores, { ...resolved, now, shouldAbort });
+    return {
+      ...result,
+      matched: run.matched,
+      deleted: run.deleted,
+      freedBytes: run.freedBytes,
+      aborted: run.aborted,
+      report: run.report,
+    };
+  }
+  if (storageOf(task) === "s3") {
+    const run = await runS3RetentionTask(s3FilterOf(task), resolved, resolveS3Store(stores, task), batching);
+    return { ...result, matched: run.matched, deleted: run.deleted, freedBytes: run.freedBytes, aborted: run.aborted };
+  }
+
+  for (const op of operationsOf(task)) {
+    if (shouldAbort?.()) {
+      result.aborted = true;
+      break;
+    }
+    const missing = await findMissingColumns(op.table, requiredColumnsForOperation(op));
+    if (missing.length > 0) {
+      throw new Error(`schema guard: columns [${missing.join(", ")}] missing on ${op.table}; run skipped`);
+    }
+    const run = await runRetentionTask(op, { ...resolved, action: op.action }, stores.pg, batching);
+    result.matched += run.matched;
+    result.deleted += run.deleted;
+    result.drainedChats += run.drainedChildren;
+    result.aborted = result.aborted || run.aborted;
+  }
+  return result;
 }
 
 function resolveS3Store(stores: JanitorStores, task: JanitorTaskDefinition): S3RetentionStore {
@@ -291,99 +335,13 @@ export async function runPolicy(
   let freedBytes = 0;
   // Чаты, удалённые дренажной фазой двухфазного purge; в deleted (корни) не входят.
   let drainedChats = 0;
-  let aborted = false;
   let report: CleanupRunReportDto | null = null;
 
   try {
-    if (storageOf(task) === "qdrant") {
-      const result = await runQdrantOrphanGcTask(
-        { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-        stores.qdrant,
-        {
-          now: startedAt,
-          maxBatchesPerRun: MAX_BATCHES_PER_RUN,
-          pauseBetweenBatchesMs: BATCH_PAUSE_MS,
-          shouldAbort,
-        },
-      );
-      matched += result.matched;
-      deleted += result.deleted;
-      freedBytes += result.freedBytes;
-      aborted = aborted || result.aborted;
-    } else if (storageOf(task) === "agent_session_folders") {
-      const result = await runAgentSessionFoldersTask(
-        { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-        stores.agentSessionFolders,
-        { maxBatchesPerRun: MAX_BATCHES_PER_RUN, shouldAbort },
-      );
-      matched += result.matched;
-      deleted += result.deleted;
-      aborted = aborted || result.aborted;
-    } else if (storageOf(task) === "s3_reconcile") {
-      const result = await resolveReconcileRunner(task)(stores, {
-        mode: "enforce",
-        retentionDays: policy.retentionDays,
-        batchSize: policy.batchSize,
-        now: startedAt,
-        shouldAbort,
-      });
-      matched += result.matched;
-      deleted += result.deleted;
-      freedBytes += result.freedBytes;
-      aborted = aborted || result.aborted;
-      report = result.report;
-    } else if (storageOf(task) === "s3") {
-      const result = await runS3RetentionTask(
-        s3FilterOf(task),
-        { mode: "enforce", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-        resolveS3Store(stores, task),
-        {
-          now: startedAt,
-          maxBatchesPerRun: MAX_BATCHES_PER_RUN,
-          pauseBetweenBatchesMs: BATCH_PAUSE_MS,
-          shouldAbort,
-        },
-      );
-      matched += result.matched;
-      deleted += result.deleted;
-      freedBytes += result.freedBytes;
-      aborted = aborted || result.aborted;
-    } else {
-      for (const op of operationsOf(task)) {
-        if (shouldAbort?.()) {
-          aborted = true;
-          break;
-        }
-        const missing = await findMissingColumns(op.table, requiredColumnsForOperation(op));
-        if (missing.length > 0) {
-          throw new Error(
-            `schema guard: columns [${missing.join(", ")}] missing on ${op.table}; run skipped`,
-          );
-        }
-        const result = await runRetentionTask(
-          op,
-          {
-            action: op.action,
-            mode: "enforce",
-            retentionDays: policy.retentionDays,
-            batchSize: policy.batchSize,
-          },
-          stores.pg,
-          {
-            now: startedAt,
-            maxBatchesPerRun: MAX_BATCHES_PER_RUN,
-            pauseBetweenBatchesMs: BATCH_PAUSE_MS,
-            shouldAbort,
-          },
-        );
-        matched += result.matched;
-        deleted += result.deleted;
-        drainedChats += result.drainedChildren;
-        aborted = aborted || result.aborted;
-      }
-    }
+    const result = await enforcePolicy(task, policy, stores, startedAt, shouldAbort);
+    ({ matched, deleted, freedBytes, drainedChats, report } = result);
 
-    if (aborted) {
+    if (result.aborted) {
       status = "partial";
       errorMessage = "прерван при остановке процесса; хвост доберёт следующий тик";
     }
@@ -446,9 +404,11 @@ export async function runPolicy(
 
 // ── Фоновые прогоны ───────────────────────────────────────────────────────────
 //
-// Сверка хранилища занимает минуты и не укладывается в синхронный вызов из админки; ручной
-// запуск файловой политики «по базе» — тоже (runsManuallyInBackground). Такой прогон стартует в фоне: журнал сразу получает строку со статусом running, по ходу — отчёт,
-// в конце — итог. Предпросмотр фоновой политики — такой же прогон в режиме dry_run.
+// Ручной запуск из админки любой политики идёт в фоне: прогон до maxBatches батчей (обнуление
+// тяжёлых логов, удаление строк, постановка файлов в очередь) не укладывается в ожидание
+// HTTP-запроса. Журнал сразу получает строку со статусом running, по ходу — отчёт (у сверки
+// хранилища), в конце — итог. Предпросмотр фоновой политики (backgroundRun, сверка хранилища) —
+// такой же прогон в режиме dry_run. Плановый тик обычные политики ждёт синхронно.
 
 const backgroundRuns = new Map<string, Promise<void>>();
 const startingRuns = new Set<string>();
@@ -625,7 +585,7 @@ export async function stopBackgroundRuns(): Promise<void> {
  */
 async function reapStaleBackgroundRuns(): Promise<void> {
   for (const task of JANITOR_TASKS) {
-    if (!runsManuallyInBackground(task) || backgroundRuns.has(task.key) || startingRuns.has(task.key)) {
+    if (backgroundRuns.has(task.key) || startingRuns.has(task.key)) {
       continue;
     }
     const lock = await tryAcquireLock(`janitor:${task.key}`, MINUTE_MS, { failClosed: lockFailClosed() });
@@ -651,15 +611,14 @@ export async function runPolicyNow(
   if (!policy) {
     return { status: "skipped_disabled", matched: 0, deleted: 0, freedBytes: 0 };
   }
-  const trigger: RunPolicyTrigger = { triggeredBy: "manual", actorId };
-  const taskDef = getJanitorTask(resourceKey);
-  if (taskDef && runsManuallyInBackground(taskDef)) {
-    const started = await startPolicyInBackground(policy, stores, trigger, "enforce");
-    return started.started
-      ? { status: "running", matched: 0, deleted: 0, freedBytes: 0 }
-      : { status: "skipped_locked", matched: 0, deleted: 0, freedBytes: 0, reason: started.reason };
+  if (!getJanitorTask(resourceKey)) {
+    return { status: "skipped_disabled", matched: 0, deleted: 0, freedBytes: 0 };
   }
-  return runPolicy(policy, stores, trigger);
+  const trigger: RunPolicyTrigger = { triggeredBy: "manual", actorId };
+  const started = await startPolicyInBackground(policy, stores, trigger, "enforce");
+  return started.started
+    ? { status: "running", matched: 0, deleted: 0, freedBytes: 0 }
+    : { status: "skipped_locked", matched: 0, deleted: 0, freedBytes: 0, reason: started.reason };
 }
 
 /**

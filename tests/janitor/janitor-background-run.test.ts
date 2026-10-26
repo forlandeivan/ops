@@ -29,6 +29,10 @@ vi.mock("../../server/janitor/janitor-policy-service", () => ({
   recordRunFinish: mocks.recordRunFinish,
   failStaleRunningRuns: mocks.failStaleRunningRuns,
 }));
+vi.mock("../../server/janitor/schema-guard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../server/janitor/schema-guard")>()),
+  findMissingColumns: vi.fn(async () => []),
+}));
 vi.mock("../../server/lib/redis-lock", () => ({
   tryAcquireLock: mocks.tryAcquireLock,
   releaseLock: mocks.releaseLock,
@@ -329,6 +333,27 @@ describe("ручной запуск файловой политики «по б�
       expect.objectContaining({ status: "success", matchedCount: 13, deletedCount: 13, freedBytes: 1300 }),
     );
     expect(mocks.releaseLock).toHaveBeenCalled();
+  });
+
+  it("ручной запуск политики базы данных тоже уходит в фон", async () => {
+    const orchestrator = await loadOrchestrator();
+    const PG_KEY = "pg.cleanup_run_log";
+    const task = getJanitorTask(PG_KEY)!;
+    mocks.listResolvedPolicies.mockResolvedValue([
+      orphanPolicy({ resourceKey: PG_KEY, table: task.table, action: task.action, batchSize: 100, runsInBackground: false }),
+    ]);
+    const { stores } = makeStores();
+    stores.pg.deleteBatch = vi.fn(async () => ({ affected: 40, resumeFrom: "2026-08-01 00:00:00" }));
+
+    const outcome = await orchestrator.runPolicyNow(PG_KEY, stores, "admin-1");
+    await orchestrator.waitForBackgroundRuns();
+
+    expect(outcome.status).toBe("running");
+    expect(mocks.recordRun).not.toHaveBeenCalled();
+    expect(mocks.recordRunFinish).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ status: "success", deletedCount: 40 }),
+    );
   });
 
   it("предпросмотр сообщает, что счёт упёрся в объём одного прогона", async () => {
