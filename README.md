@@ -5,6 +5,9 @@
 (retention/уборка PG/MinIO/Qdrant) — первый модуль; далее сюда въезжают
 notify (SMTP), maintenance-mode и admin-analytics (волна P3).
 
+Доставка внутренних уведомлений выполняется platform worker:notifications. Ранее согласованный
+N2 notify-процесс удалён по новому решению владельца от 19.10.2026; SMTP остаётся будущим каналом.
+
 ## Статус: код janitor перенесён (волна J2.3c)
 
 Сервис собирается и запускается standalone: TypeScript, Vitest и esbuild.
@@ -64,3 +67,15 @@ npm start
 Собирается из compose монорепы по `build.context: ../rospartner.ai.unica.ops`
 (sibling-чекаут на деплой-хосте обязателен) либо своим CI (`.gitlab-ci.yml`,
 спит до `OPS_CI_ENABLED=true`).
+## Внутренние уведомления
+
+Исполняются в платформе: `APP_ROLE=worker:notifications` либо композитный worker с группой
+`notifications`. `npm run dev:local` из монорепы запускает worker и janitor; отдельного notify
+процесса, HTTP receiver, notification gateway и notification env в ops нет.
+`npm run build` собирает только janitor entry, `npm run dev` и `npm start` запускают janitor.
+Общие notification-контракты, достижимые из shared/schema.ts, сохранены для сборки janitor.
+
+Актуальная эксплуатация и проверки описаны в монорепе:
+[`Центр уведомлений: расширение и эксплуатация`](https://gitlab.hopper-it.ru/aidev/rospartner.ai.unica/-/blob/develop/docs/notification-center-developer-guide.md).
+История N2 сохранена в архитектурной записи; новый возврат явно согласован владельцем.
+Helm/Compose в рамках изменения не правились; конфигурацию деплоя обновляет DevOps.

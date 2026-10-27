@@ -28,6 +28,7 @@ import {
   type JanitorDomainGateway,
 } from "./domain-gateway-client";
 import { createPgRetentionStore, type RetentionStore } from "./tasks/pg-retention-task";
+import type { AgentSessionFoldersStore } from "./tasks/agent-session-folders-task";
 import {
   createChatAttachmentS3Store,
   createChatFeedbackAttachmentS3Store,
@@ -43,17 +44,16 @@ import {
   type QdrantOrphanStore,
 } from "./tasks/qdrant-orphan-gc-task";
 import { createStorageOrphanDeps, type StorageOrphanDeps } from "./tasks/storage-orphan-task";
-import type { AgentSessionFoldersStore } from "./tasks/agent-session-folders-task";
 import { createFileArtifactCleanupJobStore } from "./file-artifact-cleanup-job-store";
 
 const logger = createLogger("janitor-default-stores");
 
 export interface JanitorStores {
+  agentSessionFolders?: AgentSessionFoldersStore;
   pg: RetentionStore;
   s3: Record<string, S3RetentionStore>;
   qdrant: QdrantOrphanStore;
   storageOrphans: StorageOrphanDeps;
-  agentSessionFolders: AgentSessionFoldersStore;
 }
 
 /**
@@ -168,6 +168,7 @@ export function defaultStores(): JanitorStores {
   const gateway = requireDomainGateway();
   const cleanupJobs = createFileArtifactCleanupJobStore();
   return {
+    agentSessionFolders: { purge: (request) => gateway.purgeAgentSessionFolders(request) },
     pg: createPgRetentionStore(),
     s3: {
       chat_attachments: createChatAttachmentS3Store(),
@@ -199,7 +200,5 @@ export function defaultStores(): JanitorStores {
     }),
     // Сверка хранилища: найденное уходит в очередь удаления, файлы удаляет монолит после перепроверки.
     storageOrphans: createStorageOrphanDeps((job) => cleanupJobs.enqueueStorageJob(job)),
-    // Папки сессий агента лежат на томе сервиса агента: удаляет он, janitor зовёт его через монолит.
-    agentSessionFolders: { purge: (request) => gateway.purgeAgentSessionFolders(request) },
   };
 }

@@ -12,6 +12,33 @@ describe("janitor domain-gateway client", () => {
     vi.unstubAllEnvs();
   });
 
+  it("routes folder purge and non-mutating preview to the owner and parses counters", async () => {
+    vi.stubEnv("UNICA_JANITOR_GATEWAY_TOKEN", "gw-secret");
+    await withStub((_req, body, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(JSON.parse(body).dryRun ? { ok: true, purged: 0, remaining: 1200 } : { ok: true, purged: 3, remaining: 2 }));
+    }, async (base, requests) => {
+      const gateway = createHttpJanitorDomainGateway(base);
+      expect(await gateway.purgeAgentSessionFolders({ olderThanDays: 7, limit: 3, dryRun: false })).toEqual({ purged: 3, remaining: 2 });
+      expect(await gateway.purgeAgentSessionFolders({ olderThanDays: 7, limit: 3, dryRun: true })).toEqual({ purged: 0, remaining: 1200 });
+      expect(requests[0]).toMatchObject({ url: "/agent-session-folders/purge", auth: "Bearer gw-secret" });
+      expect(JSON.parse(requests[0].body)).toEqual({ olderThanDays: 7, limit: 3, dryRun: false });
+    });
+  });
+
+  it.each([null, {}, { ok: true, purged: "1", remaining: 0 }, { ok: true, purged: -1, remaining: 0 }, { ok: true, purged: 4, remaining: 0 }, { ok: false, purged: 0, remaining: 0 }])("rejects invalid successful purge payload: %j", async (body) => {
+    await withStub((_req, _body, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); }, async (base) => {
+      await expect(createHttpJanitorDomainGateway(base).purgeAgentSessionFolders({ olderThanDays: 7, limit: 3, dryRun: false }))
+        .rejects.toMatchObject({ code: "JANITOR_GATEWAY_INVALID_RESPONSE", status: 502 });
+    });
+  });
+
+  it("never converts an unsupported owner endpoint into successful zero deletion", async () => {
+    await withStub((_req, _body, res) => { res.writeHead(404, { "Content-Type": "application/json" }); res.end('{"message":"unsupported endpoint"}'); }, async (base) => {
+      await expect(createHttpJanitorDomainGateway(base).purgeAgentSessionFolders({ olderThanDays: 7, limit: 3, dryRun: false })).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   async function withStub(
     handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void,
     run: (base: string, requests: Array<{ url: string; auth?: string; body: string }>) => Promise<void>,

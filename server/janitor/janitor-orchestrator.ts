@@ -189,6 +189,7 @@ async function enforcePolicy(
   stores: JanitorStores,
   now: Date,
   shouldAbort?: () => boolean,
+  onFolderProgress?: (count: number) => void,
 ): Promise<EnforceResult> {
   const result: EnforceResult = { matched: 0, deleted: 0, freedBytes: 0, drainedChats: 0, aborted: false, report: null };
   const resolved = { mode: "enforce" as const, retentionDays: settings.retentionDays, batchSize: settings.batchSize };
@@ -202,6 +203,7 @@ async function enforcePolicy(
     const run = await runAgentSessionFoldersTask(resolved, stores.agentSessionFolders, {
       maxBatchesPerRun: MAX_BATCHES_PER_RUN,
       shouldAbort,
+      onProgress: onFolderProgress,
     });
     return { ...result, matched: run.matched, deleted: run.deleted, aborted: run.aborted };
   }
@@ -338,12 +340,15 @@ export async function runPolicy(
   let report: CleanupRunReportDto | null = null;
 
   try {
-    const result = await enforcePolicy(task, policy, stores, startedAt, shouldAbort);
+    const result = await enforcePolicy(task, policy, stores, startedAt, shouldAbort, (count) => {
+      matched += count;
+      deleted += count;
+    });
     ({ matched, deleted, freedBytes, drainedChats, report } = result);
 
     if (result.aborted) {
       status = "partial";
-      errorMessage = "прерван при остановке процесса; хвост доберёт следующий тик";
+      errorMessage ??= "прерван при остановке процесса; хвост доберёт следующий тик";
     }
   } catch (error) {
     status = "failed";
@@ -643,19 +648,17 @@ export async function previewPolicy(
     return started.started ? { matched, started: true } : { matched, started: false, reason: started.reason };
   }
 
+  if (storageOf(taskDef) === "agent_session_folders") {
+    const result = await runAgentSessionFoldersTask(
+      { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize }, stores.agentSessionFolders,
+      { maxBatchesPerRun: 1 },
+    );
+    return { matched: result.matched };
+  }
   if (storageOf(taskDef) === "qdrant") {
     const result = await runQdrantOrphanGcTask(
       { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
       stores.qdrant,
-      { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
-    );
-    return { matched: result.matched };
-  }
-
-  if (storageOf(taskDef) === "agent_session_folders") {
-    const result = await runAgentSessionFoldersTask(
-      { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize },
-      stores.agentSessionFolders,
       { maxBatchesPerRun: MAX_BATCHES_PER_RUN },
     );
     return { matched: result.matched };

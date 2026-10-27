@@ -566,6 +566,17 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 90,
   }),
   task({
+    key: "pg.notification_inbox.archived",
+    label: "Архив центра уведомлений (notification_inbox)",
+    description: "Удаляет уведомления через заданный срок после архивирования. Исходные задачи и решения сохраняются.",
+    category: "logs",
+    action: "delete_rows",
+    table: "notification_inbox",
+    timeColumn: "archived_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+  }),
+  task({
     key: "pg.system_notification_logs",
     label: "Логи системных уведомлений (system_notification_logs)",
     description: "Удаляет логи отправленных уведомлений старше срока хранения.",

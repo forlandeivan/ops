@@ -30,18 +30,20 @@ export interface GatewayFileArtifactCleanupRequest {
   workerId: string;
 }
 
+export interface AgentSessionFoldersRequest {
+  olderThanDays: number;
+  limit: number;
+  dryRun: boolean;
+}
+export interface AgentSessionFoldersResult { purged: number; remaining: number }
+
 /** Доменные операции уборки, исполняемые владельцем (монолитом). */
 export interface JanitorDomainGateway {
+  purgeAgentSessionFolders(request: AgentSessionFoldersRequest, signal?: AbortSignal): Promise<AgentSessionFoldersResult>;
   cleanupFileArtifacts(request: GatewayFileArtifactCleanupRequest, signal?: AbortSignal): Promise<void>;
   purgeChatAttachmentArtifacts(workspaceId: string, attachment: GatewayChatAttachmentRef): Promise<void>;
   deleteWorkspaceFile(workspaceId: string, storageKey: string): Promise<void>;
   reconcileQdrantUsage(): Promise<void>;
-  /** Рабочие папки сессий агента (agent.session_folders): удаляет сервис агента через монолит. */
-  purgeAgentSessionFolders(request: {
-    olderThanDays: number;
-    limit: number;
-    dryRun: boolean;
-  }): Promise<{ purged: number; remaining: number }>;
 }
 
 export class JanitorDomainGatewayError extends Error {
@@ -81,17 +83,19 @@ function timeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_TIMEOUT_MS;
 }
 
-async function callGateway(
+async function callGateway<T = void>(
   baseUrl: string,
   path: string,
   body: Record<string, unknown>,
   parentSignal?: AbortSignal,
-): Promise<Record<string, unknown>> {
+  readResult?: (response: Response) => Promise<T>,
+): Promise<T> {
   const token = gatewayToken();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
   const abortFromParent = () => controller.abort();
   parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  if (parentSignal?.aborted) controller.abort();
 
   let response: Response;
   try {
@@ -106,6 +110,8 @@ async function callGateway(
     });
   } catch (error) {
     const timedOut = controller.signal.aborted;
+    clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", abortFromParent);
     logger.error(
       { path, err: error instanceof Error ? error.message : String(error), timedOut },
       "[janitor-domain-gateway] gateway call failed",
@@ -115,41 +121,43 @@ async function callGateway(
       timedOut ? 504 : 503,
       timedOut ? "JANITOR_GATEWAY_TIMEOUT" : "JANITOR_GATEWAY_UNAVAILABLE",
     );
+  }
+
+  try {
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      const message = typeof payload.message === "string" ? payload.message : `janitor gateway HTTP ${response.status}`;
+      const code = typeof payload.code === "string" ? payload.code : "JANITOR_GATEWAY_ERROR";
+      const retryable = typeof payload.retryable === "boolean"
+        ? payload.retryable
+        : response.status >= 500 || response.status === 429;
+      throw new JanitorDomainGatewayError(message, response.status, code, retryable);
+    }
+    return readResult ? await readResult(response) : undefined as T;
   } finally {
     clearTimeout(timer);
     parentSignal?.removeEventListener("abort", abortFromParent);
   }
-
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    const message = typeof payload.message === "string" ? payload.message : `janitor gateway HTTP ${response.status}`;
-    const code = typeof payload.code === "string" ? payload.code : "JANITOR_GATEWAY_ERROR";
-    const retryable = typeof payload.retryable === "boolean"
-      ? payload.retryable
-      : response.status >= 500 || response.status === 429;
-    throw new JanitorDomainGatewayError(message, response.status, code, retryable);
-  }
-  return (await response.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
 /** HTTP-реализация gateway; boundary-URL валидируется вызывающим (default-stores). */
 export function createHttpJanitorDomainGateway(baseUrl: string): JanitorDomainGateway {
   return {
-    cleanupFileArtifacts: async (request, signal) => {
-      await callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal);
-    },
-    purgeChatAttachmentArtifacts: async (workspaceId, attachment) => {
-      await callGateway(baseUrl, "/chat-attachments/purge-artifacts", { workspaceId, attachment });
-    },
-    deleteWorkspaceFile: async (workspaceId, storageKey) => {
-      await callGateway(baseUrl, "/workspace-files/delete", { workspaceId, storageKey });
-    },
-    reconcileQdrantUsage: async () => {
-      await callGateway(baseUrl, "/qdrant-usage/reconcile", {});
-    },
-    purgeAgentSessionFolders: async (request) => {
-      const payload = await callGateway(baseUrl, "/agent-session-folders/purge", { ...request });
-      return { purged: Number(payload.purged ?? 0), remaining: Number(payload.remaining ?? 0) };
-    },
+    purgeAgentSessionFolders: (request, signal) => callGateway(baseUrl, "/agent-session-folders/purge", { ...request }, signal, async (response) => {
+      const data: unknown = await response.json().catch(() => null);
+      const result = data as Partial<AgentSessionFoldersResult> & { ok?: unknown } | null;
+      if (!result || result.ok !== true || !Number.isSafeInteger(result.purged) || !Number.isSafeInteger(result.remaining)
+        || result.purged! < 0 || result.remaining! < 0 || result.purged! > request.limit || (request.dryRun && result.purged !== 0)) {
+        throw new JanitorDomainGatewayError("Invalid agent folder purge response", 502, "JANITOR_GATEWAY_INVALID_RESPONSE");
+      }
+      return { purged: result.purged!, remaining: result.remaining! };
+    }),
+    cleanupFileArtifacts: (request, signal) =>
+      callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal),
+    purgeChatAttachmentArtifacts: (workspaceId, attachment) =>
+      callGateway(baseUrl, "/chat-attachments/purge-artifacts", { workspaceId, attachment }),
+    deleteWorkspaceFile: (workspaceId, storageKey) =>
+      callGateway(baseUrl, "/workspace-files/delete", { workspaceId, storageKey }),
+    reconcileQdrantUsage: () => callGateway(baseUrl, "/qdrant-usage/reconcile", {}),
   };
 }

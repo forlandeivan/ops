@@ -2,6 +2,8 @@
 
 /** Human-readable labels for each permission module. Single source of truth. */
 export const MODULE_LABELS: Record<string, string> = {
+  notifications: 'Уведомления',
+  scheduled_tasks: 'Задачи по расписанию',
   kb: 'Базы знаний',
   assistants: 'Ассистенты',
   workflows: 'Workflow-сценарии',
@@ -12,6 +14,7 @@ export const MODULE_LABELS: Record<string, string> = {
   integrations: 'Интеграции',
   vector: 'Коллекции',
   dashboard: 'Дашборд',
+  workspace_analytics: 'Аналитика пространства',
   builds: 'Сборки',
   skills: 'Навыки',
   global_variables: 'Глобальные переменные',
@@ -19,6 +22,8 @@ export const MODULE_LABELS: Record<string, string> = {
 };
 
 export const PERMISSION_MODULES = [
+  'notifications',
+  'scheduled_tasks',
   'kb',
   'assistants',
   'workflows',
@@ -29,6 +34,7 @@ export const PERMISSION_MODULES = [
   'integrations',
   'vector',
   'dashboard',
+  'workspace_analytics',
   'builds',
   'skills',
   'global_variables',
@@ -38,6 +44,12 @@ export type PermissionModule = (typeof PERMISSION_MODULES)[number];
 
 // Type-safe permission ID constants
 export const P = {
+  NOTIFICATIONS_MANAGE: 'notifications:manage',
+  NOTIFICATIONS_PUBLISH: 'notifications:publish',
+  SCHEDULED_TASKS_VIEW: 'scheduled_tasks:view',
+  SCHEDULED_TASKS_CREATE: 'scheduled_tasks:create',
+  SCHEDULED_TASKS_MANAGE_OWN: 'scheduled_tasks:manage_own',
+  SCHEDULED_TASKS_MANAGE_ALL: 'scheduled_tasks:manage_all',
   // Knowledge Base
   KB_VIEW: 'kb:view',
   KB_CREATE: 'kb:create',
@@ -67,6 +79,15 @@ export const P = {
   WORKFLOWS_PUBLISH: 'workflows:publish',
   WORKFLOWS_ARCHIVE: 'workflows:archive',
   WORKFLOWS_DEBUG: 'workflows:debug',
+  // Запуск опубликованного сценария. Отделено от просмотра намеренно: прогон тратит
+  // кредиты, шлёт письма и пишет во внешние системы, поэтому право видеть список
+  // сценариев не должно давать право их выполнять.
+  WORKFLOWS_EXECUTE: 'workflows:execute',
+  // W3.1 Code Node: правка кода узла «Код (JavaScript)» в сценариях пространства. Чувствительное:
+  // исполняет произвольный JS. Стало делегируемым после выноса исполнения в изолированный
+  // code runner (W1/W2) — до этого гейт был неделегируемым (только платформенный админ).
+  // Инстанс-рубильник `workflowCodeExec.delegationEnabled` перекрывает право (см. гейт).
+  WORKFLOWS_EDIT_CODE: 'workflows:edit_code',
 
   // Actions
   ACTIONS_VIEW: 'actions:view',
@@ -102,6 +123,9 @@ export const P = {
   INTEGRATIONS_VIEW: 'integrations:view',
   INTEGRATIONS_MANAGE: 'integrations:manage',
   INTEGRATIONS_MCP_MANAGE: 'integrations:mcp:manage',
+  // Подключение и удаление MCP-сервера по адресу: сервер получает токен пространства и ходит во внешнюю
+  // сеть, поэтому право у владельца и менеджера, а не у каждого участника.
+  INTEGRATIONS_MCP_CONNECT: 'integrations:mcp:connect',
 
   // Vector
   VECTOR_VIEW: 'vector:view',
@@ -109,6 +133,10 @@ export const P = {
 
   // Dashboard
   DASHBOARD_VIEW: 'dashboard:view',
+
+  // Аналитика пространства: отчёт об активности и расходе участников. Чувствительное — видно, кто что делал и сколько
+  // потратил. Системным ролям, кроме владельца, не выдаётся: владелец получает всё, остальным — дополнительной ролью.
+  WORKSPACE_ANALYTICS_VIEW: 'workspace_analytics:view',
 
   // Builds (Сборки) — публикация/установка поставок ассистентов
   BUILDS_VIEW: 'builds:view',
@@ -143,19 +171,21 @@ export type SystemRoleCode = (typeof SYSTEM_ROLE_CODES)[number];
 export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
   owner: ALL_PERMISSION_IDS,
   manager: [
+    P.NOTIFICATIONS_MANAGE,
+    P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN, P.SCHEDULED_TASKS_MANAGE_ALL,
     P.KB_VIEW, P.KB_CREATE, P.KB_EDIT, P.KB_DELETE,
     P.KB_DOCUMENT_CREATE, P.KB_DOCUMENT_EDIT, P.KB_DOCUMENT_DELETE,
     P.KB_DOCUMENT_IMPORT, P.KB_INDEX, P.KB_EXPORT, P.KB_ACCESS_MANAGE, P.KB_SHARE_MANAGE,
     P.ASSISTANTS_VIEW, P.ASSISTANTS_CREATE, P.ASSISTANTS_EDIT, P.ASSISTANTS_DELETE,
     P.ASSISTANTS_ACTIONS_MANAGE, P.ASSISTANTS_ACTIONS_EXECUTE,
-    P.WORKFLOWS_VIEW, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_PUBLISH, P.WORKFLOWS_ARCHIVE,
-    P.WORKFLOWS_DEBUG,
+    P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_PUBLISH, P.WORKFLOWS_ARCHIVE,
+    P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE,
     P.ACTIONS_VIEW, P.ACTIONS_CREATE, P.ACTIONS_EDIT, P.ACTIONS_DELETE, P.ACTIONS_EXECUTE,
     P.CHATS_VIEW, P.CHATS_CREATE, P.CHATS_DELETE, P.CHATS_SEND, P.CHATS_FILES,
     P.WORKSPACE_VIEW, P.WORKSPACE_EDIT, P.WORKSPACE_ICON_MANAGE,
     P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW, P.WORKSPACE_INSTRUCTIONS_MANAGE,
     P.MEMBERS_VIEW, P.MEMBERS_INVITE, P.MEMBERS_EDIT, P.MEMBERS_REMOVE,
-    P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE, P.INTEGRATIONS_MCP_MANAGE,
+    P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE, P.INTEGRATIONS_MCP_MANAGE, P.INTEGRATIONS_MCP_CONNECT,
     P.VECTOR_VIEW, P.VECTOR_MANAGE,
     P.DASHBOARD_VIEW,
     P.BUILDS_VIEW, P.BUILDS_PUBLISH, P.BUILDS_INSTALL,
@@ -165,18 +195,22 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.PROMPTS_VIEW, P.PROMPTS_MANAGE,
   ],
   member: [
+    P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN,
     P.KB_VIEW, P.KB_CREATE, P.KB_EDIT,
     P.KB_DOCUMENT_CREATE, P.KB_DOCUMENT_EDIT, P.KB_DOCUMENT_DELETE,
     P.KB_DOCUMENT_IMPORT, P.KB_INDEX, P.KB_EXPORT,
     P.ASSISTANTS_VIEW, P.ASSISTANTS_CREATE, P.ASSISTANTS_EDIT,
     P.ASSISTANTS_ACTIONS_MANAGE, P.ASSISTANTS_ACTIONS_EXECUTE,
-    P.WORKFLOWS_VIEW, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG,
+    P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE,
     P.ACTIONS_VIEW, P.ACTIONS_CREATE, P.ACTIONS_EDIT, P.ACTIONS_EXECUTE,
     P.CHATS_VIEW, P.CHATS_CREATE, P.CHATS_DELETE, P.CHATS_SEND, P.CHATS_FILES,
     P.WORKSPACE_VIEW, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW,
     P.MEMBERS_VIEW,
-    P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE, P.INTEGRATIONS_MCP_MANAGE,
-    P.VECTOR_VIEW, P.VECTOR_MANAGE,
+    // Управление MCP-инструментами у участника снято (план remote-MCP §5.4): политики инструментов
+    // чужих серверов и их подключение — у менеджера и владельца.
+    P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE,
+    // Векторный API (страница «Векторные коллекции») у участника снят (SEC-05): он отдавал сырые фрагменты
+    // баз и позволял удалять коллекции пространства — это инструмент владельца и менеджера.
     P.DASHBOARD_VIEW,
     P.BUILDS_VIEW, P.BUILDS_INSTALL,
     P.SKILLS_AUTHOR,
@@ -184,6 +218,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.PROMPTS_VIEW,
   ],
   viewer: [
+    P.SCHEDULED_TASKS_VIEW,
     P.KB_VIEW,
     P.ASSISTANTS_VIEW, P.ASSISTANTS_ACTIONS_EXECUTE,
     P.WORKFLOWS_VIEW,
@@ -192,7 +227,6 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.WORKSPACE_VIEW, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW,
     P.MEMBERS_VIEW,
     P.INTEGRATIONS_VIEW,
-    P.VECTOR_VIEW,
     P.DASHBOARD_VIEW,
     P.BUILDS_VIEW,
     P.GLOBAL_VARIABLES_READ,
@@ -252,6 +286,17 @@ export interface AccessLevel {
 }
 
 export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel[]> = {
+  notifications: [
+    { code: 'none', label: 'Нет доступа', permissions: [] },
+    { code: 'editor', label: 'Подготовка', permissions: [P.NOTIFICATIONS_MANAGE] },
+    { code: 'manager', label: 'Публикация', permissions: [P.NOTIFICATIONS_MANAGE, P.NOTIFICATIONS_PUBLISH] },
+  ],
+  scheduled_tasks: [
+    { code: 'none', label: 'Нет доступа', permissions: [] },
+    { code: 'viewer', label: 'Просмотр', permissions: [P.SCHEDULED_TASKS_VIEW] },
+    { code: 'editor', label: 'Свои задачи', permissions: [P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN] },
+    { code: 'manager', label: 'Все задачи', permissions: [P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN, P.SCHEDULED_TASKS_MANAGE_ALL] },
+  ],
   kb: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.KB_VIEW] },
@@ -265,8 +310,11 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
   workflows: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.WORKFLOWS_VIEW] },
-    { code: 'editor', label: 'Редактирование', permissions: [P.WORKFLOWS_VIEW, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG] },
-    { code: 'manager', label: 'Публикация', permissions: [P.WORKFLOWS_VIEW, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG, P.WORKFLOWS_PUBLISH, P.WORKFLOWS_ARCHIVE] },
+    // Уровень для интегратора и дежурного: запускает опубликованный сценарий, но не
+    // правит его. Без него запуск пришлось бы выдавать вместе с редактированием.
+    { code: 'user', label: 'Просмотр и запуск', permissions: [P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE] },
+    { code: 'editor', label: 'Редактирование', permissions: [P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE] },
+    { code: 'manager', label: 'Публикация', permissions: [P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE, P.WORKFLOWS_PUBLISH, P.WORKFLOWS_ARCHIVE] },
   ],
   actions: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
@@ -291,7 +339,7 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
   integrations: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.INTEGRATIONS_VIEW] },
-    { code: 'editor', label: 'Редактирование', permissions: [P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE, P.INTEGRATIONS_MCP_MANAGE] },
+    { code: 'editor', label: 'Редактирование', permissions: [P.INTEGRATIONS_VIEW, P.INTEGRATIONS_MANAGE, P.INTEGRATIONS_MCP_MANAGE, P.INTEGRATIONS_MCP_CONNECT] },
   ],
   vector: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
@@ -301,6 +349,10 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
   dashboard: [
     { code: 'none',   label: 'Нет доступа', permissions: [] },
     { code: 'viewer', label: 'Просмотр',    permissions: [P.DASHBOARD_VIEW] },
+  ],
+  workspace_analytics: [
+    { code: 'none',   label: 'Нет доступа', permissions: [] },
+    { code: 'viewer', label: 'Просмотр',    permissions: [P.WORKSPACE_ANALYTICS_VIEW] },
   ],
   builds: [
     { code: 'none',   label: 'Нет доступа', permissions: [] },
@@ -374,6 +426,12 @@ export const PERMISSION_CATALOG: Array<{
   description: string;
   isSensitive: boolean;
 }> = [
+  { id: P.SCHEDULED_TASKS_VIEW, module: 'scheduled_tasks', action: 'view', description: 'Просмотр задач по расписанию', isSensitive: false },
+  { id: P.NOTIFICATIONS_MANAGE, module: 'notifications', action: 'manage', description: 'Подготовка объявлений, настройки уведомлений и диагностика доставки', isSensitive: false },
+  { id: P.NOTIFICATIONS_PUBLISH, module: 'notifications', action: 'publish', description: 'Публикация и отмена адресных объявлений', isSensitive: true },
+  { id: P.SCHEDULED_TASKS_CREATE, module: 'scheduled_tasks', action: 'create', description: 'Создание задач по расписанию', isSensitive: false },
+  { id: P.SCHEDULED_TASKS_MANAGE_OWN, module: 'scheduled_tasks', action: 'manage_own', description: 'Управление своими задачами по расписанию', isSensitive: false },
+  { id: P.SCHEDULED_TASKS_MANAGE_ALL, module: 'scheduled_tasks', action: 'manage_all', description: 'Управление всеми задачами без доступа к содержимому', isSensitive: true },
   { id: P.KB_VIEW, module: 'kb', action: 'view', description: 'Просмотр баз знаний и документов', isSensitive: false },
   { id: P.KB_CREATE, module: 'kb', action: 'create', description: 'Создание баз знаний', isSensitive: false },
   { id: P.KB_EDIT, module: 'kb', action: 'edit', description: 'Редактирование настроек базы знаний', isSensitive: false },
@@ -393,11 +451,13 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.ASSISTANTS_ACTIONS_MANAGE, module: 'assistants', action: 'actions:manage', description: 'Управление действиями ассистентов', isSensitive: false },
   { id: P.ASSISTANTS_ACTIONS_EXECUTE, module: 'assistants', action: 'actions:execute', description: 'Выполнение действий ассистентов', isSensitive: false },
   { id: P.WORKFLOWS_VIEW, module: 'workflows', action: 'view', description: 'Просмотр workflow-сценариев и шаблонов', isSensitive: false },
+  { id: P.WORKFLOWS_EXECUTE, module: 'workflows', action: 'execute', description: 'Запуск опубликованных workflow-сценариев', isSensitive: false },
   { id: P.WORKFLOWS_CREATE, module: 'workflows', action: 'create', description: 'Создание workflow-сценариев', isSensitive: false },
   { id: P.WORKFLOWS_EDIT, module: 'workflows', action: 'edit', description: 'Редактирование draft-версий workflow-сценариев', isSensitive: false },
   { id: P.WORKFLOWS_PUBLISH, module: 'workflows', action: 'publish', description: 'Публикация workflow-сценариев', isSensitive: true },
   { id: P.WORKFLOWS_ARCHIVE, module: 'workflows', action: 'archive', description: 'Архивация и восстановление workflow-сценариев', isSensitive: true },
   { id: P.WORKFLOWS_DEBUG, module: 'workflows', action: 'debug', description: 'Пошаговая отладка workflow-сценариев (арминг сессии, захват вызова, перезапуск узлов)', isSensitive: false },
+  { id: P.WORKFLOWS_EDIT_CODE, module: 'workflows', action: 'edit_code', description: 'Редактирование кода узла «Код (JavaScript)» в сценариях пространства', isSensitive: true },
   { id: P.ACTIONS_VIEW, module: 'actions', action: 'view', description: 'Просмотр действий', isSensitive: false },
   { id: P.ACTIONS_CREATE, module: 'actions', action: 'create', description: 'Создание действий', isSensitive: false },
   { id: P.ACTIONS_EDIT, module: 'actions', action: 'edit', description: 'Редактирование действий', isSensitive: false },
@@ -423,9 +483,11 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.INTEGRATIONS_VIEW, module: 'integrations', action: 'view', description: 'Просмотр интеграций', isSensitive: false },
   { id: P.INTEGRATIONS_MANAGE, module: 'integrations', action: 'manage', description: 'Управление интеграциями', isSensitive: false },
   { id: P.INTEGRATIONS_MCP_MANAGE, module: 'integrations', action: 'mcp:manage', description: 'Управление MCP инструментами', isSensitive: false },
+  { id: P.INTEGRATIONS_MCP_CONNECT, module: 'integrations', action: 'mcp:connect', description: 'Подключение и удаление MCP-серверов', isSensitive: true },
   { id: P.VECTOR_VIEW, module: 'vector', action: 'view', description: 'Просмотр векторных коллекций', isSensitive: false },
   { id: P.VECTOR_MANAGE, module: 'vector', action: 'manage', description: 'Управление векторными коллекциями', isSensitive: false },
   { id: P.DASHBOARD_VIEW, module: 'dashboard', action: 'view', description: 'Просмотр дашборда', isSensitive: false },
+  { id: P.WORKSPACE_ANALYTICS_VIEW, module: 'workspace_analytics', action: 'view', description: 'Отчёт об активности и расходе участников пространства', isSensitive: true },
   { id: P.BUILDS_VIEW, module: 'builds', action: 'view', description: 'Просмотр витрины сборок', isSensitive: false },
   { id: P.BUILDS_PUBLISH, module: 'builds', action: 'publish', description: 'Публикация ассистента как сборки', isSensitive: true },
   { id: P.BUILDS_INSTALL, module: 'builds', action: 'install', description: 'Установка сборки в рабочее пространство', isSensitive: false },

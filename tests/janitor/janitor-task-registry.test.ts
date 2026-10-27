@@ -77,6 +77,7 @@ describe("janitor task registry", () => {
         "pg.ingest_unit_outcomes",
         // Суточные агрегаты журнала приёма (волна 5): сводные числа, 400 дней, как у учёта публичного API.
         "pg.ingest_stage_stats_day",
+        "pg.notification_inbox.archived",
         // Журнал действий участников (0397): строка на действие, без уборки рос бы бессрочно; 400 дней —
         // решение владельца, отчёт за год с запасом.
         "pg.user_action_events",

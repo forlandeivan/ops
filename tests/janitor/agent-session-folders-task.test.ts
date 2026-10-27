@@ -1,83 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
+import { runAgentSessionFoldersTask } from "../../server/janitor/tasks/agent-session-folders-task";
 
-import { runAgentSessionFoldersTask, type AgentSessionFoldersStore } from "../../server/janitor/tasks/agent-session-folders-task";
-import { getJanitorTask } from "../../server/janitor/janitor-task-registry";
-
-// Политика «Рабочие папки сессий агента» (SEC-08.2): папки удаляет сервис агента через монолит, janitor зовёт пачками.
-function storeWith(results: Array<{ purged: number; remaining: number }>) {
-  const purge = vi.fn<AgentSessionFoldersStore["purge"]>();
-  for (const result of results) {
-    purge.mockResolvedValueOnce(result);
-  }
-  return { store: { purge }, purge };
-}
-
-describe("agent.session_folders", () => {
-  it("предпросмотр только считает: сервис зовут с dryRun", async () => {
-    const { store, purge } = storeWith([{ purged: 0, remaining: 42 }]);
-
-    const result = await runAgentSessionFoldersTask(
-      { mode: "dry_run", retentionDays: 7, batchSize: 500 },
-      store,
-      { maxBatchesPerRun: 10 },
-    );
-
-    expect(result).toEqual({ matched: 42, deleted: 0, aborted: false });
-    expect(purge).toHaveBeenCalledWith({ olderThanDays: 7, limit: 500, dryRun: true });
+const config = { mode: "enforce" as const, retentionDays: 7, batchSize: 3 };
+describe("agent session folders executor", () => {
+  it("drains bounded batches without offset and preserves actual progress", async () => {
+    const purge = vi.fn().mockResolvedValueOnce({ purged: 3, remaining: 2 }).mockResolvedValueOnce({ purged: 2, remaining: 0 });
+    const progress = vi.fn();
+    expect(await runAgentSessionFoldersTask(config, { purge }, { maxBatchesPerRun: 3, onProgress: progress }))
+      .toEqual({ matched: 5, deleted: 5, aborted: false, reason: null });
+    expect(purge.mock.calls).toEqual([[{ olderThanDays: 7, limit: 3, dryRun: false }], [{ olderThanDays: 7, limit: 3, dryRun: false }]]);
+    expect(progress.mock.calls).toEqual([[3], [2]]);
   });
-
-  it("удаляет пачками, пока просроченных не останется", async () => {
-    const { store, purge } = storeWith([
-      { purged: 500, remaining: 700 },
-      { purged: 500, remaining: 200 },
-      { purged: 200, remaining: 0 },
-    ]);
-
-    const result = await runAgentSessionFoldersTask(
-      { mode: "enforce", retentionDays: 7, batchSize: 500 },
-      store,
-      { maxBatchesPerRun: 10 },
-    );
-
-    expect(result).toEqual({ matched: 1200, deleted: 1200, aborted: false });
-    expect(purge).toHaveBeenCalledTimes(3);
-    expect(purge).toHaveBeenLastCalledWith({ olderThanDays: 7, limit: 500, dryRun: false });
+  it("previews the full eligible count exactly once and deletes nothing", async () => {
+    const purge = vi.fn(async () => ({ purged: 0, remaining: 1200 }));
+    expect(await runAgentSessionFoldersTask({ ...config, mode: "dry_run" }, { purge }, { maxBatchesPerRun: 20 }))
+      .toMatchObject({ matched: 1200, deleted: 0, aborted: false });
+    expect(purge).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledWith({ olderThanDays: 7, limit: 3, dryRun: true });
   });
-
-  it("не крутится вхолостую, если сервис ничего не удалил", async () => {
-    const { store, purge } = storeWith([{ purged: 0, remaining: 3 }]);
-
-    const result = await runAgentSessionFoldersTask(
-      { mode: "enforce", retentionDays: 7, batchSize: 500 },
-      store,
-      { maxBatchesPerRun: 10 },
-    );
-
-    expect(result).toEqual({ matched: 3, deleted: 0, aborted: false });
+  it("stops at batch budget or shutdown without another destructive call", async () => {
+    const purge = vi.fn(async () => ({ purged: 3, remaining: 6 }));
+    expect(await runAgentSessionFoldersTask(config, { purge }, { maxBatchesPerRun: 1 })).toMatchObject({ deleted: 3, aborted: true, reason: "batch_limit" });
+    expect(await runAgentSessionFoldersTask(config, { purge }, { maxBatchesPerRun: 5, shouldAbort: () => true })).toMatchObject({ deleted: 0, reason: "shutdown" });
     expect(purge).toHaveBeenCalledTimes(1);
   });
-
-  it("останавливается по просьбе прогона", async () => {
-    const { store, purge } = storeWith([{ purged: 500, remaining: 500 }]);
-    let calls = 0;
-
-    const result = await runAgentSessionFoldersTask(
-      { mode: "enforce", retentionDays: 7, batchSize: 500 },
-      store,
-      { maxBatchesPerRun: 10, shouldAbort: () => calls++ > 0 },
-    );
-
-    expect(result.aborted).toBe(true);
+  it("honors shutdown between batches", async () => {
+    let stop = false;
+    const purge = vi.fn(async () => { stop = true; return { purged: 3, remaining: 6 }; });
+    expect(await runAgentSessionFoldersTask(config, { purge }, { maxBatchesPerRun: 5, shouldAbort: () => stop })).toMatchObject({ deleted: 3, reason: "shutdown" });
     expect(purge).toHaveBeenCalledTimes(1);
   });
-
-  it("в реестре: включена, 7 дней, не дольше ленты сессий", () => {
-    const folders = getJanitorTask("agent.session_folders");
-    const feed = getJanitorTask("pg.agent_sessions");
-
-    expect(folders).toMatchObject({ storage: "agent_session_folders", defaultEnabled: true, defaultRetentionDays: 7 });
-    expect(folders?.retentionNotLongerThan).toBe("pg.agent_sessions");
-    expect(feed).toMatchObject({ action: "delete_rows", table: "agent_sessions", timeColumn: "finished_at" });
-    expect(feed).toMatchObject({ defaultEnabled: true, defaultRetentionDays: 14 });
+  it("fails closed on missing executor, no progress, malformed results and unexpected dry-run deletion", async () => {
+    await expect(runAgentSessionFoldersTask(config, undefined, { maxBatchesPerRun: 3 })).rejects.toThrow("No agent");
+    await expect(runAgentSessionFoldersTask(config, { purge: async () => ({ purged: 0, remaining: 1 }) }, { maxBatchesPerRun: 3 })).rejects.toThrow("no progress");
+    for (const result of [{ purged: -1, remaining: 0 }, { purged: 4, remaining: 0 }, { purged: 1, remaining: NaN }]) {
+      await expect(runAgentSessionFoldersTask(config, { purge: async () => result }, { maxBatchesPerRun: 3 })).rejects.toThrow("Invalid");
+    }
+    await expect(runAgentSessionFoldersTask({ ...config, mode: "dry_run" }, { purge: async () => ({ purged: 1, remaining: 0 }) }, { maxBatchesPerRun: 3 })).rejects.toThrow("Invalid");
   });
 });
