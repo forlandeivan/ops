@@ -16,6 +16,9 @@ export type BuildVisibility = (typeof buildVisibilityValues)[number];
 export const buildStatusValues = ["active", "deprecated", "removed"] as const;
 export type BuildStatus = (typeof buildStatusValues)[number];
 
+export const buildCategorySelectionValues = ["single", "multi"] as const;
+export type BuildCategorySelection = (typeof buildCategorySelectionValues)[number];
+
 export const buildInstallStatusValues = [
   "installed",
   "disabled",
