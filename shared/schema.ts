@@ -124,6 +124,7 @@ import type {
   PluginTrustLevel,
 } from "./plugin-system";
 import type {
+  BuildCategorySelection,
   BuildVisibility,
   BuildStatus,
   BuildInstallStatus,
@@ -4179,6 +4180,8 @@ export const assistants = pgTable(
     workflowDefinitionIdx: index("assistants_workflow_definition_idx").on(table.workflowDefinitionId),
     // 0351: отбор кандидатов janitor pg.assistants.archived (status='archived' AND updated_at < cutoff).
     statusUpdatedIdx: index("assistants_status_updated_idx").on(table.status, table.updatedAt),
+    // 0406: счётчик «пользуются за 30 дней» сборки — подписка и копия помнят сборку одинаково.
+    originBuildIdx: index("assistants_origin_build_idx").on(table.originBuildId),
     workspaceSystemKeyUnique: uniqueIndex("assistants_workspace_system_key_unique_idx").on(
       table.workspaceId,
       table.systemKey,
@@ -8890,17 +8893,132 @@ export const builds = pgTable(
     instructionMarkdown: text("instruction_markdown"),
     instructionUpdatedAt: timestamp("instruction_updated_at", { withTimezone: true }),
     instructionUpdatedBy: varchar("instruction_updated_by"),
+    // Автор, которого показывает витрина (имя, логин, почта). Первый публиковавший; учётка удалена — пусто.
+    ownerUserId: varchar("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    starsCount: integer("stars_count").notNull().default(0),
+    commentsCount: integer("comments_count").notNull().default(0),
+    // Скрытие с витрины (status = deprecated): кто скрыл, почему; скрытую администратором автор не возвращает.
+    hiddenReason: text("hidden_reason"),
+    hiddenByUserId: varchar("hidden_by_user_id"),
+    hiddenByAdmin: boolean("hidden_by_admin").notNull().default(false),
+    hiddenAt: timestamp("hidden_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
     statusIdx: index("builds_status_idx").on(table.status, table.updatedAt),
     visibilityIdx: index("builds_visibility_idx").on(table.visibility, table.updatedAt),
+    ownerUserIdx: index("builds_owner_user_idx").on(table.ownerUserId),
   }),
 );
 
 export type Build = typeof builds.$inferSelect;
 export type BuildInsert = typeof builds.$inferInsert;
+
+/**
+ * Группа категорий каталога сборок (например, «Вид судопроизводства», «Роль»). Заводит только администратор
+ * инсталляции — предметная область живёт в данных, не в коде; из групп строятся фильтры витрины.
+ */
+export const buildCategoryGroups = pgTable(
+  "build_category_groups",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    name: varchar("name", { length: 100 }).notNull(),
+    description: text("description"),
+    selection: varchar("selection", { length: 16 }).$type<BuildCategorySelection>().notNull().default("multi"),
+    required: boolean("required").notNull().default(false),
+    sortOrder: integer("sort_order").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    nameUniqueIdx: uniqueIndex("build_category_groups_name_uq").on(sql`lower(${table.name})`),
+  }),
+);
+
+export type BuildCategoryGroup = typeof buildCategoryGroups.$inferSelect;
+
+export const buildCategories = pgTable(
+  "build_categories",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => buildCategoryGroups.id, { onDelete: "cascade" }),
+    label: varchar("label", { length: 100 }).notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    groupLabelUniqueIdx: uniqueIndex("build_categories_group_label_uq").on(table.groupId, sql`lower(${table.label})`),
+  }),
+);
+
+export type BuildCategory = typeof buildCategories.$inferSelect;
+
+/** Категории сборки — у сборки, не у версии: администратор и автор меняют их без выпуска версии. */
+export const buildCategoryLinks = pgTable(
+  "build_category_links",
+  {
+    buildId: varchar("build_id", { length: 255 })
+      .notNull()
+      .references(() => builds.id, { onDelete: "cascade" }),
+    categoryId: uuid("category_id")
+      .notNull()
+      .references(() => buildCategories.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.buildId, table.categoryId] }),
+    categoryIdx: index("build_category_links_category_idx").on(table.categoryId),
+  }),
+);
+
+/** Звезда сборки — один переключатель на пользователя (аналог лайка, как на GitHub). */
+export const buildStars = pgTable(
+  "build_stars",
+  {
+    buildId: varchar("build_id", { length: 255 })
+      .notNull()
+      .references(() => builds.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.buildId, table.userId] }),
+    userIdx: index("build_stars_user_idx").on(table.userId),
+  }),
+);
+
+/** Комментарий к сборке — плоская лента; удаление мягкое (автор комментария или администратор). */
+export const buildComments = pgTable(
+  "build_comments",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    buildId: varchar("build_id", { length: 255 })
+      .notNull()
+      .references(() => builds.id, { onDelete: "cascade" }),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Пространство, из которого написан, — для отметки «Пользуется» (там стоит эта сборка).
+    workspaceId: varchar("workspace_id"),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedBy: varchar("deleted_by"),
+  },
+  (table) => ({
+    buildCreatedIdx: index("build_comments_build_created_idx").on(table.buildId, table.createdAt),
+    userIdx: index("build_comments_user_idx").on(table.userId),
+  }),
+);
+
+export type BuildComment = typeof buildComments.$inferSelect;
 
 export const buildVersions = pgTable(
   "build_versions",
