@@ -23,6 +23,21 @@ export type McpServerTrustTier = (typeof mcpServerTrustTiers)[number];
 export const mcpServerRegistryStatuses = ["active", "disabled"] as const;
 export type McpServerRegistryStatus = (typeof mcpServerRegistryStatuses)[number];
 
+/** Откуда карточка сервера: манифест плагина, подключение пространства по адресу, манифест unica-mcp.json. */
+export const mcpServerOrigins = ["local_manifest", "remote_url", "unica_manifest"] as const;
+export type McpServerOrigin = (typeof mcpServerOrigins)[number];
+
+/** Чей ключ уходит серверу интеграции (shared/mcp-manifest.ts, unicaMcpCredentialModes). */
+export const mcpIntegrationCredentialModes = ["installation", "user", "user_or_installation"] as const;
+export type McpIntegrationCredentialMode = (typeof mcpIntegrationCredentialModes)[number];
+
+/** Каким пространствам доступна интеграция инсталляции. */
+export const mcpIntegrationAvailabilities = ["all", "selected", "none"] as const;
+export type McpIntegrationAvailability = (typeof mcpIntegrationAvailabilities)[number];
+
+export const mcpIntegrationSyncJobStatuses = ["pending", "running", "done", "failed"] as const;
+export type McpIntegrationSyncJobStatus = (typeof mcpIntegrationSyncJobStatuses)[number];
+
 const jsonObjectInputSchema = z.record(z.string(), z.unknown());
 const jsonStringRecordSchema = z.record(z.string(), z.string());
 

@@ -134,9 +134,14 @@ import type {
 } from "./builds";
 import type {
   McpInstallationStatus,
+  McpIntegrationAvailability,
+  McpIntegrationCredentialMode,
+  McpIntegrationSyncJobStatus,
+  McpServerOrigin,
   McpServerRegistryStatus,
   McpServerTrustTier,
   McpToolHealthStatus,
+  McpToolConfirmationPolicy,
   McpToolPermissionLevel,
   McpTransport,
 } from "./mcp";
@@ -3915,6 +3920,8 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default(sql`'{}'::jsonb`),
+  // MCP-интеграции (0409): allowWorkspaceUrlConnections — можно ли пространствам подключать MCP по адресу.
+  mcpSettings: jsonb("mcp_settings").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
   // Срок шага ИИ в сценариях без своего срока. Остальные лимиты прежнего агента удалены миграцией 0402.
   agentTimeoutSec: integer("agent_timeout_sec").notNull().default(600),
   // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace + personal, системный
@@ -9640,7 +9647,7 @@ export const mcpServerRegistryEntries = pgTable(
     // Двухуровневый реестр (0374): NULL — сервер уровня инсталляции из локального манифеста,
     // значение — сервер, который пространство подключило по адресу; ключ уникален внутри уровня.
     workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
-    origin: varchar("origin", { length: 32 }).$type<"local_manifest" | "remote_url">().notNull().default("local_manifest"),
+    origin: varchar("origin", { length: 32 }).$type<McpServerOrigin>().notNull().default("local_manifest"),
     sourceUrl: text("source_url"),
     configSchema: jsonb("config_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     secretSchema: jsonb("secret_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
@@ -9675,6 +9682,8 @@ export const mcpServerVersions = pgTable(
     protocolVersion: varchar("protocol_version", { length: 64 }).notNull().default("2025-11-25"),
     manifest: jsonb("manifest").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     manifestHash: varchar("manifest_hash", { length: 128 }),
+    // Исходный unica-mcp.json для карточек origin = unica_manifest (0409); manifest — его внутренний вид.
+    unicaManifest: jsonb("unica_manifest").$type<JsonObject>(),
     sourcePath: text("source_path"),
     publishedByUserId: varchar("published_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -9719,14 +9728,22 @@ export const workspaceMcpInstallations = pgTable(
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
     isActive: boolean("is_active").notNull().default(true),
+    // Включение MCP-интеграции инсталляции (0409): адрес, манифест и секреты берутся из интеграции,
+    // baseUrl — справочная копия её адреса. NULL — подключение по адресу или из манифеста плагина.
+    integrationId: uuid("integration_id").references((): AnyPgColumn => mcpIntegrations.id, { onDelete: "cascade" }),
+    // Настройки уровня workspace из манифеста интеграции.
+    workspaceSettings: jsonb("workspace_settings").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    workspaceServerUniqueIdx: uniqueIndex("workspace_mcp_installations_workspace_server_uq").on(
-      table.workspaceId,
-      table.serverId,
-    ),
+    workspaceServerUniqueIdx: uniqueIndex("workspace_mcp_installations_workspace_server_uq")
+      .on(table.workspaceId, table.serverId)
+      .where(sql`${table.integrationId} IS NULL`),
+    workspaceIntegrationUniqueIdx: uniqueIndex("workspace_mcp_installations_workspace_integration_uq")
+      .on(table.workspaceId, table.integrationId)
+      .where(sql`${table.integrationId} IS NOT NULL`),
+    integrationIdx: index("workspace_mcp_installations_integration_idx").on(table.integrationId),
     workspaceStatusIdx: index("workspace_mcp_installations_workspace_status_idx").on(
       table.workspaceId,
       table.status,
@@ -9863,6 +9880,154 @@ export const mcpExecutionLogs = pgTable(
 
 export type McpExecutionLog = typeof mcpExecutionLogs.$inferSelect;
 export type McpExecutionLogInsert = typeof mcpExecutionLogs.$inferInsert;
+
+/**
+ * MCP-интеграция инсталляции (0409): настроенный админом экземпляр сервера с манифестом unica-mcp.json.
+ * Пространства её только включают (workspace_mcp_installations.integration_id), инструменты копируются из
+ * mcp_integration_tools задачами mcp_integration_sync_jobs.
+ */
+export const mcpIntegrations = pgTable(
+  "mcp_integrations",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServerRegistryEntries.id, { onDelete: "cascade" }),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => mcpServerVersions.id, { onDelete: "cascade" }),
+    // Новая версия манифеста, прочитанная при проверке связи: применяется только кнопкой админа.
+    pendingVersionId: uuid("pending_version_id").references(() => mcpServerVersions.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    // Адрес сервиса (без пути MCP) и полный адрес MCP = baseUrl + mcpPath манифеста.
+    baseUrl: text("base_url").notNull(),
+    mcpUrl: text("mcp_url").notNull(),
+    status: varchar("status", { length: 32 }).$type<McpInstallationStatus>().notNull().default("draft"),
+    credentialMode: varchar("credential_mode", { length: 32 }).$type<McpIntegrationCredentialMode>().notNull().default("user"),
+    availability: varchar("availability", { length: 32 }).$type<McpIntegrationAvailability>().notNull().default("all"),
+    autoEnable: boolean("auto_enable").notNull().default(false),
+    // Несекретные настройки уровня installation из манифеста.
+    settings: jsonb("settings").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    health: jsonb("health").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    discoveryFingerprint: varchar("discovery_fingerprint", { length: 128 }),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    lastDiscoveredAt: timestamp("last_discovered_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    // Когда админ последний раз сменил хост интеграции — пометка у пользователей с личными ключами.
+    hostChangedAt: timestamp("host_changed_at", { withTimezone: true }),
+    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    nameUniqueIdx: uniqueIndex("mcp_integrations_name_uq").on(sql`lower(${table.name})`),
+    serverIdx: index("mcp_integrations_server_idx").on(table.serverId),
+  }),
+);
+
+export type McpIntegration = typeof mcpIntegrations.$inferSelect;
+export type McpIntegrationInsert = typeof mcpIntegrations.$inferInsert;
+
+/** Служебный ключ, секрет связи и секретные настройки интеграции (server/secret-storage.ts). */
+export const mcpIntegrationSecrets = pgTable(
+  "mcp_integration_secrets",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    encryptedSecrets: jsonb("encrypted_secrets").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    integrationUniqueIdx: uniqueIndex("mcp_integration_secrets_integration_uq").on(table.integrationId),
+  }),
+);
+
+/** Пространства, которым доступна интеграция при availability = selected. */
+export const mcpIntegrationWorkspaceAccess = pgTable(
+  "mcp_integration_workspace_access",
+  {
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.integrationId, table.workspaceId] }),
+    workspaceIdx: index("mcp_integration_workspace_access_workspace_idx").on(table.workspaceId),
+  }),
+);
+
+/**
+ * Инструменты интеграции — источник для копий в пространствах. Пин определения и карантин живут здесь:
+ * пространство не перепинивает и не снимает карантин. min_confirmation_policy — нижняя граница
+ * подтверждения, которую пространство может только ужесточить.
+ */
+export const mcpIntegrationTools = pgTable(
+  "mcp_integration_tools",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    toolName: varchar("tool_name", { length: 255 }).notNull(),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    inputSchema: jsonb("input_schema").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    rawTool: jsonb("raw_tool").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    annotations: jsonb("annotations").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    permissionLevel: varchar("permission_level", { length: 32 }).$type<McpToolPermissionLevel>().notNull().default("write"),
+    minConfirmationPolicy: varchar("min_confirmation_policy", { length: 32 })
+      .$type<McpToolConfirmationPolicy>()
+      .notNull()
+      .default("ask"),
+    defaultEnabled: boolean("default_enabled").notNull().default(true),
+    defaultExposedToAgent: boolean("default_exposed_to_agent").notNull().default(true),
+    healthStatus: varchar("health_status", { length: 32 }).$type<McpToolHealthStatus>().notNull().default("healthy"),
+    pinnedDefinitionHash: varchar("pinned_definition_hash", { length: 128 }),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+    integrityStatus: varchar("integrity_status", { length: 32 }).$type<PackageIntegrityStatus>().notNull().default("active"),
+    discoveredAt: timestamp("discovered_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    integrationToolUniqueIdx: uniqueIndex("mcp_integration_tools_integration_tool_uq").on(table.integrationId, table.toolName),
+  }),
+);
+
+export type McpIntegrationTool = typeof mcpIntegrationTools.$inferSelect;
+
+/** Устойчивая очередь копирования инструментов интеграции в пространства: одна строка на пару. */
+export const mcpIntegrationSyncJobs = pgTable(
+  "mcp_integration_sync_jobs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    status: varchar("status", { length: 32 }).$type<McpIntegrationSyncJobStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    runAfter: timestamp("run_after", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pairUniqueIdx: uniqueIndex("mcp_integration_sync_jobs_pair_uq").on(table.integrationId, table.workspaceId),
+    queueIdx: index("mcp_integration_sync_jobs_queue_idx").on(table.status, table.runAfter),
+    workspaceIdx: index("mcp_integration_sync_jobs_workspace_idx").on(table.workspaceId),
+  }),
+);
 
 export const packageDrafts = pgTable(
   "package_drafts",
