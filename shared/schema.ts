@@ -3922,6 +3922,12 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default(sql`'{}'::jsonb`),
+  // Список сайтов, на которые платформе можно ходить наружу (веб агента, внешние MCP, обход сайтов для БЗ), — страница
+  // «Интеграции → Сайты и сеть». Форму значения задаёт shared/site-access.ts; пустой объект — ограничений нет.
+  siteAccessSettings: jsonb("site_access_settings")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   // Срок шага ИИ в сценариях без своего срока. Остальные лимиты прежнего агента удалены миграцией 0402.
   agentTimeoutSec: integer("agent_timeout_sec").notNull().default(600),
   // Лимит промптов инстанса (Фаза 3 библиотеки промптов): суммарно scope instance + workspace + personal, системный
