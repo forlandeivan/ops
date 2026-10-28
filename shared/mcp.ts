@@ -38,6 +38,14 @@ export type McpIntegrationAvailability = (typeof mcpIntegrationAvailabilities)[n
 export const mcpIntegrationSyncJobStatuses = ["pending", "running", "done", "failed"] as const;
 export type McpIntegrationSyncJobStatus = (typeof mcpIntegrationSyncJobStatuses)[number];
 
+/** Личный ключ сотрудника: ещё не проверен, принят сервером, отклонён сервером. */
+export const mcpUserConnectionStatuses = ["unchecked", "ok", "rejected"] as const;
+export type McpUserConnectionStatus = (typeof mcpUserConnectionStatuses)[number];
+
+/** Чей ключ ушёл серверу при вызове — для журнала. */
+export const mcpCredentialSources = ["user", "installation", "none"] as const;
+export type McpCredentialSource = (typeof mcpCredentialSources)[number];
+
 const jsonObjectInputSchema = z.record(z.string(), z.unknown());
 const jsonStringRecordSchema = z.record(z.string(), z.string());
 

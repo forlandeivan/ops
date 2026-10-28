@@ -137,6 +137,7 @@ import type {
   McpIntegrationAvailability,
   McpIntegrationCredentialMode,
   McpIntegrationSyncJobStatus,
+  McpCredentialSource,
   McpServerOrigin,
   McpServerRegistryStatus,
   McpServerTrustTier,
@@ -144,6 +145,7 @@ import type {
   McpToolConfirmationPolicy,
   McpToolPermissionLevel,
   McpTransport,
+  McpUserConnectionStatus,
 } from "./mcp";
 import type { RagPipelineErrorDetails, RagPipelineExecutionSource } from "./rag-errors";
 import type { ComposerPart, ContextRef, ResolvedContextRef, WorkflowContextRequestChatMetadata } from "./context-refs";
@@ -9868,6 +9870,10 @@ export const mcpExecutionLogs = pgTable(
     requestPreview: jsonb("request_preview").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     resultPreview: jsonb("result_preview").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     metadata: jsonb("metadata").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    // Кто вызывал, через какую интеграцию и чьим ключом (0410). Без FK: журнал большой, ссылки только справочные.
+    actorUserId: varchar("actor_user_id"),
+    integrationId: uuid("integration_id"),
+    credentialSource: varchar("credential_source", { length: 32 }).$type<McpCredentialSource>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
@@ -10002,6 +10008,39 @@ export const mcpIntegrationTools = pgTable(
 );
 
 export type McpIntegrationTool = typeof mcpIntegrationTools.$inferSelect;
+
+/**
+ * Личный ключ сотрудника к MCP-интеграции (0410): один на пару «интеграция × пользователь», работает во всех
+ * пространствах пользователя. Ключ зашифрован (server/secret-storage.ts); settings — настройки уровня user.
+ */
+export const mcpIntegrationUserConnections = pgTable(
+  "mcp_integration_user_connections",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    encryptedCredential: text("encrypted_credential").notNull(),
+    settings: jsonb("settings").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
+    status: varchar("status", { length: 32 }).$type<McpUserConnectionStatus>().notNull().default("unchecked"),
+    // Имя из инструмента «кто я» сервера: «Фролов Иван (cp.rp-it.ru)».
+    externalIdentity: text("external_identity"),
+    lastError: text("last_error"),
+    checkedAt: timestamp("checked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pairUniqueIdx: uniqueIndex("mcp_integration_user_connections_pair_uq").on(table.integrationId, table.userId),
+    userIdx: index("mcp_integration_user_connections_user_idx").on(table.userId),
+  }),
+);
+
+export type McpIntegrationUserConnection = typeof mcpIntegrationUserConnections.$inferSelect;
 
 /** Устойчивая очередь копирования инструментов интеграции в пространства: одна строка на пару. */
 export const mcpIntegrationSyncJobs = pgTable(
