@@ -286,11 +286,12 @@ const workspacePlans = ["free", "team"] as const;
 type WorkspacePlan = (typeof workspacePlans)[number];
 const workspacePlanEnum = pgEnum("workspace_plan", workspacePlans);
 
-export const modelTypes = ["LLM", "EMBEDDINGS", "ASR"] as const;
+// WEB — платные обращения агента к интернету (web.search, web.fetch) с ценой «за запрос»; в выбор моделей не попадают.
+export const modelTypes = ["LLM", "EMBEDDINGS", "ASR", "WEB"] as const;
 export type ModelType = (typeof modelTypes)[number];
 const modelTypeEnum = pgEnum("model_type", modelTypes);
 
-const modelConsumptionUnits = ["TOKENS_1K", "TOKENS_1M", "MINUTES"] as const;
+const modelConsumptionUnits = ["TOKENS_1K", "TOKENS_1M", "MINUTES", "REQUESTS"] as const;
 export type ModelConsumptionUnit = (typeof modelConsumptionUnits)[number];
 const modelConsumptionUnitEnum = pgEnum("model_consumption_unit", modelConsumptionUnits);
 
@@ -3922,6 +3923,18 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default(sql`'{}'::jsonb`),
+  // Веб агента (стратегия v2, этап 1): карточка «Доступ в интернет» в «Настройках агента». Форму, значения по
+  // умолчанию и хранение ключа провайдера задаёт shared/agent-settings.ts; пустой объект — всё по умолчанию.
+  agentWebAccessSettings: jsonb("agent_web_access_settings")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
+  // Список сайтов, на которые платформе можно ходить наружу (веб агента, внешние MCP, обход сайтов для БЗ), — страница
+  // «Интеграции → Сайты и сеть». Форму значения задаёт shared/site-access.ts; пустой объект — ограничений нет.
+  siteAccessSettings: jsonb("site_access_settings")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   // MCP-интеграции (0409): allowWorkspaceUrlConnections — можно ли пространствам подключать MCP по адресу.
   mcpSettings: jsonb("mcp_settings").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
   // Срок шага ИИ в сценариях без своего срока. Остальные лимиты прежнего агента удалены миграцией 0402.
@@ -6745,6 +6758,41 @@ export const agentExecutionEvents = pgTable(
   }),
 );
 
+// Журнал обращений агента к интернету (стратегия v2, этап 1): строка на вызов web.search или web.fetch. По нему
+// монолит проверяет происхождение ссылки (result_urls чата), считает бюджет обращений прогона и подтверждение записи
+// после чтения веба.
+export const agentWebRequests = pgTable(
+  "agent_web_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
+    runId: varchar("run_id"),
+    // search | fetch
+    kind: text("kind").notNull(),
+    query: text("query"),
+    url: text("url"),
+    finalUrl: text("final_url"),
+    host: text("host"),
+    // ok | blocked | denied | budget | rate_limited | error
+    outcome: text("outcome").notNull(),
+    errorCode: text("error_code"),
+    resultUrls: jsonb("result_urls").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    cacheHit: boolean("cache_hit").notNull().default(false),
+    durationMs: integer("duration_ms"),
+    chargedCents: integer("charged_cents").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceIdx: index("agent_web_requests_workspace_idx").on(table.workspaceId, table.createdAt),
+    chatIdx: index("agent_web_requests_chat_idx").on(table.chatId, table.createdAt),
+    runIdx: index("agent_web_requests_run_idx").on(table.runId),
+    userIdx: index("agent_web_requests_user_idx").on(table.userId),
+  }),
+);
+
+export type AgentWebRequestRecord = typeof agentWebRequests.$inferSelect;
 export type AgentExecutionRecord = typeof agentExecutions.$inferSelect;
 export type AgentExecutionInsert = typeof agentExecutions.$inferInsert;
 export type AgentExecutionEventRecord = typeof agentExecutionEvents.$inferSelect;

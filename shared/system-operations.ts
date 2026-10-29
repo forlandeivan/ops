@@ -21,6 +21,7 @@ export const systemOperationCategoryValues = [
   "transcripts",
   "visualizations",
   "workflow",
+  "web",
   "workspace",
 ] as const;
 export type SystemOperationCategory = (typeof systemOperationCategoryValues)[number];
