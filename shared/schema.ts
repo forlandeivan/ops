@@ -194,6 +194,8 @@ export const users = pgTable("users", {
   status: varchar("status", { length: 64 }).notNull().default("active"),
   mustChangePassword: boolean("must_change_password").notNull().default(false),
   disablePersonalWorkspaceAutoCreate: boolean("disable_personal_workspace_auto_create").notNull().default(false),
+  // «Моя память» (shared/agent-memory.ts): один выключатель на человека во всех пространствах — его решение о приватности.
+  personalMemoryEnabled: boolean("personal_memory_enabled").notNull().default(true),
   personalApiTokenHash: text("personal_api_token_hash"),
   personalApiTokenLastFour: text("personal_api_token_last_four"),
   personalApiTokenGeneratedAt: timestamp("personal_api_token_generated_at"),
@@ -486,6 +488,9 @@ export const workspaces = pgTable("workspaces", {
    * Резолв — server/system-knowledge/system-workspace-lookup.ts.
    */
   isSystem: boolean("is_system").notNull().default(false),
+  // Память агента в пространстве (shared/agent-memory.ts): выключает владелец пространства — тогда ни один уровень
+  // памяти (пространство, ассистент, личная) здесь не читается и не пишется.
+  memoryEnabled: boolean("memory_enabled").notNull().default(true),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (table) => ({
@@ -3945,6 +3950,12 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // сид и starters ассистентов не учитываются. NULL = «Авто» (env PROMPTS_INSTANCE_LIMIT → fallback 1000); 0 = запрет
   // создания новых. Превышение → 409.
   promptsInstanceLimit: integer("prompts_instance_limit"),
+  // --- Слой инструкций (docs/assistant-context-and-skills-design.md): «Уника.md» инсталляции, документы пространств,
+  // личные пожелания и память — в чат и агента. Выключен по умолчанию: включает администратор во вкладке «Инструкции»
+  // «Настроек агента»; выключен — работает только инструкция ассистента, как до слоя. Предел слоя в символах:
+  // NULL = «Авто» (shared/instruction-layer.ts). ---
+  instructionLayerEnabled: boolean("instruction_layer_enabled").notNull().default(false),
+  instructionLayerMaxChars: integer("instruction_layer_max_chars"),
   // --- W2 Code Node: лимиты code runner'а узла «Код (JavaScript)». NULL = «Авто» (дефолт кода workflow-сервиса). Память
   // в external-режиме задаёт развёртывание раннера — админ-значение применяется к internal-пулу. ---
   workflowCodeExecTimeoutMs: integer("workflow_code_exec_timeout_ms"),
@@ -4120,6 +4131,9 @@ export const assistants = pgTable(
       .references(() => workspaceVectorCollections.collectionName, { onDelete: "set null" }),
     isSystem: boolean("is_system").notNull().default(false),
       systemKey: text("system_key"),
+      // Память ассистента (shared/agent-memory.ts): факты, которые ассистент учитывает у всех пользователей. У системных
+      // ассистентов уровня нет независимо от флага. В манифест сборок не входит: это данные времени работы.
+      memoryEnabled: boolean("memory_enabled").notNull().default(true),
       executionMode: text("execution_mode").$type<AssistantExecutionMode>().notNull().default("standard"),
       workflowDefinitionId: uuid("workflow_definition_id"),
       workflowSystemTemplateKey: varchar("workflow_system_template_key", { length: 255 }),
@@ -10887,11 +10901,93 @@ export const instructionDocuments = pgTable(
       table.scope,
       sql`COALESCE(${table.scopeRefId}, '')`,
     ),
+    // Личные документы (scope='user') чистятся при выходе участника и удалении пользователя — FK у scope_ref_id нет.
+    userRefIdx: index("instruction_documents_user_ref_idx")
+      .on(table.scopeRefId)
+      .where(sql`${table.scope} = 'user'`),
   }),
 );
 
 export type InstructionDocument = typeof instructionDocuments.$inferSelect;
 export type InstructionDocumentInsert = typeof instructionDocuments.$inferInsert;
+
+// ─── Agent Context: Memory (workspace / assistant / user) ─────────────────────
+// Короткие факты, которые чат и агент получают в промпт как ДАННЫЕ (не указания) — отдельно от документов инструкций.
+// Личную память агент ведёт сам; память пространства и ассистента меняется только по просьбе человека с правом, через
+// карточку подтверждения. Явные FK вместо полиморфной ссылки: каскад при удалении пользователя или ассистента обязателен
+// (личная память — персональные данные). Личная память привязана к пространству: сведения пространства не утекают в
+// другие пространства и уходят вместе с ним. Лимиты и форма — shared/agent-memory.ts.
+
+export const memoryScopes = ["workspace", "assistant", "user"] as const;
+export type MemoryScope = (typeof memoryScopes)[number];
+export const memoryNodeKinds = ["folder", "document"] as const;
+export type MemoryNodeKind = (typeof memoryNodeKinds)[number];
+
+/**
+ * Память трёх уровней (shared/agent-memory.ts) — папка маленьких документов, как на диске: папки и документы с
+ * заголовком, строкой описания и текстом. В промпт агента идёт только оглавление, текст он читает по требованию.
+ * Уровни (scope): workspace — общий справочник пространства; user — личная память человека, одна на все пространства;
+ * assistant — личная память человека внутри одного ассистента (у каждого пользователя своя, как чаты). Общей памяти
+ * ассистента нет намеренно: в неё утекала бы личная переписка. Каскады: удаление папки уносит содержимое;
+ * пространство, ассистент и пользователь — свою память.
+ */
+export const memoryNodes = pgTable(
+  "memory_nodes",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Пространство (scope workspace и assistant); у личной памяти NULL — она у человека одна на все пространства. */
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: varchar("scope", { length: 16 }).$type<MemoryScope>().notNull(),
+    /** Владелец личной памяти (scope user и assistant). */
+    userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** Только scope='assistant': личная память пользователя внутри этого ассистента. */
+    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    kind: varchar("kind", { length: 16 }).$type<MemoryNodeKind>().notNull().default("document"),
+    /** Родительская папка; NULL — корень уровня. */
+    parentId: varchar("parent_id").references((): AnyPgColumn => memoryNodes.id, { onDelete: "cascade" }),
+    title: varchar("title", { length: 120 }).notNull(),
+    /** Строка оглавления: по ней агент решает, открывать ли документ. Пусто — берётся первая строка текста. */
+    description: varchar("description", { length: 200 }),
+    /** Текст документа; у папки NULL. Длину (shared/agent-memory.ts) проверяет zod: лимит меняется без миграции. */
+    body: text("body"),
+    createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'assistant', 'user')`),
+    kindCheck: check(
+      "memory_nodes_kind_check",
+      sql`(${table.kind} = 'document' AND ${table.body} IS NOT NULL) OR (${table.kind} = 'folder' AND ${table.body} IS NULL)`,
+    ),
+    // Строка принадлежит ровно той сущности, которую называет scope.
+    scopeRefCheck: check(
+      "memory_nodes_scope_ref_check",
+      sql`(${table.scope} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.userId} IS NULL AND ${table.assistantId} IS NULL) OR (${table.scope} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NOT NULL) OR (${table.scope} = 'user' AND ${table.workspaceId} IS NULL AND ${table.userId} IS NOT NULL AND ${table.assistantId} IS NULL)`,
+    ),
+    // Один заголовок в папке без учёта регистра: «тот же документ» обновляется, а не дублируется.
+    titleUniq: uniqueIndex("memory_nodes_title_uq").on(
+      sql`COALESCE(${table.workspaceId}, '')`,
+      table.scope,
+      sql`COALESCE(${table.userId}, '')`,
+      sql`COALESCE(${table.assistantId}, '')`,
+      sql`COALESCE(${table.parentId}, '')`,
+      sql`lower(${table.title})`,
+    ),
+    parentIdx: index("memory_nodes_parent_idx").on(table.parentId),
+    workspaceIdx: index("memory_nodes_workspace_idx").on(table.workspaceId, table.scope, table.updatedAt),
+    assistantIdx: index("memory_nodes_assistant_idx")
+      .on(table.assistantId, table.userId, table.updatedAt)
+      .where(sql`${table.assistantId} IS NOT NULL`),
+    userIdx: index("memory_nodes_user_idx")
+      .on(table.userId, table.scope, table.updatedAt)
+      .where(sql`${table.userId} IS NOT NULL`),
+  }),
+);
+
+export type MemoryNode = typeof memoryNodes.$inferSelect;
+export type MemoryNodeInsert = typeof memoryNodes.$inferInsert;
 
 /**
  * Навыки, объявленные на ассистенте (источник истины) — §4.4.

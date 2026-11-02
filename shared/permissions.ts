@@ -20,6 +20,7 @@ export const MODULE_LABELS: Record<string, string> = {
   global_variables: 'Глобальные переменные',
   prompts: 'Промпты',
   web: 'Интернет',
+  memory: 'Память',
 };
 
 export const PERMISSION_MODULES = [
@@ -41,6 +42,7 @@ export const PERMISSION_MODULES = [
   'global_variables',
   'prompts',
   'web',
+  'memory',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
 
@@ -161,6 +163,10 @@ export const P = {
   PROMPTS_MANAGE: 'prompts:manage',
   // Веб агента (этап 1 стратегии v2): операции web.search и web.fetch.
   WEB_USE: 'web:use',
+  // Память рабочего пространства (shared/agent-memory.ts): запись фактов, которые ассистенты учитывают у всех
+  // участников. Чтение — любому участнику (факты и так в его промпте). Отдельный модуль, а не уровень `workspace`:
+  // новое право в уровне `editor` понизило бы существующим кастомным ролям показанный уровень доступа.
+  MEMORY_MANAGE: 'memory:manage',
 } as const;
 
 export type PermissionId = (typeof P)[keyof typeof P];
@@ -198,6 +204,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.GLOBAL_VARIABLES_READ_SECRET, P.GLOBAL_VARIABLES_DEFINE,
     P.PROMPTS_VIEW, P.PROMPTS_MANAGE,
     P.WEB_USE,
+    P.MEMORY_MANAGE,
   ],
   member: [
     P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN,
@@ -385,6 +392,10 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Поиск и чтение страниц', permissions: [P.WEB_USE] },
   ],
+  memory: [
+    { code: 'none',   label: 'Только чтение', permissions: [] },
+    { code: 'editor', label: 'Управление памятью пространства', permissions: [P.MEMORY_MANAGE] },
+  ],
 };
 
 /** Convert per-module access levels to a flat permission ID array. */
@@ -510,4 +521,5 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.PROMPTS_VIEW, module: 'prompts', action: 'view', description: 'Просмотр библиотеки промптов и стартовых подсказок', isSensitive: false },
   { id: P.PROMPTS_MANAGE, module: 'prompts', action: 'manage', description: 'Управление промптами пространства (создание, правка, удаление)', isSensitive: false },
   { id: P.WEB_USE, module: 'web', action: 'use', description: 'Поиск и чтение страниц в интернете агентом (если функция включена пространству)', isSensitive: false },
+  { id: P.MEMORY_MANAGE, module: 'memory', action: 'manage', description: 'Запись памяти рабочего пространства — фактов, которые ассистенты учитывают у всех участников', isSensitive: true },
 ];
