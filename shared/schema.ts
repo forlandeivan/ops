@@ -1530,6 +1530,8 @@ export const dataProtectionEvents = pgTable(
     siemAttempts: integer("siem_attempts").notNull().default(0),
     siemNextAttemptAt: timestamp("siem_next_attempt_at"),
     siemLeaseUntil: timestamp("siem_lease_until"),
+    /** Строка записана в лог приложения (`data_protection.event`); пусто — сводка ещё не записана. */
+    loggedAt: timestamp("logged_at"),
   },
   (table) => ({
     occurredAtIdx: index("data_protection_events_occurred_at_idx").on(table.occurredAt),
@@ -1541,6 +1543,9 @@ export const dataProtectionEvents = pgTable(
     siemDueIdx: index("data_protection_events_siem_due_idx")
       .on(table.siemNextAttemptAt)
       .where(sql`${table.siemState} IN ('pending', 'sending')`),
+    logDueIdx: index("data_protection_events_log_due_idx")
+      .on(table.occurredAt)
+      .where(sql`${table.loggedAt} IS NULL AND ${table.dedupeKey} IS NOT NULL`),
     siemStateCheck: check("data_protection_events_siem_state_check", sql`${table.siemState} IN ('pending', 'sending', 'sent')`),
   }),
 );
