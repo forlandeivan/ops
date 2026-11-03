@@ -3606,6 +3606,12 @@ export const llmRequestConfigSchema = z
     additionalBodyFields: z
       .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.any()), z.record(z.string(), z.any())]))
       .default({}),
+    /**
+     * Протокол API провайдера. `responses` — точка выхода переводит запросы генерации из формата
+     * chat/completions в Responses API и ответы обратно (`server/llm-egress/responses-adapter.ts`).
+     * Не задан — chat/completions.
+     */
+    apiProtocol: z.enum(["chat_completions", "responses"]).optional(),
   })
   .default({ messagesField: "messages", modelField: "model", additionalBodyFields: {} });
 
