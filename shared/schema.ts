@@ -1532,6 +1532,10 @@ export const dataProtectionEvents = pgTable(
     siemLeaseUntil: timestamp("siem_lease_until"),
     /** Строка записана в лог приложения (`data_protection.event`); пусто — сводка ещё не записана. */
     loggedAt: timestamp("logged_at"),
+    /** Откуда находки: происхождение (`user`, `system`, `assistant`, `tool:<имя>`…) → число находок. */
+    origins: jsonb("origins").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
+    /** Фрагменты-доказательства: отрывки вокруг находок со скрытыми значениями. Только для карточки события. */
+    evidence: jsonb("evidence").$type<{ class: string; type: string; origin: string; fragment: string }[] | null>(),
   },
   (table) => ({
     occurredAtIdx: index("data_protection_events_occurred_at_idx").on(table.occurredAt),
@@ -1543,6 +1547,7 @@ export const dataProtectionEvents = pgTable(
     siemDueIdx: index("data_protection_events_siem_due_idx")
       .on(table.siemNextAttemptAt)
       .where(sql`${table.siemState} IN ('pending', 'sending')`),
+    userOccurredIdx: index("data_protection_events_user_occurred_idx").on(table.userId, table.occurredAt),
     logDueIdx: index("data_protection_events_log_due_idx")
       .on(table.occurredAt)
       .where(sql`${table.loggedAt} IS NULL AND ${table.dedupeKey} IS NOT NULL`),
