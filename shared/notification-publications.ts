@@ -7,6 +7,14 @@ export const releaseAudienceSchema = z.object({
 }).strict();
 export type ReleaseAudience = z.infer<typeof releaseAudienceSchema>;
 
+/**
+ * Публикации уровня инсталляции без аудитории: объявления платформы (`manual_instance`) и оповещения
+ * «Защиты данных» администраторам (`security_alert`, адресаты выбраны при создании).
+ */
+export function isInstanceWidePublication(kind: string | null | undefined): boolean {
+  return kind === "manual_instance" || kind === "security_alert";
+}
+
 export function isPublicationUrl(value: string): boolean {
   if (/[\\\u0000-\u0020\u007f]/.test(value)) return false;
   if (value.startsWith("/") && !value.startsWith("//")) return true;

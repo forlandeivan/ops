@@ -566,6 +566,21 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 90,
   }),
   task({
+    key: "pg.data_protection_events",
+    label: "Журнал защиты данных (data_protection_events)",
+    description:
+      "Удаляет записи журнала «Защиты данных» старше срока хранения: срабатывания политики в запросах к моделям и изменения политики и отметок провайдеров. Найденных значений в журнале нет, но есть пространство и человек, поэтому политика чувствительная и включена из коробки.",
+    category: "audit",
+    action: "delete_rows",
+    table: "data_protection_events",
+    timeColumn: "occurred_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 180,
+    defaultBatchSize: 2000,
+    intervalMinutes: 360,
+    sensitive: true,
+  }),
+  task({
     key: "pg.notification_inbox.archived",
     label: "Архив центра уведомлений (notification_inbox)",
     description: "Удаляет уведомления через заданный срок после архивирования. Исходные задачи и решения сохраняются.",

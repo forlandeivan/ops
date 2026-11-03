@@ -21,6 +21,7 @@ export const MODULE_LABELS: Record<string, string> = {
   prompts: 'Промпты',
   web: 'Интернет',
   memory: 'Память',
+  models_api: 'Модели для IDE и программ',
 };
 
 export const PERMISSION_MODULES = [
@@ -43,6 +44,7 @@ export const PERMISSION_MODULES = [
   'prompts',
   'web',
   'memory',
+  'models_api',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
 
@@ -167,6 +169,10 @@ export const P = {
   // участников. Чтение — любому участнику (факты и так в его промпте). Отдельный модуль, а не уровень `workspace`:
   // новое право в уровне `editor` понизило бы существующим кастомным ролям показанный уровень доступа.
   MEMORY_MANAGE: 'memory:manage',
+  // Модели для IDE и программ: адрес публичного API, совместимый с OpenAI. Человек подключает
+  // Cline, Kilo Code и подобные к моделям пространства своим личным токеном. Работает, только
+  // если администратор установки включил доступ в «Политиках API».
+  MODELS_API_USE: 'models_api:use',
 } as const;
 
 export type PermissionId = (typeof P)[keyof typeof P];
@@ -205,6 +211,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.PROMPTS_VIEW, P.PROMPTS_MANAGE,
     P.WEB_USE,
     P.MEMORY_MANAGE,
+    P.MODELS_API_USE,
   ],
   member: [
     P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN,
@@ -229,6 +236,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.GLOBAL_VARIABLES_READ,
     P.PROMPTS_VIEW,
     P.WEB_USE,
+    P.MODELS_API_USE,
   ],
   viewer: [
     P.SCHEDULED_TASKS_VIEW,
@@ -396,6 +404,10 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Только чтение', permissions: [] },
     { code: 'editor', label: 'Управление памятью пространства', permissions: [P.MEMORY_MANAGE] },
   ],
+  models_api: [
+    { code: 'none',   label: 'Нет доступа',   permissions: [] },
+    { code: 'editor', label: 'Подключение IDE и программ', permissions: [P.MODELS_API_USE] },
+  ],
 };
 
 /** Convert per-module access levels to a flat permission ID array. */
@@ -522,4 +534,5 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.PROMPTS_MANAGE, module: 'prompts', action: 'manage', description: 'Управление промптами пространства (создание, правка, удаление)', isSensitive: false },
   { id: P.WEB_USE, module: 'web', action: 'use', description: 'Поиск и чтение страниц в интернете агентом (если функция включена пространству)', isSensitive: false },
   { id: P.MEMORY_MANAGE, module: 'memory', action: 'manage', description: 'Запись памяти рабочего пространства — фактов, которые ассистенты учитывают у всех участников', isSensitive: true },
+  { id: P.MODELS_API_USE, module: 'models_api', action: 'use', description: 'Обращение к моделям пространства из IDE и программ личным API-токеном (если доступ включён администратором установки)', isSensitive: false },
 ];

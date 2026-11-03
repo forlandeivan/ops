@@ -1468,6 +1468,120 @@ export type AsrPlatformSettingsInsert = typeof asrPlatformSettings.$inferInsert;
 // Настройки маскирования персональных данных (действие «Убрать ПДн»). Singleton, каждая
 // колонка nullable: NULL = «админ не переопределял» → код-дефолт из shared/pii-mask-settings.ts.
 // Новых ENV для сервиса не заводится, base_url по умолчанию — DNS-имя сервиса в compose/кластере.
+/**
+ * «Защита данных» (0421, 0422): настройки инсталляции. Одна строка на установку.
+ *
+ * Этап 1 — переключатель единой точки выхода к моделям: при включённом агент и сервис сценариев
+ * получают пропуск и адрес внутреннего шлюза монолита вместо ключа и адреса провайдера.
+ * Этап 2 — политика: режим (`off` — выключено, `observe` — наблюдение, `protect` — защита), действие
+ * для секретов и стоп-слов (`observe` — только записывать, `block` — останавливать запрос) и стоп-лист.
+ * Этап 3 (0423) — маскирование: `mask` у персональных данных и секретов, распознавание для IDE
+ * (`fast` — только правила, `full` — с разбором языка).
+ * `policyVersion` растёт при каждой смене политики — по нему сбрасывается кэш проверок.
+ * Всё выключено по умолчанию: обновление ничего не меняет само.
+ */
+export const dataProtectionSettings = pgTable("data_protection_settings", {
+  id: varchar("id").primaryKey().default("data_protection_settings_singleton"),
+  egressEnabled: boolean("egress_enabled").notNull().default(false),
+  mode: varchar("mode", { length: 16 }).$type<"off" | "observe" | "protect">().notNull().default("off"),
+  secretsAction: varchar("secrets_action", { length: 16 }).$type<"observe" | "block" | "mask">().notNull().default("mask"),
+  piiAction: varchar("pii_action", { length: 16 }).$type<"observe" | "block" | "mask">().notNull().default("mask"),
+  ideDetection: varchar("ide_detection", { length: 16 }).$type<"fast" | "full">().notNull().default("fast"),
+  denyTermsAction: varchar("deny_terms_action", { length: 16 }).$type<"observe" | "block">().notNull().default("block"),
+  denyTerms: jsonb("deny_terms").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  policyVersion: integer("policy_version").notNull().default(1),
+  updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+export type DataProtectionSettingsRow = typeof dataProtectionSettings.$inferSelect;
+
+/**
+ * Журнал «Защиты данных» (0422): срабатывания политики в точке выхода к моделям (`detection`) и
+ * изменения политики и отметок провайдеров (`config_change`). Найденные значения, их фрагменты и хеши
+ * не хранятся — только классы и количество в `findings`. Без внешних ключей: журнал живёт своим сроком
+ * (уборщик `pg.data_protection_events`).
+ */
+export const dataProtectionEvents = pgTable(
+  "data_protection_events",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    occurredAt: timestamp("occurred_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    eventType: varchar("event_type", { length: 32 }).$type<"detection" | "config_change">().notNull(),
+    /** `observed`, `blocked`, `check_failed` у срабатываний; `changed` у изменений. */
+    action: varchar("action", { length: 32 }).notNull(),
+    mode: varchar("mode", { length: 16 }),
+    source: varchar("source", { length: 32 }),
+    requestKind: varchar("request_kind", { length: 16 }),
+    workspaceId: varchar("workspace_id"),
+    userId: varchar("user_id"),
+    providerId: varchar("provider_id"),
+    runRef: varchar("run_ref", { length: 80 }),
+    findings: jsonb("findings").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
+    actorAdminId: varchar("actor_admin_id"),
+    change: jsonb("change").$type<Record<string, unknown> | null>(),
+    /** Сводная строка: сколько запросов в неё вошло. У происшествий — 1. */
+    requests: integer("requests").notNull().default(1),
+    lastSeenAt: timestamp("last_seen_at"),
+    /** Ключ сводной строки (действие, источник, пространство, человек, провайдер, прогон, час). */
+    dedupeKey: varchar("dedupe_key", { length: 64 }),
+    /** Очередь выгрузки в SIEM; пусто — строка не выгружается. */
+    siemState: varchar("siem_state", { length: 16 }).$type<"pending" | "sending" | "sent" | null>(),
+    siemAttempts: integer("siem_attempts").notNull().default(0),
+    siemNextAttemptAt: timestamp("siem_next_attempt_at"),
+    siemLeaseUntil: timestamp("siem_lease_until"),
+  },
+  (table) => ({
+    occurredAtIdx: index("data_protection_events_occurred_at_idx").on(table.occurredAt),
+    typeOccurredIdx: index("data_protection_events_type_occurred_idx").on(table.eventType, table.occurredAt),
+    actionOccurredIdx: index("data_protection_events_action_occurred_idx").on(table.action, table.occurredAt),
+    dedupeKeyUq: uniqueIndex("data_protection_events_dedupe_key_uq")
+      .on(table.dedupeKey)
+      .where(sql`${table.dedupeKey} IS NOT NULL`),
+    siemDueIdx: index("data_protection_events_siem_due_idx")
+      .on(table.siemNextAttemptAt)
+      .where(sql`${table.siemState} IN ('pending', 'sending')`),
+    siemStateCheck: check("data_protection_events_siem_state_check", sql`${table.siemState} IN ('pending', 'sending', 'sent')`),
+  }),
+);
+export type DataProtectionEventRow = typeof dataProtectionEvents.$inferSelect;
+export type DataProtectionEventInsert = typeof dataProtectionEvents.$inferInsert;
+
+/** Выгрузка событий «Защиты данных» в SIEM: настройки и состояние доставки. Одна строка на инсталляцию. */
+export const dataProtectionSiem = pgTable(
+  "data_protection_siem",
+  {
+    id: varchar("id").primaryKey().default("data_protection_siem_singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    transport: varchar("transport", { length: 16 }).$type<"syslog" | "webhook">().notNull().default("syslog"),
+    includeSummaries: boolean("include_summaries").notNull().default(false),
+    syslogHost: varchar("syslog_host", { length: 255 }),
+    syslogPort: integer("syslog_port").notNull().default(6514),
+    syslogFormat: varchar("syslog_format", { length: 8 }).$type<"cef" | "json">().notNull().default("cef"),
+    caPem: text("ca_pem"),
+    clientCertPem: text("client_cert_pem"),
+    /** Ключ клиентского сертификата, зашифрован. */
+    clientKeySecret: text("client_key_secret"),
+    webhookUrl: text("webhook_url"),
+    /** Секрет подписи вебхука, зашифрован. */
+    webhookSecret: text("webhook_secret"),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedByAdminId: varchar("updated_by_admin_id"),
+    lastSuccessAt: timestamp("last_success_at"),
+    lastError: text("last_error"),
+    lastErrorAt: timestamp("last_error_at"),
+    failingSince: timestamp("failing_since"),
+    /** До какого момента происшествия уже разобраны для оповещений. */
+    alertsCursorAt: timestamp("alerts_cursor_at"),
+  },
+  (table) => ({
+    transportCheck: check("data_protection_siem_transport_check", sql`${table.transport} IN ('syslog', 'webhook')`),
+    formatCheck: check("data_protection_siem_syslog_format_check", sql`${table.syslogFormat} IN ('cef', 'json')`),
+    portCheck: check("data_protection_siem_syslog_port_check", sql`${table.syslogPort} BETWEEN 1 AND 65535`),
+  }),
+);
+export type DataProtectionSiemRow = typeof dataProtectionSiem.$inferSelect;
+
 export const piiMaskSettings = pgTable("pii_mask_settings", {
   id: varchar("id").primaryKey().default("pii_mask_settings_singleton"),
   baseUrl: text("base_url"),
@@ -1539,8 +1653,14 @@ export const publicApiPolicies = pgTable("public_api_policies", {
   // Суточная квота
   dailyRequestsPerWorkspace: integer("daily_requests_per_workspace"),
   dailyRequestsPerUser: integer("daily_requests_per_user"),
+  // Модели для IDE и программ (0420): адрес, совместимый с OpenAI, и потолки на человека.
+  modelRequestsConcurrencyPerUser: integer("model_requests_concurrency_per_user"),
+  modelRequestsPerMinutePerUser: integer("model_requests_per_minute_per_user"),
+  modelTokensPerDayPerUser: integer("model_tokens_per_day_per_user"),
   // Режим наблюдения: потолки считаются и попадают в метрику, но не отказывают.
   observationMode: boolean("observation_mode").notNull().default(false),
+  // Выключено по умолчанию: обновление не открывает доступ к моделям само.
+  modelAccessEnabled: boolean("model_access_enabled").notNull().default(false),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -3675,6 +3795,8 @@ export const embeddingProviders = pgTable("embedding_providers", {
     .default(sql`'[]'::jsonb`),
   maxTokensPerVectorization: integer("max_tokens_per_vectorization"),
   allowSelfSignedCertificate: boolean("allow_self_signed_certificate").notNull().default(false),
+  /** «Защита данных»: проверять запросы к этому провайдеру (0422). По умолчанию да — никому не доверяем. */
+  inspectRequests: boolean("inspect_requests").notNull().default(true),
   requestHeaders: jsonb("request_headers").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
   requestConfig: jsonb("request_config").$type<EmbeddingRequestConfig>().notNull().default(sql`'{}'::jsonb`),
   responseConfig: jsonb("response_config").$type<EmbeddingResponseConfig>().notNull().default(sql`'{}'::jsonb`),
@@ -3840,6 +3962,8 @@ export const llmProviders = pgTable("llm_providers", {
     .$type<LlmModelOption[] | null>()
     .default(sql`'[]'::jsonb`),
   allowSelfSignedCertificate: boolean("allow_self_signed_certificate").notNull().default(false),
+  /** «Защита данных»: проверять запросы к этому провайдеру (0422). По умолчанию да — никому не доверяем. */
+  inspectRequests: boolean("inspect_requests").notNull().default(true),
   requestHeaders: jsonb("request_headers").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
   requestConfig: jsonb("request_config").$type<LlmRequestConfig>().notNull().default(sql`'{}'::jsonb`),
   responseConfig: jsonb("response_config").$type<LlmResponseConfig>().notNull().default(sql`'{}'::jsonb`),
@@ -6043,6 +6167,7 @@ export const insertEmbeddingProviderSchema = createInsertSchema(embeddingProvide
       value: z.string().trim(),
     })).optional().default([]),
     allowSelfSignedCertificate: z.boolean().default(false),
+    inspectRequests: z.boolean().default(true),
     maxTokensPerVectorization: z
       .number({ error: "Введите максимальное количество токенов" })
       .int("Значение должно быть целым")
@@ -6166,6 +6291,7 @@ export const updateEmbeddingProviderSchema = z
       value: z.string().trim(),
     })).optional(),
     allowSelfSignedCertificate: z.boolean().optional(),
+    inspectRequests: z.boolean().optional(),
     maxTokensPerVectorization: z
       .number({ error: "Введите максимальное количество токенов" })
       .int("Значение должно быть целым")
@@ -6242,6 +6368,7 @@ export const insertLlmProviderSchema = createInsertSchema(llmProviders)
           : undefined,
       ),
     allowSelfSignedCertificate: z.boolean().default(false),
+    inspectRequests: z.boolean().default(true),
     requestHeaders: z.record(z.string(), z.string()).default({}),
     requestConfig: z
       .any()
@@ -6353,6 +6480,7 @@ export const updateLlmProviderSchema = z
           : undefined,
       ),
     allowSelfSignedCertificate: z.boolean().optional(),
+    inspectRequests: z.boolean().optional(),
     requestHeaders: z.record(z.string(), z.string()).optional(),
     requestConfig: z
       .record(z.string(), z.any())
@@ -12434,7 +12562,7 @@ export const notificationPublications = pgTable("notification_publications", {
  createdAt: timestamp("created_at", {withTimezone:true,precision:3}).notNull().defaultNow(),
  publishedAt: timestamp("published_at", {withTimezone:true,precision:3}),
  updatedAt: timestamp("updated_at", {withTimezone:true}).notNull().defaultNow(),
-}, t => ({kindCheck:check("notification_publications_kind_check",sql`(${t.kind}='release' AND ${t.releaseVersion} IS NOT NULL) OR (${t.kind}='manual_instance' AND ${t.releaseVersion} IS NULL)`),statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
+}, t => ({kindCheck:check("notification_publications_kind_check",sql`(${t.kind}='release' AND ${t.releaseVersion} IS NOT NULL) OR (${t.kind} IN ('manual_instance','security_alert') AND ${t.releaseVersion} IS NULL)`),statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
 export const notificationInstanceAnnouncements = pgTable("notification_instance_announcements", {
   content: jsonb("content"),
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
