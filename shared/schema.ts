@@ -1498,9 +1498,10 @@ export type DataProtectionSettingsRow = typeof dataProtectionSettings.$inferSele
 
 /**
  * Журнал «Защиты данных» (0422): срабатывания политики в точке выхода к моделям (`detection`) и
- * изменения политики и отметок провайдеров (`config_change`). Найденные значения, их фрагменты и хеши
- * не хранятся — только классы и количество в `findings`. Без внешних ключей: журнал живёт своим сроком
- * (уборщик `pg.data_protection_events`).
+ * изменения политики и отметок провайдеров (`config_change`). Найденные значения и их хеши не хранятся —
+ * классы и количество в `findings`, происхождение в `origins`; в `evidence` — отрывки вокруг находок с
+ * частично скрытыми значениями (уборщик `pg.data_protection_events.evidence`, 30 дней). Без внешних ключей:
+ * журнал живёт своим сроком (уборщик `pg.data_protection_events`).
  */
 export const dataProtectionEvents = pgTable(
   "data_protection_events",
@@ -1548,6 +1549,7 @@ export const dataProtectionEvents = pgTable(
       .on(table.siemNextAttemptAt)
       .where(sql`${table.siemState} IN ('pending', 'sending')`),
     userOccurredIdx: index("data_protection_events_user_occurred_idx").on(table.userId, table.occurredAt),
+    workspaceOccurredIdx: index("data_protection_events_workspace_occurred_idx").on(table.workspaceId, table.occurredAt),
     logDueIdx: index("data_protection_events_log_due_idx")
       .on(table.occurredAt)
       .where(sql`${table.loggedAt} IS NULL AND ${table.dedupeKey} IS NOT NULL`),

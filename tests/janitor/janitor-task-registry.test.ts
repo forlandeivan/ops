@@ -83,6 +83,9 @@ describe("janitor task registry", () => {
         "pg.user_action_events",
         // История синхронизации корпоративного каталога — 90 дней.
         "pg.directory_sync_events",
+        // Журнал «Защиты данных» (0422) — 180 дней; фрагменты-доказательства (0426) стираются через 30 дней.
+        "pg.data_protection_events",
+        "pg.data_protection_events.evidence",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию

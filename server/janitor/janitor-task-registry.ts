@@ -566,6 +566,22 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 90,
   }),
   task({
+    key: "pg.data_protection_events.evidence",
+    label: "Фрагменты в журнале защиты данных",
+    description:
+      "Обнуляет фрагменты-доказательства в записях журнала «Защиты данных» (evidence в data_protection_events) старше срока хранения: отрывки текста вокруг находок, где найденные значения частично скрыты, а нераспознанные могут остаться как есть. Сама запись журнала, классы находок и их происхождение сохраняются.",
+    category: "audit",
+    action: "strip_columns",
+    table: "data_protection_events",
+    timeColumn: "occurred_at",
+    strippedColumns: ["evidence"],
+    defaultEnabled: true,
+    defaultRetentionDays: 30,
+    defaultBatchSize: 2000,
+    intervalMinutes: 360,
+    sensitive: true,
+  }),
+  task({
     key: "pg.data_protection_events",
     label: "Журнал защиты данных (data_protection_events)",
     description:
