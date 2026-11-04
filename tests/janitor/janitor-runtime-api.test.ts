@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CleanupPolicyError } from "../../server/janitor/janitor-policy-service";
 import {
   startJanitorRuntimeApiServer,
+  type JanitorHealthState,
   type JanitorRuntimeApiDeps,
 } from "../../server/janitor/runtime-api-server";
 
@@ -30,19 +31,67 @@ describe("janitor runtime API", () => {
     vi.unstubAllEnvs();
   });
 
-  async function startServer(deps: JanitorRuntimeApiDeps) {
-    const server = await startJanitorRuntimeApiServer({ port: 0, deps });
+  async function startServer(deps: JanitorRuntimeApiDeps, state: Partial<JanitorHealthState> = {}) {
+    const server = await startJanitorRuntimeApiServer({
+      port: 0,
+      deps,
+      getState: () => ({
+        startedAt: "2026-07-17T00:00:00.000Z",
+        databaseReady: true,
+        orchestratorStarted: true,
+        cleanupWorkerStarted: true,
+        enabled: true,
+        tickMinutes: 15,
+        ...state,
+      }),
+    });
     close = server.close;
     return `http://127.0.0.1:${server.port}`;
   }
 
-  it("v1/health отвечает без токена и не раскрывает, настроен ли токен", async () => {
+  it("health/live отвечает без токена и не раскрывает, настроен ли токен", async () => {
     const base = await startServer(makeDeps());
-    const res = await fetch(`${base}/v1/health`);
+    const res = await fetch(`${base}/health/live`);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ status: "ok" });
     expect(body).not.toHaveProperty("tokenConfigured");
+  });
+
+  it("до запуска исполнителей RPC отвечает 503, исполнители не вызываются", async () => {
+    const deps = makeDeps();
+    const base = await startServer(deps, { databaseReady: false, cleanupWorkerStarted: false });
+    const res = await fetch(`${base}/v1/cleanup-policies/pg.test/preview`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toMatchObject({ code: "JANITOR_RUNTIME_STARTING" });
+    expect(deps.previewPolicy).not.toHaveBeenCalled();
+  });
+
+  it("rpcEnabled=false (JANITOR_RUNTIME_PORT=0) выключает RPC, пробы остаются", async () => {
+    const server = await startJanitorRuntimeApiServer({
+      port: 0,
+      rpcEnabled: false,
+      deps: makeDeps(),
+      getState: () => ({
+        startedAt: "2026-07-17T00:00:00.000Z",
+        databaseReady: true,
+        orchestratorStarted: true,
+        cleanupWorkerStarted: true,
+        enabled: true,
+        tickMinutes: 15,
+      }),
+    });
+    close = server.close;
+    const base = `http://127.0.0.1:${server.port}`;
+    const rpc = await fetch(`${base}/v1/cleanup-policies/pg.test/preview`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(rpc.status).toBe(404);
+    expect((await fetch(`${base}/health/ready`)).status).toBe(200);
   });
 
   it("без сконфигурированного токена RPC отвечает 503", async () => {

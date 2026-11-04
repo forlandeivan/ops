@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { startJanitorHealthServer, type JanitorHealthState } from "../../server/janitor/health-server";
+import { startJanitorRuntimeApiServer, type JanitorHealthState } from "../../server/janitor/runtime-api-server";
 import { fileArtifactCleanupQueueJobs } from "../../server/monitoring/file-artifact-cleanup-metrics";
 import { janitorRunsTotal } from "../../server/monitoring/janitor-metrics";
 
@@ -16,7 +16,7 @@ function makeState(partial: Partial<JanitorHealthState> = {}): JanitorHealthStat
   };
 }
 
-describe("janitor health server", () => {
+describe("janitor: пробы и метрики", () => {
   let close: (() => Promise<void>) | null = null;
 
   afterEach(async () => {
@@ -27,10 +27,10 @@ describe("janitor health server", () => {
 
   it("liveness отвечает 200 сразу, readiness — 503 до готовности БД", async () => {
     let state = makeState();
-    const server = await startJanitorHealthServer({ port: 0, getState: () => state });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => state });
     close = server.close;
 
-    const live = await fetch(`http://127.0.0.1:${server.port}/healthz`);
+    const live = await fetch(`http://127.0.0.1:${server.port}/health/live`);
     expect(live.status).toBe(200);
     await expect(live.json()).resolves.toMatchObject({ status: "ok", role: "janitor" });
 
@@ -50,19 +50,19 @@ describe("janitor health server", () => {
       cleanupWorkerStarted: true,
       enabled: false,
     });
-    const server = await startJanitorHealthServer({ port: 0, getState: () => state });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => state });
     close = server.close;
 
-    const ready = await fetch(`http://127.0.0.1:${server.port}/ready`);
+    const ready = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
     expect(ready.status).toBe(200);
   });
 
   it("не готов без durable cleanup worker даже при выключенных плановых политиках", async () => {
     const state = makeState({ databaseReady: true, cleanupWorkerStarted: false, enabled: false });
-    const server = await startJanitorHealthServer({ port: 0, getState: () => state });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => state });
     close = server.close;
 
-    const ready = await fetch(`http://127.0.0.1:${server.port}/ready`);
+    const ready = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
     expect(ready.status).toBe(503);
   });
 
@@ -71,7 +71,7 @@ describe("janitor health server", () => {
     fileArtifactCleanupQueueJobs.set({ status: "error" }, 2);
     fileArtifactCleanupQueueJobs.set({ status: "dead" }, 3);
 
-    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => makeState() });
     close = server.close;
 
     const res = await fetch(`http://127.0.0.1:${server.port}/metrics`);
@@ -84,7 +84,7 @@ describe("janitor health server", () => {
 
   it("с METRICS_TOKEN /metrics требует bearer-токен", async () => {
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");
-    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => makeState() });
     close = server.close;
     const url = `http://127.0.0.1:${server.port}/metrics`;
 
@@ -97,14 +97,23 @@ describe("janitor health server", () => {
 
   it("METRICS_ENABLED=false выключает /metrics", async () => {
     vi.stubEnv("METRICS_ENABLED", "false");
-    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => makeState() });
     close = server.close;
 
     expect((await fetch(`http://127.0.0.1:${server.port}/metrics`)).status).toBe(404);
   });
 
+  it("старые пути проб убраны: /healthz, /health, /ready, /v1/health — 404", async () => {
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => makeState() });
+    close = server.close;
+
+    for (const path of ["/healthz", "/health", "/ready", "/v1/health"]) {
+      expect((await fetch(`http://127.0.0.1:${server.port}${path}`)).status).toBe(404);
+    }
+  });
+
   it("неизвестный путь — 404", async () => {
-    const server = await startJanitorHealthServer({ port: 0, getState: () => makeState() });
+    const server = await startJanitorRuntimeApiServer({ port: 0, getState: () => makeState() });
     close = server.close;
 
     const res = await fetch(`http://127.0.0.1:${server.port}/nope`);

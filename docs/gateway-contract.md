@@ -25,8 +25,7 @@ Durable-очередь ручной и плановой очистки опис�
 | `JANITOR_LOCK_ALLOW_NOOP` | prod:`false` | `true` = разрешить no-op-лок без Redis (dev) |
 | `JANITOR_MAX_BATCHES_PER_RUN` | `50` | кап батчей одного прогона |
 | `JANITOR_BATCH_PAUSE_MS` | `0` | пауза между батчами |
-| `JANITOR_HEALTH_PORT` | `5003` | health/readiness/metrics (`0` = off) |
-| `JANITOR_RUNTIME_PORT` | `5004` | runtime-RPC (`0` = off) |
+| `JANITOR_RUNTIME_PORT` | `5004` | единственный HTTP-порт: пробы, метрики, runtime-RPC (`0` = RPC off, сервер на `5004`) |
 | `UNICA_JANITOR_RUNTIME_TOKEN` | — | bearer RPC; не задан → RPC отвечает 503 |
 | `JANITOR_SHUTDOWN_TIMEOUT_MS` | `25000` | форс-таймаут graceful shutdown |
 | `FILE_ARTIFACT_CLEANUP_CONCURRENCY` | `2` | параллельные исполнители durable-очереди |
@@ -40,10 +39,12 @@ Durable-очередь ручной и плановой очистки опис�
 
 ## 3. HTTP-поверхность
 
-### Health (`JANITOR_HEALTH_PORT`, без аутентификации — для k8s probes / Prometheus)
+Один порт `JANITOR_RUNTIME_PORT` (`5004`). Сервер поднимается до ожидания БД.
 
-- `GET /healthz` (алиас `/health`) — liveness; `200` всегда при живом процессе.
-- `GET /health/ready` (алиас `/ready`) — readiness: `200`, когда БД доступна,
+### Пробы и метрики (без аутентификации — для k8s probes / Prometheus)
+
+- `GET /health/live` — liveness; `200` всегда при живом процессе.
+- `GET /health/ready` — readiness: `200`, когда БД доступна,
   таблицы `cleanup_policies` и `file_artifact_cleanup_jobs` применены и durable cleanup
   worker запущен. Плановый оркестратор также должен быть запущен, кроме случая
   `JANITOR_ENABLED=false`. Иначе `503 {status:"starting"}`.
@@ -53,11 +54,10 @@ Durable-очередь ручной и плановой очистки опис�
   `file_artifact_cleanup_jobs_total{outcome}`, `file_artifact_cleanup_job_duration_seconds`,
   `file_artifact_cleanup_queue_jobs{status}` (`error` — ожидает retry, `dead` — terminal
   без автоматического retry), `file_artifact_cleanup_oldest_ready_age_seconds`
-  + default Node-метрики.
+  + default Node-метрики. `METRICS_ENABLED=false` выключает эндпоинт, `METRICS_TOKEN` требует bearer.
 
-### Runtime-RPC (`JANITOR_RUNTIME_PORT`, bearer `UNICA_JANITOR_RUNTIME_TOKEN`, timingSafeEqual)
+### Runtime-RPC (bearer `UNICA_JANITOR_RUNTIME_TOKEN`, timingSafeEqual)
 
-- `GET /v1/health` — без токена; `{status, tokenConfigured}`.
 - `POST /v1/cleanup-policies/:key/preview` — body `{actorId?: string}`; dry-run; `200 {matched, capped?}`.
   `capped: true` — счёт упёрся в объём одного прогона (`JANITOR_MAX_BATCHES_PER_RUN` × размер батча).
   Фоновая политика (`backgroundRun` в реестре, сейчас только `s3.storage.orphans`) запускает
@@ -69,7 +69,9 @@ Durable-очередь ручной и плановой очистки опис�
   локе — `skipped_locked` с `reason` ∈ already_running|locked, неизвестный ключ — `skipped_disabled`.
   Итог (success|partial|failed) пишется в `cleanup_run_log`.
 - Ошибки: токен не задан → `503 JANITOR_RUNTIME_TOKEN_NOT_CONFIGURED`; неверный →
-  `401 JANITOR_RUNTIME_UNAUTHORIZED`; неизвестный ключ → `404 CLEANUP_POLICY_ERROR`.
+  `401 JANITOR_RUNTIME_UNAUTHORIZED`; БД ещё не готова или cleanup worker не запущен →
+  `503 JANITOR_RUNTIME_STARTING`; неизвестный ключ → `404 CLEANUP_POLICY_ERROR`.
+  `JANITOR_RUNTIME_PORT=0` выключает RPC (`404`), пробы и метрики остаются.
 
 Клиент монолита: `server/janitor-runtime-client.ts` — свитч `UNICA_JANITOR_RUNTIME_URL`;
 HTTP-режим включается только при заданном токене (URL без токена → in-process + warn);

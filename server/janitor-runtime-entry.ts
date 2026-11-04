@@ -6,13 +6,12 @@ import { closeCache } from "./cache";
 import { getAppProcessRole, isJanitorProcessRole } from "./config/process-role";
 import { db } from "./db";
 import { createLogger } from "./lib/logger";
-import { startJanitorHealthServer, type JanitorHealthState } from "./janitor/health-server";
 import {
   startJanitorOrchestrator,
   stopBackgroundRuns,
   type JanitorOrchestratorHandle,
 } from "./janitor/janitor-orchestrator";
-import { startJanitorRuntimeApiServer } from "./janitor/runtime-api-server";
+import { startJanitorRuntimeApiServer, type JanitorHealthState } from "./janitor/runtime-api-server";
 import { createHttpJanitorDomainGateway, gatewayToken, gatewayUrl } from "./janitor/domain-gateway-client";
 import {
   startFileArtifactCleanupWorker,
@@ -103,17 +102,17 @@ async function bootstrapRuntime(): Promise<void> {
   let shuttingDown = false;
   let orchestrator: JanitorOrchestratorHandle | null = null;
   let cleanupWorker: FileArtifactCleanupWorkerHandle | null = null;
-  let healthServer: Awaited<ReturnType<typeof startJanitorHealthServer>> | null = null;
-  let runtimeApiServer: Awaited<ReturnType<typeof startJanitorRuntimeApiServer>> | null = null;
 
-  // Health-сервер поднимаем ДО ожидания БД: liveness должен отвечать сразу,
-  // readiness остаётся 503, пока БД не готова. JANITOR_HEALTH_PORT=0 выключает сервер.
-  const healthPort = parsePositiveInt(process.env.JANITOR_HEALTH_PORT, 5003);
-  const healthDisabled = (process.env.JANITOR_HEALTH_PORT ?? "").trim() === "0";
-  if (!healthDisabled) {
-    healthServer = await startJanitorHealthServer({ port: healthPort, getState: () => ({ ...state }) });
-    logger.info({ port: healthServer.port }, "[janitor-runtime-entry] health server listening");
-  }
+  // Единственный HTTP-сервер (пробы, метрики, runtime-RPC) поднимаем ДО ожидания БД: liveness должен
+  // отвечать сразу, readiness и RPC остаются 503, пока БД не готова и исполнители не запущены.
+  // RPC нужен и при выключенном плановом тике (JANITOR_ENABLED=false). JANITOR_RUNTIME_PORT=0
+  // выключает только RPC (монолит тогда работает in-process), сервер слушает порт по умолчанию.
+  const runtimeApiServer = await startJanitorRuntimeApiServer({
+    port: parsePositiveInt(process.env.JANITOR_RUNTIME_PORT, 5004),
+    rpcEnabled: (process.env.JANITOR_RUNTIME_PORT ?? "").trim() !== "0",
+    getState: () => ({ ...state }),
+  });
+  logger.info({ port: runtimeApiServer.port }, "[janitor-runtime-entry] HTTP server listening");
 
   const shutdown = async (signal: string) => {
     if (shuttingDown) {
@@ -141,8 +140,7 @@ async function bootstrapRuntime(): Promise<void> {
       }
 
       await closeCache();
-      await runtimeApiServer?.close();
-      await healthServer?.close();
+      await runtimeApiServer.close();
 
       clearTimeout(shutdownTimeout);
       logger.info("[janitor-runtime-entry] shutdown complete");
@@ -194,16 +192,6 @@ async function bootstrapRuntime(): Promise<void> {
     gateway: createHttpJanitorDomainGateway(cleanupGatewayUrl),
   });
   state.cleanupWorkerStarted = true;
-
-  // Runtime-RPC (preview/run-now из api) поднимаем до оркестратора: он нужен и при
-  // выключенном плановом тике (JANITOR_ENABLED=false), а к моменту ready уже слушает.
-  // JANITOR_RUNTIME_PORT=0 выключает RPC-сервер (монолит тогда работает in-process).
-  const runtimeApiPort = parsePositiveInt(process.env.JANITOR_RUNTIME_PORT, 5004);
-  const runtimeApiDisabled = (process.env.JANITOR_RUNTIME_PORT ?? "").trim() === "0";
-  if (!runtimeApiDisabled) {
-    runtimeApiServer = await startJanitorRuntimeApiServer({ port: runtimeApiPort });
-    logger.info({ port: runtimeApiServer.port }, "[janitor-runtime-entry] runtime API listening");
-  }
 
   orchestrator = startJanitorOrchestrator();
   state.orchestratorStarted = orchestrator !== null;
