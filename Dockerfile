@@ -39,6 +39,6 @@ COPY --chown=nodejs:nodejs --from=build /app/package.json ./package.json
 
 USER nodejs
 
-EXPOSE 5003 5004
+EXPOSE 5004
 
 CMD ["node", "dist/janitor-runtime-entry.js"]

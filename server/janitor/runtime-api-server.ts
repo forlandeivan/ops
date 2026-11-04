@@ -1,10 +1,13 @@
 /**
- * Runtime-RPC janitor-процесса (direction-1, волна J1): исполнение `preview` и
- * `run-now` по HTTP, чтобы админ-операции не требовали janitor-кода в api-процессе.
+ * HTTP-сервер janitor-процесса — единственный порт сервиса (`JANITOR_RUNTIME_PORT`, по умолчанию 5004).
  *
- * Голый node:http (без Express). Аутентификация — статический bearer
- * `UNICA_JANITOR_RUNTIME_TOKEN` через timingSafeEqual (образец агент-gateway:
- * токен не задан → 503, неверный → 401).
+ * Без аутентификации, для k8s probes и Prometheus: `/health/live` — liveness, `/health/ready` — readiness
+ * (готовность БД и запуск исполнителей), `/metrics` — Prometheus-реестр процесса (свой токен `METRICS_TOKEN`).
+ * Runtime-RPC (direction-1, волна J1): исполнение `preview` и `run-now`, чтобы админ-операции не требовали
+ * janitor-кода в api-процессе. Аутентификация — статический bearer `UNICA_JANITOR_RUNTIME_TOKEN` через
+ * timingSafeEqual (образец агент-gateway: токен не задан → 503, неверный → 401).
+ *
+ * Голый node:http без Express — не расширяет бандл и поверхность janitor.
  */
 import crypto from "crypto";
 import http from "http";
@@ -12,6 +15,7 @@ import http from "http";
 import type { CleanupPreviewResultDto } from "@shared/cleanup-policies";
 
 import { createLogger } from "../lib/logger";
+import { register } from "../monitoring/metrics";
 import { CleanupPolicyError, getResolvedPolicy } from "./janitor-policy-service";
 import { previewPolicy, runPolicyNow, type RunPolicyOutcome } from "./janitor-orchestrator";
 
@@ -19,6 +23,19 @@ const logger = createLogger("janitor-runtime-api");
 
 const MAX_BODY_BYTES = 64 * 1024;
 const ROUTE_RE = /^\/v1\/cleanup-policies\/([^/]+)\/(preview|run-now)$/;
+
+export interface JanitorHealthState {
+  startedAt: string;
+  /** БД доступна и таблицы политик существуют (миграции применены). */
+  databaseReady: boolean;
+  /** Оркестратор запущен (false до готовности БД или при JANITOR_ENABLED=false). */
+  orchestratorStarted: boolean;
+  /** Постоянный исполнитель durable file_artifact_cleanup_jobs. */
+  cleanupWorkerStarted: boolean;
+  /** Значение гейта JANITOR_ENABLED на старте процесса. */
+  enabled: boolean;
+  tickMinutes: number;
+}
 
 /** Инъекция исполнителей для юнит-тестов; боевые дефолты — оркестратор и policy-service. */
 export interface JanitorRuntimeApiDeps {
@@ -84,18 +101,63 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, u
     : {};
 }
 
+function matchesBearerToken(header: string | string[] | undefined, expected: string): boolean {
+  const value = Array.isArray(header) ? header[0] : header;
+  const provided = value?.startsWith("Bearer ") ? value.slice("Bearer ".length).trim() : "";
+  return provided.length > 0 && timingSafeEqualStr(provided, expected);
+}
+
+function isReady(state: JanitorHealthState): boolean {
+  // При выключенном оркестраторе (JANITOR_ENABLED=false) под считается готовым, как только БД доступна
+  // и запущен cleanup worker: деплой не должен флапать из-за осознанно выключенной уборки.
+  return state.databaseReady && state.cleanupWorkerStarted && (state.orchestratorStarted || !state.enabled);
+}
+
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
 }
 
+function sendMetrics(req: http.IncomingMessage, res: http.ServerResponse): void {
+  // Как у монолита (server/routes/metrics.routes.ts, SEC-09, R-158): METRICS_ENABLED=false выключает
+  // эндпоинт, METRICS_TOKEN — bearer-токен Prometheus. Не задан — метрики открыты, как и в монолите,
+  // чтобы обновление не оборвало настроенный скрейп.
+  if ((process.env.METRICS_ENABLED ?? "true").trim().toLowerCase() === "false") {
+    sendJson(res, 404, { status: "not_found" });
+    return;
+  }
+  const metricsToken = process.env.METRICS_TOKEN?.trim();
+  if (metricsToken && !matchesBearerToken(req.headers.authorization, metricsToken)) {
+    sendJson(res, 401, { error: "Требуется токен доступа к метрикам" });
+    return;
+  }
+  void register
+    .metrics()
+    .then((body) => {
+      res.writeHead(200, { "Content-Type": register.contentType });
+      res.end(body);
+    })
+    .catch((error: unknown) => {
+      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(`metrics collection failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * Сервер поднимается до ожидания БД: liveness отвечает сразу, readiness остаётся 503, пока БД
+ * не готова, а RPC до запуска исполнителей отвечает 503. `rpcEnabled: false` (JANITOR_RUNTIME_PORT=0)
+ * выключает только RPC — монолит тогда работает in-process, пробы и метрики остаются.
+ */
 export async function startJanitorRuntimeApiServer(params: {
   port: number;
   host?: string;
+  getState: () => JanitorHealthState;
+  rpcEnabled?: boolean;
   deps?: JanitorRuntimeApiDeps;
 }): Promise<{ port: number; close: () => Promise<void> }> {
   const host = params.host ?? "0.0.0.0";
   const deps = params.deps ?? defaultDeps();
+  const rpcEnabled = params.rpcEnabled ?? true;
 
   const server = http.createServer((req, res) => {
     void handleRequest(req, res, deps).catch((error: unknown) => {
@@ -116,20 +178,34 @@ export async function startJanitorRuntimeApiServer(params: {
   ): Promise<void> {
     const url = (req.url ?? "/").split("?")[0];
 
-    if (req.method === "GET" && url === "/v1/health") {
-      sendJson(res, 200, {
-        status: "ok",
-        role: "janitor",
-        // Признак «токен настроен» без аутентификации — подсказка для атаки; монолит снял его 25.08.2026
-        // (SEC-09, R-168).
-        timestamp: new Date().toISOString(),
-      });
+    // Признак «токен настроен» без аутентификации — подсказка для атаки; монолит снял его 25.08.2026
+    // (SEC-09, R-168), поэтому пробы отдают только состояние процесса.
+    if (req.method === "GET" && url === "/health/live") {
+      sendJson(res, 200, { status: "ok", role: "janitor", ...params.getState() });
       return;
     }
 
-    const match = req.method === "POST" ? ROUTE_RE.exec(url) : null;
+    if (req.method === "GET" && url === "/health/ready") {
+      const state = params.getState();
+      const ready = isReady(state);
+      sendJson(res, ready ? 200 : 503, { status: ready ? "ready" : "starting", ready, role: "janitor", ...state });
+      return;
+    }
+
+    if (req.method === "GET" && url === "/metrics") {
+      sendMetrics(req, res);
+      return;
+    }
+
+    const match = rpcEnabled && req.method === "POST" ? ROUTE_RE.exec(url) : null;
     if (!match) {
       sendJson(res, 404, { message: "not found", code: "JANITOR_RUNTIME_NOT_FOUND" });
+      return;
+    }
+
+    const state = params.getState();
+    if (!state.databaseReady || !state.cleanupWorkerStarted) {
+      sendJson(res, 503, { message: "janitor is starting", code: "JANITOR_RUNTIME_STARTING" });
       return;
     }
 
