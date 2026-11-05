@@ -10132,6 +10132,8 @@ export const mcpIntegrations = pgTable(
     lastError: text("last_error"),
     // Когда админ последний раз сменил хост интеграции — пометка у пользователей с личными ключами.
     hostChangedAt: timestamp("host_changed_at", { withTimezone: true }),
+    // Вход через внешнюю систему: адрес возврата, который администратор вписал в приложение у провайдера.
+    oauthRedirectUri: text("oauth_redirect_uri"),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -10242,6 +10244,13 @@ export const mcpIntegrationUserConnections = pgTable(
     lastError: text("last_error"),
     checkedAt: timestamp("checked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    // Вид подключения: ключ (`token`) или вход через внешнюю систему (`oauth2`, токен доступа — в encrypted_credential).
+    credentialKind: varchar("credential_kind", { length: 16 }).$type<McpUserCredentialKind>().notNull().default("token"),
+    encryptedRefreshToken: text("encrypted_refresh_token"),
+    accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }),
+    grantedScopes: text("granted_scopes").array(),
+    // Отпечаток настроек входа на момент входа: изменились адреса, приложение или права — нужен новый вход.
+    oauthFingerprint: text("oauth_fingerprint"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -10252,6 +10261,59 @@ export const mcpIntegrationUserConnections = pgTable(
 );
 
 export type McpIntegrationUserConnection = typeof mcpIntegrationUserConnections.$inferSelect;
+
+export type McpUserCredentialKind = "token" | "oauth2";
+
+/** Незавершённые входы через внешнюю систему: одноразовый `state` (хранится хэш), живут 10 минут. */
+export const mcpOauthStates = pgTable(
+  "mcp_oauth_states",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    stateHash: varchar("state_hash", { length: 64 }).notNull(),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    integrationId: uuid("integration_id")
+      .notNull()
+      .references(() => mcpIntegrations.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    encryptedCodeVerifier: text("encrypted_code_verifier"),
+    returnTo: text("return_to"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    stateHashUniqueIdx: uniqueIndex("mcp_oauth_states_state_hash_uq").on(table.stateHash),
+    expiresIdx: index("mcp_oauth_states_expires_idx").on(table.expiresAt),
+    userIdx: index("mcp_oauth_states_user_idx").on(table.userId),
+    integrationIdx: index("mcp_oauth_states_integration_idx").on(table.integrationId),
+  }),
+);
+
+/** Файлы, которые агент выгрузил из песочницы для вызова MCP-инструмента; живут сутки. */
+export const mcpStagedFiles = pgTable(
+  "mcp_staged_files",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    executionId: varchar("execution_id").notNull(),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    storageKey: text("storage_key").notNull(),
+    name: text("name").notNull(),
+    mimeType: varchar("mime_type", { length: 255 }),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    executionIdx: index("mcp_staged_files_execution_idx").on(table.executionId),
+    expiresIdx: index("mcp_staged_files_expires_idx").on(table.expiresAt),
+    workspaceIdx: index("mcp_staged_files_workspace_idx").on(table.workspaceId),
+  }),
+);
 
 /** Устойчивая очередь копирования инструментов интеграции в пространства: одна строка на пару. */
 export const mcpIntegrationSyncJobs = pgTable(
