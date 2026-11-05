@@ -20,7 +20,7 @@ N2 notify-процесс удалён по новому решению влад�
 server/
   janitor-runtime-entry.ts   точка входа: readiness БД → cleanup worker → RPC → оркестратор
   janitor/                   реестр политик, оркестратор, policy-service, движки задач,
-                             health-сервер, runtime-RPC, durable cleanup queue, callback-gateway,
+                             HTTP-сервер (пробы, метрики, runtime-RPC), durable cleanup queue, callback-gateway,
                              default-stores (ops-вариант: доменные операции ТОЛЬКО по gateway)
   db.ts cache/ lib/ monitoring/ config/ qdrant*.ts minio-client.ts   тонкая инфра (реэкспорты @unica/*)
 packages/                    @unica/*: observability, postgres-client, cache, runtime-utils,
@@ -54,7 +54,8 @@ npm start
 `UNICA_JANITOR_GATEWAY_TOKEN` (без них сторы падают на старте — доменные операции
 исполнять нечем). Полный перечень — `docs/gateway-contract.md` §2.
 
-Порты: `5003` health/readiness/metrics, `5004` runtime-RPC (preview/run-now из админки).
+Порт `5004` — единственный: пробы `/health/live` и `/health/ready`, `/metrics` и runtime-RPC
+(preview/run-now из админки).
 
 ## Синхронизация контрактов
 
