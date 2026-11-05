@@ -1490,6 +1490,8 @@ export const dataProtectionSettings = pgTable("data_protection_settings", {
   denyTermsAction: varchar("deny_terms_action", { length: 16 }).$type<"observe" | "block">().notNull().default("block"),
   denyTerms: jsonb("deny_terms").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   policyVersion: integer("policy_version").notNull().default(1),
+  /** Сколько секунд запрос к модели ждёт недоступный сервис защиты данных (0429, #206). */
+  unavailableWaitSeconds: integer("unavailable_wait_seconds").notNull().default(30),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
