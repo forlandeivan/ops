@@ -11199,6 +11199,201 @@ export const memoryNodes = pgTable(
 export type MemoryNode = typeof memoryNodes.$inferSelect;
 export type MemoryNodeInsert = typeof memoryNodes.$inferInsert;
 
+// ─── Agent Context: Rules (instance / workspace / assistant / user) ──────────
+// «Правила» — клиентские хуки агента (shared/agent-rules.ts, миграция 0430): проверка перед сдачей результата, до и после
+// операции. Версии неизменяемы (триггер), включение привязано к отпечатку версии; агент правило только предлагает.
+
+export const agentRuleLevels = ["instance", "workspace", "assistant", "user"] as const;
+export type AgentRuleLevel = (typeof agentRuleLevels)[number];
+export const agentRuleEventKinds = ["before_submit", "before_operation", "after_operation"] as const;
+export type AgentRuleEventKind = (typeof agentRuleEventKinds)[number];
+export const agentRuleStates = ["draft", "active", "disabled", "archived"] as const;
+export type AgentRuleStateKind = (typeof agentRuleStates)[number];
+export const agentRuleModes = ["observe", "remind", "return", "deny", "require_approval"] as const;
+export type AgentRuleModeKind = (typeof agentRuleModes)[number];
+
+/** Правило: уровень, состояние, режим и действующая версия. `revision` — оптимистичная блокировка экрана. */
+export const agentRules = pgTable(
+  "agent_rules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    level: varchar("level", { length: 16 }).$type<AgentRuleLevel>().notNull(),
+    /** Пространство (уровни workspace и assistant); у инсталляции и личных — NULL. */
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    /** Владелец личного правила: действует в его сессиях во всех пространствах. */
+    userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 120 }).notNull(),
+    description: varchar("description", { length: 500 }),
+    /** Событие правила; новая версия его не меняет. */
+    event: varchar("event", { length: 32 }).$type<AgentRuleEventKind>().notNull(),
+    state: varchar("state", { length: 16 }).$type<AgentRuleStateKind>().notNull().default("draft"),
+    mode: varchar("mode", { length: 24 }).$type<AgentRuleModeKind>().notNull().default("observe"),
+    origin: varchar("origin", { length: 16 }).$type<"agent" | "human">().notNull().default("human"),
+    activeVersionId: varchar("active_version_id").references((): AnyPgColumn => agentRuleVersions.id, { onDelete: "set null" }),
+    /** Отпечаток включённой версии: правило действует, только пока он совпадает со спецификацией версии. */
+    enabledSpecHash: varchar("enabled_spec_hash", { length: 64 }),
+    revision: integer("revision").notNull().default(0),
+    reviewDueAt: timestamp("review_due_at"),
+    createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    levelCheck: check("agent_rules_level_check", sql`${table.level} IN ('instance', 'workspace', 'assistant', 'user')`),
+    eventCheck: check("agent_rules_event_check", sql`${table.event} IN ('before_submit', 'before_operation', 'after_operation')`),
+    stateCheck: check("agent_rules_state_check", sql`${table.state} IN ('draft', 'active', 'disabled', 'archived')`),
+    modeCheck: check("agent_rules_mode_check", sql`${table.mode} IN ('observe', 'remind', 'return', 'deny', 'require_approval')`),
+    originCheck: check("agent_rules_origin_check", sql`${table.origin} IN ('agent', 'human')`),
+    levelRefCheck: check(
+      "agent_rules_level_ref_check",
+      sql`(${table.level} = 'instance' AND ${table.workspaceId} IS NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.level} = 'user' AND ${table.workspaceId} IS NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NOT NULL)`,
+    ),
+    activeVersionCheck: check(
+      "agent_rules_active_version_check",
+      sql`${table.state} <> 'active' OR (${table.activeVersionId} IS NOT NULL AND ${table.enabledSpecHash} IS NOT NULL)`,
+    ),
+    workspaceIdx: index("agent_rules_workspace_idx").on(table.workspaceId, table.state).where(sql`${table.workspaceId} IS NOT NULL`),
+    assistantIdx: index("agent_rules_assistant_idx").on(table.assistantId).where(sql`${table.assistantId} IS NOT NULL`),
+    userIdx: index("agent_rules_user_idx").on(table.userId, table.state).where(sql`${table.userId} IS NOT NULL`),
+    instanceIdx: index("agent_rules_instance_idx").on(table.state).where(sql`${table.level} = 'instance'`),
+    activeVersionIdx: index("agent_rules_active_version_idx").on(table.activeVersionId),
+    createdByIdx: index("agent_rules_created_by_idx").on(table.createdBy),
+    updatedByIdx: index("agent_rules_updated_by_idx").on(table.updatedBy),
+  }),
+);
+
+export type AgentRuleRow = typeof agentRules.$inferSelect;
+export type AgentRuleInsert = typeof agentRules.$inferInsert;
+
+/** Неизменяемая версия правила: правку спецификации, примеров и происхождения запрещает триггер — только новая версия. */
+export const agentRuleVersions = pgTable(
+  "agent_rule_versions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    ruleId: varchar("rule_id")
+      .notNull()
+      .references((): AnyPgColumn => agentRules.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    specHash: varchar("spec_hash", { length: 64 }).notNull(),
+    examples: jsonb("examples").$type<Record<string, unknown>>().notNull().default(sql`'{"fire":[],"pass":[]}'::jsonb`),
+    sourcePhrase: text("source_phrase"),
+    provenance: jsonb("provenance").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    /** Итоги проверки до включения: контрольные примеры и прогон на истории. */
+    checks: jsonb("checks").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    ruleVersionUq: uniqueIndex("agent_rule_versions_rule_version_uq").on(table.ruleId, table.version),
+    createdByIdx: index("agent_rule_versions_created_by_idx").on(table.createdBy),
+  }),
+);
+
+export type AgentRuleVersionRow = typeof agentRuleVersions.$inferSelect;
+export type AgentRuleVersionInsert = typeof agentRuleVersions.$inferInsert;
+
+/** Журнал срабатываний (180 дней): без содержимого документов — только короткое сообщение и улика. */
+export const agentRuleEvents = pgTable(
+  "agent_rule_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    ruleId: varchar("rule_id")
+      .notNull()
+      .references(() => agentRules.id, { onDelete: "cascade" }),
+    versionId: varchar("version_id").references(() => agentRuleVersions.id, { onDelete: "set null" }),
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    runId: varchar("run_id", { length: 64 }),
+    chatId: varchar("chat_id", { length: 64 }),
+    executionId: varchar("execution_id", { length: 64 }),
+    event: varchar("event", { length: 32 }).$type<AgentRuleEventKind>().notNull(),
+    verdict: varchar("verdict", { length: 16 }).$type<"pass" | "fail" | "error" | "skipped">().notNull(),
+    action: varchar("action", { length: 24 }).notNull(),
+    message: varchar("message", { length: 500 }),
+    evidence: varchar("evidence", { length: 500 }),
+    /** Ключ события агента: повтор доставки не дублирует строку. */
+    sourceKey: varchar("source_key", { length: 160 }),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    eventCheck: check("agent_rule_events_event_check", sql`${table.event} IN ('before_submit', 'before_operation', 'after_operation')`),
+    verdictCheck: check("agent_rule_events_verdict_check", sql`${table.verdict} IN ('pass', 'fail', 'error', 'skipped')`),
+    actionCheck: check(
+      "agent_rule_events_action_check",
+      sql`${table.action} IN ('observed', 'reminded', 'returned', 'denied', 'approval_required', 'exhausted', 'unchecked', 'overridden')`,
+    ),
+    ruleCreatedIdx: index("agent_rule_events_rule_created_idx").on(table.ruleId, table.createdAt),
+    workspaceCreatedIdx: index("agent_rule_events_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    createdIdx: index("agent_rule_events_created_idx").on(table.createdAt),
+    versionIdx: index("agent_rule_events_version_idx").on(table.versionId),
+    userIdx: index("agent_rule_events_user_idx").on(table.userId),
+    sourceKeyUq: uniqueIndex("agent_rule_events_source_key_uq").on(table.sourceKey).where(sql`${table.sourceKey} IS NOT NULL`),
+  }),
+);
+
+export type AgentRuleEventRow = typeof agentRuleEvents.$inferSelect;
+
+/** Журнал изменений правил и настроек: только добавление (UPDATE запрещён триггером); копия уходит в SIEM. */
+export const agentRuleChanges = pgTable(
+  "agent_rule_changes",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    ruleId: varchar("rule_id").references(() => agentRules.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    actorKind: varchar("actor_kind", { length: 16 }).$type<"user" | "agent" | "system">().notNull().default("user"),
+    action: varchar("action", { length: 32 }).notNull(),
+    before: jsonb("before").$type<Record<string, unknown> | null>(),
+    after: jsonb("after").$type<Record<string, unknown> | null>(),
+    reason: varchar("reason", { length: 500 }),
+    weakening: boolean("weakening").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    actorKindCheck: check("agent_rule_changes_actor_kind_check", sql`${table.actorKind} IN ('user', 'agent', 'system')`),
+    ruleCreatedIdx: index("agent_rule_changes_rule_created_idx").on(table.ruleId, table.createdAt),
+    workspaceCreatedIdx: index("agent_rule_changes_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    createdIdx: index("agent_rule_changes_created_idx").on(table.createdAt),
+    actorIdx: index("agent_rule_changes_actor_idx").on(table.actorUserId),
+  }),
+);
+
+export type AgentRuleChangeRow = typeof agentRuleChanges.$inferSelect;
+
+/** Переключатели инсталляции: правила пространств и личные правила разрешены. Одна строка `singleton`. */
+export const agentRulesSettings = pgTable(
+  "agent_rules_settings",
+  {
+    id: varchar("id", { length: 16 }).primaryKey().default("singleton"),
+    workspaceRulesEnabled: boolean("workspace_rules_enabled").notNull().default(true),
+    personalRulesEnabled: boolean("personal_rules_enabled").notNull().default(true),
+    updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    singletonCheck: check("agent_rules_settings_singleton_check", sql`${table.id} = 'singleton'`),
+  }),
+);
+
+/** Строка — правила пространства заморожены: все его правила действуют в режиме наблюдения. */
+export const agentRuleWorkspaceFreezes = pgTable(
+  "agent_rule_workspace_freezes",
+  {
+    workspaceId: varchar("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    frozenBy: varchar("frozen_by").references(() => users.id, { onDelete: "set null" }),
+    reason: varchar("reason", { length: 500 }),
+    frozenAt: timestamp("frozen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    frozenByIdx: index("agent_rule_workspace_freezes_frozen_by_idx").on(table.frozenBy),
+  }),
+);
+
 /**
  * Навыки, объявленные на ассистенте (источник истины) — §4.4.
  * Шаг universal-agent воркфлоу наполняет skillIds из этой привязки (∪ навыки, заданные явно на шаге).

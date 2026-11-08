@@ -21,6 +21,7 @@ export const MODULE_LABELS: Record<string, string> = {
   prompts: 'Промпты',
   web: 'Интернет',
   memory: 'Память',
+  rules: 'Правила агента',
   models_api: 'Модели для IDE и программ',
 };
 
@@ -44,6 +45,7 @@ export const PERMISSION_MODULES = [
   'prompts',
   'web',
   'memory',
+  'rules',
   'models_api',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
@@ -169,6 +171,11 @@ export const P = {
   // участников. Чтение — любому участнику (факты и так в его промпте). Отдельный модуль, а не уровень `workspace`:
   // новое право в уровне `editor` понизило бы существующим кастомным ролям показанный уровень доступа.
   MEMORY_MANAGE: 'memory:manage',
+  // Правила агента (shared/agent-rules.ts): проверки, которые платформа исполняет на сдаче результата и перед
+  // операциями. Видеть правила и журнал — любому участнику (они действуют в его сессиях); включать, менять режим,
+  // выключать и откатывать — `rules:manage`. Агент правило только предлагает карточкой.
+  RULES_VIEW: 'rules:view',
+  RULES_MANAGE: 'rules:manage',
   // Модели для IDE и программ: адрес публичного API, совместимый с OpenAI. Человек подключает
   // Cline, Kilo Code и подобные к моделям пространства своим личным токеном. Работает, только
   // если администратор установки включил доступ в «Политиках API».
@@ -211,6 +218,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.PROMPTS_VIEW, P.PROMPTS_MANAGE,
     P.WEB_USE,
     P.MEMORY_MANAGE,
+    P.RULES_VIEW, P.RULES_MANAGE,
     P.MODELS_API_USE,
   ],
   member: [
@@ -236,6 +244,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.GLOBAL_VARIABLES_READ,
     P.PROMPTS_VIEW,
     P.WEB_USE,
+    P.RULES_VIEW,
     P.MODELS_API_USE,
   ],
   viewer: [
@@ -252,6 +261,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.BUILDS_VIEW,
     P.GLOBAL_VARIABLES_READ,
     P.PROMPTS_VIEW,
+    P.RULES_VIEW,
   ],
 };
 
@@ -404,6 +414,11 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Только чтение', permissions: [] },
     { code: 'editor', label: 'Управление памятью пространства', permissions: [P.MEMORY_MANAGE] },
   ],
+  rules: [
+    { code: 'none',   label: 'Нет доступа',   permissions: [] },
+    { code: 'viewer', label: 'Просмотр',       permissions: [P.RULES_VIEW] },
+    { code: 'editor', label: 'Управление правилами', permissions: [P.RULES_VIEW, P.RULES_MANAGE] },
+  ],
   models_api: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Подключение IDE и программ', permissions: [P.MODELS_API_USE] },
@@ -534,5 +549,7 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.PROMPTS_MANAGE, module: 'prompts', action: 'manage', description: 'Управление промптами пространства (создание, правка, удаление)', isSensitive: false },
   { id: P.WEB_USE, module: 'web', action: 'use', description: 'Поиск и чтение страниц в интернете агентом (если функция включена пространству)', isSensitive: false },
   { id: P.MEMORY_MANAGE, module: 'memory', action: 'manage', description: 'Запись памяти рабочего пространства — фактов, которые ассистенты учитывают у всех участников', isSensitive: true },
+  { id: P.RULES_VIEW, module: 'rules', action: 'view', description: 'Просмотр правил агента рабочего пространства и журнала их срабатываний', isSensitive: false },
+  { id: P.RULES_MANAGE, module: 'rules', action: 'manage', description: 'Включение, смена режима, выключение и откат правил агента рабочего пространства', isSensitive: true },
   { id: P.MODELS_API_USE, module: 'models_api', action: 'use', description: 'Обращение к моделям пространства из IDE и программ личным API-токеном (если доступ включён администратором установки)', isSensitive: false },
 ];
