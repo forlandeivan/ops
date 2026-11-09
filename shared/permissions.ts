@@ -20,8 +20,7 @@ export const MODULE_LABELS: Record<string, string> = {
   global_variables: 'Глобальные переменные',
   prompts: 'Промпты',
   web: 'Интернет',
-  memory: 'Память',
-  rules: 'Правила агента',
+  agent: 'Агент пространства',
   models_api: 'Модели для IDE и программ',
 };
 
@@ -44,8 +43,7 @@ export const PERMISSION_MODULES = [
   'global_variables',
   'prompts',
   'web',
-  'memory',
-  'rules',
+  'agent',
   'models_api',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
@@ -167,13 +165,14 @@ export const P = {
   PROMPTS_MANAGE: 'prompts:manage',
   // Веб агента (этап 1 стратегии v2): операции web.search и web.fetch.
   WEB_USE: 'web:use',
-  // Память рабочего пространства (shared/agent-memory.ts): запись фактов, которые ассистенты учитывают у всех
-  // участников. Чтение — любому участнику (факты и так в его промпте). Отдельный модуль, а не уровень `workspace`:
-  // новое право в уровне `editor` понизило бы существующим кастомным ролям показанный уровень доступа.
+  // Раздел «Агент пространства» (модуль `agent`, решение владельца 09.11.2026): инструкции, память и правила меняют
+  // поведение агента для всего пространства, поэтому человеку они даны одним уровнем доступа, а права внутри — для
+  // проверок кода. Память рабочего пространства (shared/agent-memory.ts) — справочник, который агент учитывает у всех
+  // участников; читает любой участник.
   MEMORY_MANAGE: 'memory:manage',
   // Правила агента (shared/agent-rules.ts): проверки, которые платформа исполняет на сдаче результата и перед
-  // операциями. Видеть правила и журнал — любому участнику (они действуют в его сессиях); включать, менять режим,
-  // выключать и откатывать — `rules:manage`. Агент правило только предлагает карточкой.
+  // операциями. Видеть правила и журнал — `rules:view`; включать, менять режим, выключать и откатывать —
+  // `rules:manage`. Агент правило только предлагает карточкой.
   RULES_VIEW: 'rules:view',
   RULES_MANAGE: 'rules:manage',
   // Модели для IDE и программ: адрес публичного API, совместимый с OpenAI. Человек подключает
@@ -360,7 +359,7 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
   workspace: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW] },
-    { code: 'editor', label: 'Редактирование', permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_EDIT, P.WORKSPACE_ICON_MANAGE, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_PLAN_MANAGE, P.WORKSPACE_CREDITS_VIEW, P.WORKSPACE_INSTRUCTIONS_MANAGE] },
+    { code: 'editor', label: 'Редактирование', permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_EDIT, P.WORKSPACE_ICON_MANAGE, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_PLAN_MANAGE, P.WORKSPACE_CREDITS_VIEW] },
   ],
   members: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
@@ -410,14 +409,12 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Поиск и чтение страниц', permissions: [P.WEB_USE] },
   ],
-  memory: [
-    { code: 'none',   label: 'Только чтение', permissions: [] },
-    { code: 'editor', label: 'Управление памятью пространства', permissions: [P.MEMORY_MANAGE] },
-  ],
-  rules: [
+  // Инструкции, справочник и правила пространства читают все участники; «Просмотр» добавляет вкладку «Правила»
+  // с журналом, «Управление» — правку всего, что меняет поведение агента в пространстве.
+  agent: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.RULES_VIEW] },
-    { code: 'editor', label: 'Управление правилами', permissions: [P.RULES_VIEW, P.RULES_MANAGE] },
+    { code: 'editor', label: 'Управление',     permissions: [P.RULES_VIEW, P.RULES_MANAGE, P.MEMORY_MANAGE, P.WORKSPACE_INSTRUCTIONS_MANAGE] },
   ],
   models_api: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
