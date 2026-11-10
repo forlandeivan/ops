@@ -4100,6 +4100,9 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // NULL = «Авто» (shared/instruction-layer.ts). ---
   instructionLayerEnabled: boolean("instruction_layer_enabled").notNull().default(false),
   instructionLayerMaxChars: integer("instruction_layer_max_chars"),
+  // Потолок режима самостоятельности агента в чате (shared/agent-approval-mode.ts): ask | auto | bypass.
+  // NULL = «Авто» = значение по умолчанию из кода.
+  agentMaxApprovalMode: text("agent_max_approval_mode"),
   // --- W2 Code Node: лимиты code runner'а узла «Код (JavaScript)». NULL = «Авто» (дефолт кода workflow-сервиса). Память
   // в external-режиме задаёт развёртывание раннера — админ-значение применяется к internal-пулу. ---
   workflowCodeExecTimeoutMs: integer("workflow_code_exec_timeout_ms"),
@@ -12892,6 +12895,15 @@ export const notificationAccountPreferences = pgTable("notification_account_pref
  productNews:boolean("product_news").notNull().default(true),
  platformAnnouncements:boolean("platform_announcements").notNull().default(true),
 });
+// Личные настройки агента: режим самостоятельности в чате (shared/agent-approval-mode.ts). Один выбор на учётную
+// запись — действует во всех чатах, ассистентах и рабочих пространствах. Строки нет — «Спрашивать».
+export const userAgentPreferences = pgTable("user_agent_preferences", {
+  userId: varchar("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  approvalMode: text("approval_mode").notNull().default("ask"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  approvalModeCheck: check("user_agent_preferences_approval_mode_check", sql`${t.approvalMode} IN ('ask', 'auto', 'bypass')`),
+}));
 export const notificationReleasePolicy = pgTable("notification_release_policy", {
  singleton:boolean("singleton").primaryKey().default(true), mode:text("mode").notNull().default("auto"), externalLinks:boolean("external_links").notNull().default(true), activeVersion:varchar("active_version",{length:64}),updatedAt:timestamp("updated_at",{withTimezone:true}).notNull().defaultNow(),
 },t=>({singletonCheck:check("notification_release_policy_singleton_check",sql`${t.singleton}`),modeCheck:check("notification_release_policy_mode_check",sql`${t.mode} IN ('auto','approval','disabled')`)}));
