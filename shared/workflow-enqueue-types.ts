@@ -60,8 +60,9 @@ export type WorkflowEnqueuePayload = {
   envelope: WorkflowChatInputEnvelope;
   resolvedVersion: {
     workflowDefinitionId: string;
-    versionId: string;
-    versionNo: number;
+    /** null — только у отладочного прогона (`debug` задан) черновика без опубликованной версии. */
+    versionId: string | null;
+    versionNo: number | null;
     contentHash: string;
     entryStepId: string | null;
   };

@@ -31,8 +31,9 @@ export type WorkflowEnqueueResultDto = {
   replayed?: boolean;
   runId: string;
   queuePosition: number;
-  resolvedWorkflowVersionId: string;
-  resolvedWorkflowVersionNo: number;
+  /** null — отладочный прогон черновика без опубликованной версии. */
+  resolvedWorkflowVersionId: string | null;
+  resolvedWorkflowVersionNo: number | null;
 };
 
 /** Параметры `awaitWorkflowRunResult` (long-poll синхронного вебхука). */

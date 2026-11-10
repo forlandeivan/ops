@@ -4876,6 +4876,8 @@ export type ChatOutputChannel = (typeof chatOutputChannels)[number];
  */
 export const CHAT_SESSION_ORIGIN_PUBLIC_API = "public_api" as const;
 export const CHAT_SESSION_ORIGIN_SCHEDULED_TASK = "scheduled_task" as const;
+/** Служебный чат пробного прогона сценария агентом (workflows.test_run): в списке чатов человека его нет. */
+export const CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL = "workflow_trial" as const;
 
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
@@ -4888,7 +4890,7 @@ export type ChatSessionMetadata = {
   /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
   selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
-  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK;
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL;
   [key: string]: unknown;
 };
 
@@ -8159,10 +8161,11 @@ export const assistantWorkflowRuns = pgTable(
     workflowDefinitionId: uuid("workflow_definition_id")
       .notNull()
       .references(() => workflowDefinitions.id, { onDelete: "restrict" }),
+      // null — только у отладочного прогона черновика без опубликованной версии (миграция 0437, CHECK
+      // assistant_workflow_runs_version_or_debug_chk): он исполняет замороженный бандл сессии отладки.
       resolvedWorkflowVersionId: uuid("resolved_workflow_version_id")
-        .notNull()
         .references(() => workflowDefinitionVersions.id, { onDelete: "restrict" }),
-      resolvedWorkflowVersionNo: integer("resolved_workflow_version_no").notNull(),
+      resolvedWorkflowVersionNo: integer("resolved_workflow_version_no"),
       workflowContentHash: varchar("workflow_content_hash", { length: 64 }).notNull(),
       dispatchSource: varchar("dispatch_source", { length: 64 })
         .$type<AssistantWorkflowRunDispatchSource>()
