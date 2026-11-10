@@ -8810,6 +8810,9 @@ export const skillRegistry = pgTable(
     sourceBuildId: varchar("source_build_id", { length: 255 }),
     sourceBuildVersion: varchar("source_build_version", { length: 100 }),
     managedByBuild: boolean("managed_by_build").notNull().default(false),
+    // Кому виден навык пространства: `assistants` — «Уника AI» и ассистентам, к которым привязан; `workspace` —
+    // любому ассистенту пространства (фирменный стиль, общий регламент). CHECK — миграция 0432.
+    availability: varchar("availability", { length: 32 }).$type<"assistants" | "workspace">().notNull().default("assistants"),
     metadata: jsonb("metadata").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
