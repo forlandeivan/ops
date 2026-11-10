@@ -7209,6 +7209,33 @@ export const agentCheckpointWrites = pgTable(
   }),
 );
 
+// Переписка агента при чате для следующего хода (план «агент помнит весь чат», 10.11.2026, миграция 0438). Пишет
+// сервис сессий в конце хода, читает следующая сессия чата; монолит читает только служебные поля для запуска и
+// удаляет строку вместе с чатом. Связи с сессией нет намеренно: сессии уходят по сроку хранения, переписка — с чатом.
+export const agentChatThreads = pgTable(
+  "agent_chat_threads",
+  {
+    chatId: varchar("chat_id")
+      .primaryKey()
+      .references(() => chatSessions.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceSessionId: uuid("source_session_id").notNull(),
+    engineVersion: integer("engine_version").notNull(),
+    messages: checkpointBytea("messages").notNull(),
+    messageCount: integer("message_count").notNull().default(0),
+    approxTokens: integer("approx_tokens").notNull().default(0),
+    coveredMessageId: varchar("covered_message_id"),
+    contextDigest: jsonb("context_digest").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    compactions: integer("compactions").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`now()`).notNull(),
+  },
+  (table) => ({
+    workspaceIdx: index("agent_chat_threads_workspace_idx").on(table.workspaceId),
+  }),
+);
+
 export type AgentSessionRecord = typeof agentSessions.$inferSelect;
 
 // Задача 5.2: durable реестр идемпотентности вызовов агента с побочными эффектами. Ключ =
