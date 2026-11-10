@@ -4892,6 +4892,7 @@ export type ChatSessionMetadata = {
 export const chatSessions = pgTable(
   "chat_sessions",
   {
+    queueReplayEpoch: integer("queue_replay_epoch").notNull().default(0),
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
     workspaceId: varchar("workspace_id")
       .notNull()
@@ -4986,6 +4987,8 @@ export const chatMessages = pgTable(
     createdAtIdx: index("chat_messages_created_at_idx").on(table.createdAt),
     chatIdx: index("chat_messages_chat_idx").on(table.chatId, table.createdAt),
     // 0260: FK-индекс под SET NULL при удалении карточки (card_id).
+    clientTurnIdx: uniqueIndex("chat_messages_client_turn_idx").on(table.chatId, sql`(${table.metadata}->>'clientTurnId')`).where(sql`${table.role}='user' AND ${table.metadata} ? 'clientTurnId'`),
+    queuedTurnIdx: index("chat_messages_queued_turn_idx").on(table.chatId, sql`(${table.metadata}->>'queuedMessageId')`).where(sql`${table.role}='user' AND ${table.metadata} ? 'queuedMessageId'`),
     cardIdx: index("chat_messages_card_id_idx").on(table.cardId),
   }),
 );
@@ -12899,3 +12902,55 @@ export const notificationMedia = pgTable("notification_media", {
 export const notificationReleaseAudit = pgTable("notification_release_audit", {
  id:uuid("id").primaryKey().default(sql`gen_random_uuid()`),actorId:varchar("actor_id").references(()=>users.id,{onDelete:"set null"}),action:text("action").notNull(),publicationId:uuid("publication_id").references(()=>notificationPublications.id,{onDelete:"set null"}),version:varchar("version",{length:64}),createdAt:timestamp("created_at",{withTimezone:true}).notNull().defaultNow(),
 },t=>({createdIdx:index("notification_release_audit_created_idx").on(t.createdAt)}));
+
+/** A request and its canonical user message share one durable receipt. */
+export const chatTurnReceipts = pgTable("chat_turn_receipts", {
+  chatId: varchar("chat_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
+  operationId: uuid("operation_id").notNull(),
+  requestHash: text("request_hash").notNull(),
+  messageId: varchar("message_id").notNull().default(sql`gen_random_uuid()::text`),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }).notNull(),
+  finished: boolean("finished").notNull().default(false),
+  ownerId: uuid("owner_id").notNull().defaultRandom(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+}, table => [primaryKey({ columns: [table.chatId, table.operationId] }),
+  index("chat_receipts_finished_idx").on(table.finishedAt).where(sql`${table.finishedAt} IS NOT NULL`)]);
+
+export const chatQueuedMessages = pgTable("chat_queued_messages", {
+  id: uuid("id").primaryKey(),
+  position: bigserial("position", { mode: "number" }).notNull(),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  chatId: varchar("chat_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  afterOperationId: uuid("after_operation_id"),
+  afterRunId: uuid("after_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+  workflowDefinitionId: uuid("workflow_definition_id").references(() => workflowDefinitions.id, { onDelete: "restrict" }),
+  content: text("content").notNull(),
+  input: jsonb("input").$type<Record<string, unknown>>().notNull(),
+  status: text("status").notNull().default("queued"),
+  error: text("error"),
+  userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+  enqueuePayload: jsonb("enqueue_payload").$type<Record<string, unknown>>(),
+  workflowRunId: uuid("workflow_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "set null" }),
+  leaseOwner: text("lease_owner"),
+  leaseEpoch: integer("lease_epoch").notNull().default(0),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  retryAt: timestamp("retry_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  finishedIdx: index("chat_queue_finished_idx").on(table.finishedAt).where(sql`${table.finishedAt} IS NOT NULL`),
+  chatPositionIdx: index("chat_queued_messages_chat_position_idx").on(table.chatId, table.position),
+  pendingIdx: index("chat_queued_messages_pending_idx").on(table.retryAt).where(sql`${table.status} IN ('queued','dispatching')`),
+  workspaceIdx: index("chat_queued_messages_workspace_idx").on(table.workspaceId),
+  userIdx: index("chat_queued_messages_user_idx").on(table.userId),
+  assistantIdx: index("chat_queued_messages_assistant_idx").on(table.assistantId),
+  afterRunIdx: index("chat_queued_messages_after_run_idx").on(table.afterRunId),
+  definitionIdx: index("chat_queued_messages_definition_idx").on(table.workflowDefinitionId),
+  userMessageIdx: index("chat_queued_messages_user_message_idx").on(table.userMessageId),
+  workflowRunIdx: index("chat_queued_messages_workflow_run_idx").on(table.workflowRunId),
+  anchorCheck: check("chat_queued_messages_anchor_check", sql`(${table.afterRunId} IS NOT NULL AND ${table.workflowDefinitionId} IS NOT NULL AND ${table.afterOperationId} IS NULL) OR (${table.afterOperationId} IS NOT NULL AND ${table.afterRunId} IS NULL AND ${table.workflowDefinitionId} IS NULL)`),
+  statusCheck: check("chat_queued_messages_status_check", sql`${table.status} IN ('queued','dispatching','failed','dispatched','canceled')`),
+}));

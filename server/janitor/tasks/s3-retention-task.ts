@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "../../db";
 import type { CleanupMode } from "@shared/cleanup-policies";
+import { activeQueuedAttachmentReference } from "../active-queued-attachment";
 
 import {
   FILE_ARTIFACT_CLEANUP_PAYLOAD_VERSION,
@@ -169,17 +170,20 @@ function whereFragment(filter: S3CandidateFilter, cutoff: Date) {
 const attachmentExternalUri = sql`(SELECT files.external_uri FROM files WHERE files.id = chat_attachments.file_id)`;
 
 /**
- * SQL-двойник scheduledCleanupIdempotencyKey для строки chat_attachments: тот же формат
- * повторяют каскадные PG-политики (pg-retention-task). Расхождение формата сломало бы
- * и защиту от повторной постановки, и ON CONFLICT.
+ * S3 retention adds the policy reason to snapshot identity. A retired draft job must
+ * not suppress ordinary retention after the attachment has been bound to a message.
+ * Cascade cleanup keeps its separate reason-independent snapshot identity.
+ * Omitting reason reproduces that legacy key, used to avoid overlapping active
+ * cleanup during a rolling upgrade or cascade. Legacy success is not a retention
+ * tombstone: it can mean an obsolete draft snapshot was retired without deletion.
  */
-const janitorAttachmentKey = sql`'janitor:' || md5(concat_ws(chr(31),
+const janitorAttachmentKey = (reason?: string) => sql`'janitor:' || md5(concat_ws(chr(31),
   chat_attachments.workspace_id,
   'chat_attachment',
   chat_attachments.id,
   COALESCE(chat_attachments.storage_key, ''),
   COALESCE(${attachmentExternalUri}, ''),
-  COALESCE(chat_attachments.document_version::text, '')
+  COALESCE(chat_attachments.document_version::text, '')${reason === undefined ? sql`` : sql`, ${reason}::text`}
 ))`;
 
 /**
@@ -190,7 +194,7 @@ const janitorAttachmentKey = sql`'janitor:' || md5(concat_ws(chr(31),
 const monolithAttachmentKey = sql`'chat-attachment:' || chat_attachments.id || ':v' || chat_attachments.document_version::text`;
 
 /**
- * Вложения чата не планируются повторно и не планируются во время активной ASR.
+ * Вложения чата не планируются повторно, во время активной ASR или пока их держит очередь чата.
  * Снимок вложения ставят под двумя ключами — уборщик и монолит, — поэтому проверка
  * ищет задание точечно по уникальному индексу idempotency_key, а не перебором payload
  * всей очереди на каждую строку-кандидата. Сверка адресов в payload сохраняет прежний
@@ -198,15 +202,25 @@ const monolithAttachmentKey = sql`'chat-attachment:' || chat_attachments.id || '
  * Финальная проверка ASR повторяется исполнителем очереди и монолитом, поэтому гонка
  * между SELECT и стартом транскрибации безопасна.
  */
-function chatAttachmentQueueGuardFragment() {
+function chatAttachmentQueueGuardFragment(reason: string) {
   return sql`
+    AND NOT ${activeQueuedAttachmentReference(sql`chat_attachments.id`, sql`chat_attachments.workspace_id`)}
     AND NOT EXISTS (
       SELECT 1
       FROM file_artifact_cleanup_jobs AS cleanup
-      WHERE cleanup.idempotency_key IN (${janitorAttachmentKey}, ${monolithAttachmentKey})
+      WHERE cleanup.idempotency_key IN (${janitorAttachmentKey(reason)}, ${monolithAttachmentKey})
         AND COALESCE(cleanup.payload->>'storageKey', '') = chat_attachments.storage_key
         AND COALESCE(cleanup.payload->>'externalUri', '') = COALESCE(${attachmentExternalUri}, '')
         AND NOT (cleanup.status = 'error' AND cleanup.next_retry_at IS NULL)
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM file_artifact_cleanup_jobs AS legacy_cleanup
+      WHERE legacy_cleanup.idempotency_key = ${janitorAttachmentKey()}
+        AND (
+          legacy_cleanup.status IN ('pending', 'processing')
+          OR (legacy_cleanup.status = 'error' AND legacy_cleanup.next_retry_at IS NOT NULL)
+        )
     )
     AND NOT EXISTS (
       SELECT 1
@@ -263,7 +277,7 @@ export function createChatAttachmentS3Store(
       const query = sql`SELECT count(*)::int AS count FROM (SELECT 1 FROM chat_attachments WHERE ${whereFragment(
         filter,
         cutoff,
-      )}${chatAttachmentQueueGuardFragment()} LIMIT ${cap}) AS sub`;
+      )}${chatAttachmentQueueGuardFragment(filter.policyKey ?? "scheduled_retention")} LIMIT ${cap}) AS sub`;
       return firstCount(await database.execute(query));
     },
 
@@ -275,9 +289,9 @@ export function createChatAttachmentS3Store(
           SELECT id, workspace_id, chat_id, file_id, filename, mime_type, storage_key,
             document_version, derived_manifest_object_key, preview_object_key, size_bytes,
             ${attachmentExternalUri} AS external_uri,
-            ${janitorAttachmentKey} AS idempotency_key
+            ${janitorAttachmentKey(reason)} AS idempotency_key
           FROM chat_attachments
-          WHERE ${whereFragment(filter, cutoff)}${chatAttachmentQueueGuardFragment()}
+          WHERE ${whereFragment(filter, cutoff)}${chatAttachmentQueueGuardFragment(reason)}
           ORDER BY ${timeId}
           LIMIT ${batchSize}
         ), enqueued AS (

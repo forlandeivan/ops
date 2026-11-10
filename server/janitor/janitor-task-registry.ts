@@ -660,6 +660,20 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 400,
   }),
   task({
+    key: "pg.chat_queued_messages",
+    label: "Завершённая очередь сообщений",
+    description: "Удаляет доставленные и отменённые элементы очереди после окончания срока хранения.",
+    category: "events", action: "delete_rows", table: "chat_queued_messages", timeColumn: "finished_at",
+    defaultRetentionDays: 7, defaultEnabled: true,
+  }),
+  task({
+    key: "pg.chat_turn_receipts",
+    label: "Квитанции отправки сообщений",
+    description: "Удаляет завершённые квитанции и давно истёкшие аренды. Квитанции, которые нужны активной очереди, сохраняются.",
+    category: "events", action: "delete_rows", table: "chat_turn_receipts", timeColumn: "finished_at", pkColumn: "operation_id",
+    defaultRetentionDays: 7, defaultEnabled: true,
+  }),
+  task({
     key: "pg.public_api_idempotency_keys",
     label: "Ключи идемпотентности публичного API (public_api_idempotency_keys)",
     description:

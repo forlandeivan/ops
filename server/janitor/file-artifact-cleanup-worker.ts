@@ -59,10 +59,11 @@ function nextBackoffMs(
   return Math.max(1, Math.floor(exponential * (0.75 + random() * 0.5)));
 }
 
-function isActiveAsrGatewayError(error: unknown): boolean {
+function isDeferredCleanupGatewayError(error: unknown): boolean {
   return error instanceof JanitorDomainGatewayError &&
     error.status === 409 &&
-    error.code === "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR";
+    (error.code === "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR" ||
+      error.code === "FILE_ARTIFACT_CLEANUP_QUEUED_ATTACHMENT");
 }
 
 function isRetryable(error: unknown): boolean {
@@ -131,7 +132,7 @@ export async function processFileArtifactCleanupJob(params: {
         fileArtifactCleanupJobsTotal.inc({ outcome: owned ? "released" : "lost_lease" });
         return owned ? "released" : "lost_lease";
       }
-      if (isActiveAsrGatewayError(error)) {
+      if (isDeferredCleanupGatewayError(error)) {
         const nextRetryAt = new Date(now().getTime() + params.activeAsrRetryMs);
         const owned = await params.store.deferForActiveAsr(params.job.id, params.workerId, nextRetryAt);
         fileArtifactCleanupJobsTotal.inc({ outcome: owned ? "deferred_active_asr" : "lost_lease" });

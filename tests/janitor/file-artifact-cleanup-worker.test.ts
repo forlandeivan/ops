@@ -127,13 +127,14 @@ describe("file artifact cleanup worker", () => {
     );
   });
 
-  it("409 active-ASR от монолита также откладывает job без attempts", async () => {
+  it.each(["FILE_ARTIFACT_CLEANUP_ACTIVE_ASR", "FILE_ARTIFACT_CLEANUP_QUEUED_ATTACHMENT"])(
+    "409 %s от монолита откладывает job без attempts", async (code) => {
     const fakeStore = store(false);
     const cleanup = vi.fn(async () => {
       throw new JanitorDomainGatewayError(
         "ASR is active",
         409,
-        "FILE_ARTIFACT_CLEANUP_ACTIVE_ASR",
+        code,
         true,
       );
     });

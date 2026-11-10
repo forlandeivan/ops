@@ -244,6 +244,71 @@ function firstAffected(result: unknown): number {
 
 type CascadeCleanupRoot = "chat_sessions" | "assistants";
 
+type ChatReplayRetentionTable = "chat_queued_messages" | "chat_turn_receipts";
+
+function isChatReplayRetentionTable(table: string): table is ChatReplayRetentionTable {
+  return table === "chat_queued_messages" || table === "chat_turn_receipts";
+}
+
+/** Replay retention is anchored to terminal state, independently of registry metadata. */
+function chatReplayRetentionCondition(table: ChatReplayRetentionTable, cutoff: Date): SQL {
+  if (table === "chat_queued_messages") {
+    return sql`root.status IN ('dispatched', 'canceled') AND root.finished_at < ${cutoff}`;
+  }
+  return sql`(
+    (root.finished = TRUE AND root.finished_at < ${cutoff})
+    OR (root.finished = FALSE AND root.finished_at IS NULL AND root.lease_until < ${cutoff})
+  ) AND NOT EXISTS (
+    SELECT 1 FROM chat_queued_messages AS queued
+    WHERE queued.chat_id = root.chat_id
+      AND queued.status IN ('queued', 'dispatching', 'failed')
+      AND (queued.after_operation_id = root.operation_id OR queued.id = root.operation_id)
+  )`;
+}
+
+async function countChatReplayRows(
+  database: RetentionExecutor,
+  table: ChatReplayRetentionTable,
+  cutoff: Date,
+  cap: number,
+): Promise<number> {
+  return firstCount(await database.execute(sql`
+    SELECT count(*)::int AS count FROM (
+      SELECT 1 FROM ${sql.identifier(table)} AS root
+      WHERE ${chatReplayRetentionCondition(table, cutoff)} LIMIT ${cap}
+    ) AS eligible
+  `));
+}
+
+async function deleteChatReplayRows(
+  database: RetentionExecutor,
+  table: ChatReplayRetentionTable,
+  cutoff: Date,
+  batchSize: number,
+): Promise<number> {
+  const isReceipt = table === "chat_turn_receipts";
+  const identity = isReceipt ? sql`root.chat_id, root.operation_id` : sql`root.id`;
+  const identityMatch = isReceipt
+    ? sql`root.chat_id = picked.chat_id AND root.operation_id = picked.operation_id`
+    : sql`root.id = picked.id`;
+  const order = isReceipt
+    ? sql`COALESCE(root.finished_at, root.lease_until), root.chat_id, root.operation_id`
+    : sql`root.finished_at, root.id`;
+  return firstAffected(await database.execute(sql`
+    WITH picked AS MATERIALIZED (
+      SELECT ${identity} FROM ${sql.identifier(table)} AS root
+      WHERE ${chatReplayRetentionCondition(table, cutoff)}
+      ORDER BY ${order}
+      FOR UPDATE OF root SKIP LOCKED LIMIT ${batchSize}
+    ), deleted AS (
+      DELETE FROM ${sql.identifier(table)} AS root USING picked
+      WHERE ${identityMatch} AND ${chatReplayRetentionCondition(table, cutoff)}
+      RETURNING 1
+    )
+    SELECT count(*)::int AS affected FROM deleted
+  `));
+}
+
 function isCascadeCleanupRoot(table: string): table is CascadeCleanupRoot {
   return table === "chat_sessions" || table === "assistants";
 }
@@ -562,6 +627,9 @@ export function createPgRetentionStore(
 
   return {
     async countMatches({ table, timeColumn, cutoff, requireNonNullAny, equalsFilter, cap }) {
+      if (isChatReplayRetentionTable(table)) {
+        return countChatReplayRows(database, table, cutoff, cap);
+      }
       if (table === CHUNK_SETS_TABLE) {
         return countSupersededChunkSets(database, { table, timeColumn, cutoff, cap });
       }
@@ -604,6 +672,9 @@ export function createPgRetentionStore(
     },
 
     async deleteBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize, resumeFrom }) {
+      if (isChatReplayRetentionTable(table)) {
+        return deleteChatReplayRows(database, table, cutoff, batchSize);
+      }
       if (table === CHUNK_SETS_TABLE) {
         return deleteSupersededChunkSets(database, { table, timeColumn, pkColumn, cutoff, batchSize });
       }

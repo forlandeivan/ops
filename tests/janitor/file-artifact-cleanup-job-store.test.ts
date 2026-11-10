@@ -46,12 +46,20 @@ describe("file artifact cleanup job store", () => {
     });
   });
 
-  it("active-ASR guard считает lifecycle_status=NULL + status=processing активным", async () => {
+  it.each([
+    ["s3.chat_attachments.drafts", true],
+    ["s3.chat_attachments.audio_video", true],
+    ["manual_chat_delete", false],
+    ["pg.chat_sessions", false],
+  ])("cleanup guard protects queue for %s: %s", async (reason, protectQueue) => {
     const dialect = new PgDialect();
     let querySql = "";
+    let queryParams: unknown[] = [];
     const database = {
       execute: vi.fn(async (query: unknown) => {
-        querySql = dialect.sqlToQuery(query as never).sql;
+        const compiled = dialect.sqlToQuery(query as never);
+        querySql = compiled.sql;
+        queryParams = compiled.params;
         return { rows: [{ active: true }] };
       }),
     };
@@ -62,7 +70,7 @@ describe("file artifact cleanup job store", () => {
       workspaceId: "ws-1",
       resourceType: "chat_attachment",
       resourceId: "att-1",
-      reason: "retention",
+      reason,
       payloadVersion: 1,
       payload: { attachmentId: "att-1", fileId: "file-1", externalUri: "/ws-1/asr/a.mp3" },
       status: "processing",
@@ -79,6 +87,9 @@ describe("file artifact cleanup job store", () => {
     expect(querySql).toContain("asr_executions");
     expect(querySql).toContain("COALESCE(execution.lifecycle_status, execution.status, 'accepted')");
     expect(querySql).toContain("NOT IN ('completed', 'failed', 'cancelled', 'expired')");
+    expect(querySql).toContain("queued_attachment.status IN ('queued', 'dispatching', 'failed')");
+    expect(querySql).toContain("queued_attachment.input->'attachmentIds' ?");
+    expect(queryParams).toContain(protectQueue);
   });
 
   it("owner mutations отклоняют просроченный lease", async () => {

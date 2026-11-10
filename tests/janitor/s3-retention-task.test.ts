@@ -305,8 +305,14 @@ describe("createChatAttachmentS3Store durable queue", () => {
     expect(text).toContain("'chat-attachment:' || chat_attachments.id || ':v' || chat_attachments.document_version::text");
     expect(text).not.toContain("payload->>'attachmentId'");
     expect(text).toContain("cleanup.status = 'error' AND cleanup.next_retry_at IS NULL");
+    expect(text).toContain("legacy_cleanup.idempotency_key = 'janitor:' || md5(concat_ws(chr(31)");
+    expect(text).toContain("legacy_cleanup.status IN ('pending', 'processing')");
+    expect(text).toContain("legacy_cleanup.status = 'error' AND legacy_cleanup.next_retry_at IS NOT NULL");
     expect(text).toContain("asr_completion_jobs");
     expect(text).toContain("asr_executions");
+    expect(text).toContain("queued_attachment.status IN ('queued', 'dispatching', 'failed')");
+    expect(text).toContain("queued_attachment.workspace_id = chat_attachments.workspace_id");
+    expect(text).toContain("queued_attachment.input->'attachmentIds' ? chat_attachments.id");
     expect(text).toContain("COALESCE(execution.lifecycle_status, execution.status, 'accepted')");
   });
 

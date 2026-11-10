@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { db } from "../db";
+import { activeQueuedAttachmentReference } from "./active-queued-attachment";
 
 export const FILE_ARTIFACT_CLEANUP_PAYLOAD_VERSION = 1 as const;
 /** Защита от hot loop: новый enqueue оживляет terminal job не раньше чем через 5 минут. */
@@ -123,6 +124,7 @@ export function scheduledCleanupIdempotencyKey(input: ScheduledFileArtifactClean
 export interface FileArtifactCleanupJobStore {
   claim(workerId: string, leaseMs: number): Promise<FileArtifactCleanupJobRecord | null>;
   heartbeat(jobId: string, workerId: string, leaseMs: number): Promise<boolean>;
+  /** Active ASR, or an active chat queue reference for automatic attachment retention. */
   hasActiveAsr(job: FileArtifactCleanupJobRecord): Promise<boolean>;
   deferForActiveAsr(jobId: string, workerId: string, nextRetryAt: Date): Promise<boolean>;
   release(jobId: string, workerId: string): Promise<boolean>;
@@ -189,11 +191,16 @@ export function createFileArtifactCleanupJobStore(
       const fileId = job.payload.fileId?.trim() || null;
       const attachmentId = job.payload.attachmentId?.trim() || null;
       const externalUri = job.payload.externalUri?.trim() || null;
+      const protectQueuedAttachment = job.reason.startsWith("s3.chat_attachments.");
       if (!fileId && !attachmentId && !externalUri) {
         return false;
       }
       const result = await database.execute(sql`
         SELECT EXISTS (
+          SELECT 1
+          WHERE ${protectQueuedAttachment}::boolean AND ${attachmentId}::text IS NOT NULL
+            AND ${activeQueuedAttachmentReference(sql`${attachmentId}::text`, sql`${job.workspaceId}`)}
+          UNION ALL
           SELECT 1
           FROM asr_completion_jobs AS completion
           WHERE completion.status NOT IN ('success', 'error', 'cancelled')

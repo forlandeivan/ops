@@ -39,6 +39,8 @@ describe("janitor task registry", () => {
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
         "s3.chat_attachments.drafts",
+        "pg.chat_queued_messages",
+        "pg.chat_turn_receipts",
         // C12: рабочие файлы конвейера приёма (ingest/) — новые объекты, чистятся из коробки;
         // оригиналы и canonical/ политика не затрагивает (префикс-гард в ops-сторе).
         "s3.ingest_sources.workdir",
