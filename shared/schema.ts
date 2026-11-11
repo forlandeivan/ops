@@ -1349,6 +1349,10 @@ export const searchProfiles = pgTable(
     bm25TimeBudgetMs: integer("bm25_time_budget_ms").notNull().default(20000),
     queryRewriteEnabled: boolean("query_rewrite_enabled").notNull().default(true),
     queryRewriteModel: text("query_rewrite_model"),
+    // Провайдер модели переписывания (пара с queryRewriteModel); null — провайдер LLM ассистента.
+    queryRewriteProviderId: varchar("query_rewrite_provider_id").references(() => llmProviders.id, {
+      onDelete: "set null",
+    }),
     queryRewritePrompt: text("query_rewrite_prompt"),
     rerankEnabled: boolean("rerank_enabled").notNull().default(false),
     rerankProviderId: varchar("rerank_provider_id").references(() => llmProviders.id, { onDelete: "set null" }),
@@ -4298,6 +4302,10 @@ export const assistants = pgTable(
   ragHistoryCharsLimit: integer("rag_history_chars_limit").default(4000),
   ragEnableQueryRewriting: boolean("rag_enable_query_rewriting").default(true),
   ragQueryRewriteModel: text("rag_query_rewrite_model"), // null = использовать основную модель
+  // Провайдер модели переписывания (пара с ragQueryRewriteModel); null — провайдер основной модели.
+  ragQueryRewriteProviderId: varchar("rag_query_rewrite_provider_id").references(() => llmProviders.id, {
+    onDelete: "set null",
+  }),
   ragEnableContextCaching: boolean("rag_enable_context_caching").default(false),
   ragContextCacheTtlSeconds: integer("rag_context_cache_ttl_seconds").default(300), // 5 минут по умолчанию
   ragBm25Weight: doublePrecision("rag_bm25_weight"),
