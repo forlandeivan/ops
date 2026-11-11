@@ -4119,6 +4119,9 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // служебной модели. ---
   chatRouterAgentConfidenceThresholdPct: integer("chat_router_agent_confidence_threshold_pct"),
   chatAnswerGroundingGateEnabled: boolean("chat_answer_grounding_gate_enabled"),
+  // Режим «Чат» сам передаёт ход агенту (метка в начале ответа, shared/chat-mode.ts `chatHandoffReasons`).
+  // NULL/true = включено (умолчание), false = чат всегда отвечает сам — для инсталляций со слабой моделью.
+  chatAgentHandoffEnabled: boolean("chat_agent_handoff_enabled"),
   // --- Проверка ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md): одна ручка из четырёх положений хранится
   // в режиме и видимости (shared/answer-quality.ts, `answerQualityLevelToStored`). NULL = «Авто» = отметка для всех. ---
   answerQualityMode: text("answer_quality_mode").$type<AnswerQualityMode>(),

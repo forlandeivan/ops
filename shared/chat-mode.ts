@@ -17,7 +17,8 @@ export type ChatExplicitMode = Exclude<ChatRequestMode, "auto">;
 export const chatRoutes = ["chat", "agent"] as const;
 export type ChatRoute = (typeof chatRoutes)[number];
 
-export const chatRouteSources = ["explicit", "policy", "floor", "llm", "fallback"] as const;
+/** `handoff` — режим «Чат» сам передал ход агенту меткой в начале ответа (см. `chatHandoffReasons`). */
+export const chatRouteSources = ["explicit", "policy", "floor", "llm", "fallback", "handoff"] as const;
 export type ChatRouteSource = (typeof chatRouteSources)[number];
 
 /** Причины решения — закрытый словарь для метрик и фильтров, не свободный текст. */
@@ -41,8 +42,26 @@ export const chatRouteReasons = [
   "invalid_json",
   "no_model",
   "cascade_failed",
+  /** Модель режима «Чат» поставила метку передачи хода: задачу выполняет агент. */
+  "chat_handoff",
 ] as const;
 export type ChatRouteReason = (typeof chatRouteReasons)[number];
+
+/**
+ * Передача хода из режима «Чат» агенту. Модель чата первой строкой ответа ставит метку
+ * `[[АГЕНТ:причина]]`; сервер читает только начало ответа. Причина — закрытый словарь: что нужно
+ * пользователю и чего «Чат» не умеет. Неизвестное слово после двоеточия — `other`.
+ */
+export const chatHandoffReasons = ["file", "web", "documents", "compute", "workspace", "skill", "memory", "other"] as const;
+export type ChatHandoffReason = (typeof chatHandoffReasons)[number];
+
+export function resolveChatHandoffReason(value: unknown): ChatHandoffReason {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return (chatHandoffReasons as readonly string[]).includes(normalized) ? (normalized as ChatHandoffReason) : "other";
+}
+
+/** Пометка на сообщении пользователя: его ход «Чат» передал агенту. */
+export type ChatHandoffMarker = { reason: ChatHandoffReason };
 
 export type ChatRouteDecision = {
   v: 1;
