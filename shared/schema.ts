@@ -4114,10 +4114,9 @@ export const unicaChatConfig = pgTable("unica_chat_config", {
   // W3.1: рубильник делегации правки кода в пространства. NULL/true = разрешено (умолчание), false = только
   // платформенный админ. Шов под будущую лицензионную проверку.
   workflowCodeExecDelegationEnabled: boolean("workflow_code_exec_delegation_enabled"),
-  // --- Режим «Авто» и гейт честности (docs/system-knowledge-bases-auto-route-strategy-2026-09.md). NULL = «Авто»
-  // (дефолт кода). Модель роутера, выключатель, таймаут и пауза удалены миграцией 0402: выбор пути идёт на быстрой
-  // служебной модели. ---
-  chatRouterAgentConfidenceThresholdPct: integer("chat_router_agent_confidence_threshold_pct"),
+  // --- Гейт честности ответов чата (docs/system-knowledge-bases-auto-route-strategy-2026-09.md §7). NULL = дефолт кода.
+  // Режим «Авто» снят 11.11.2026: его порог уверенности удалён миграцией 0441, модель роутера, выключатель, таймаут и
+  // пауза — ещё миграцией 0402. ---
   chatAnswerGroundingGateEnabled: boolean("chat_answer_grounding_gate_enabled"),
   // Режим «Чат» сам передаёт ход агенту (метка в начале ответа, shared/chat-mode.ts `chatHandoffReasons`).
   // NULL/true = включено (умолчание), false = чат всегда отвечает сам — для инсталляций со слабой моделью.

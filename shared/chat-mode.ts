@@ -1,47 +1,33 @@
 /**
- * Режимы запроса чата и решение роутера «Авто» (волна В1 стратегии
- * docs/system-knowledge-bases-auto-route-strategy-2026-09.md, §6).
+ * Режимы запроса чата и решение о том, кто выполняет ход.
+ *
+ * Режимов два, оба выбирает человек: «Чат» — один ответ модели текстом, «Агент» — многошаговый исполнитель
+ * с инструментами. Отдельного диспетчера, который до ответа угадывает исполнителя, нет: режим «Авто» с
+ * LLM-роутером снят 11.11.2026. Вместо него режим «Чат» сам передаёт ход агенту, когда для результата
+ * мало текста: модель чата первой строкой ответа ставит метку `[[АГЕНТ:причина]]` (см. `chatHandoffReasons`).
  *
  * Один shared-тип вместо десятка дубликатов юниона `"chat" | "agent"` на сервере и клиенте.
- * «Авто» — третий режим запроса: сервер сам выбирает исполнителя (чат или агентский прогон) и
- * сообщает решение клиенту сигналом `routing`. Роутер только выбирает рантайм и никогда не отвечает
- * за модель — этим он отличается от снятых ранее детерминированных перехватчиков.
  */
 
-export const chatRequestModes = ["chat", "agent", "auto"] as const;
+export const chatRequestModes = ["chat", "agent"] as const;
 export type ChatRequestMode = (typeof chatRequestModes)[number];
 
-/** Явные режимы, которые понимает исполнение (без «Авто»). */
-export type ChatExplicitMode = Exclude<ChatRequestMode, "auto">;
+/** Режим, который понимает исполнение. Совпадает с режимом запроса: оставлен именем для вызывающих. */
+export type ChatExplicitMode = ChatRequestMode;
 
 export const chatRoutes = ["chat", "agent"] as const;
 export type ChatRoute = (typeof chatRoutes)[number];
 
-/** `handoff` — режим «Чат» сам передал ход агенту меткой в начале ответа (см. `chatHandoffReasons`). */
-export const chatRouteSources = ["explicit", "policy", "floor", "llm", "fallback", "handoff"] as const;
+/**
+ * Откуда взялось решение: `explicit` — режим выбрал человек (или он следует из ассистента и команды);
+ * `handoff` — режим «Чат» сам передал ход агенту меткой в начале ответа.
+ */
+export const chatRouteSources = ["explicit", "handoff"] as const;
 export type ChatRouteSource = (typeof chatRouteSources)[number];
 
 /** Причины решения — закрытый словарь для метрик и фильтров, не свободный текст. */
 export const chatRouteReasons = [
   "explicit_mode",
-  "auto_mode_feature_off",
-  "auto_mode_not_eligible",
-  "assistant_workflow",
-  "policy_no_workflow",
-  "universal_agent_missing",
-  /** Живая сессия агента в чате ждёт ответа на свой вопрос или подтверждения — реплика идёт ей. */
-  "agent_session_waiting",
-  "router_disabled",
-  "smalltalk_library",
-  "explicit_file_artifact",
-  "structured_attachment",
-  "context_refs",
-  "llm",
-  "low_confidence",
-  "timeout",
-  "invalid_json",
-  "no_model",
-  "cascade_failed",
   /** Модель режима «Чат» поставила метку передачи хода: задачу выполняет агент. */
   "chat_handoff",
 ] as const;
@@ -63,6 +49,7 @@ export function resolveChatHandoffReason(value: unknown): ChatHandoffReason {
 /** Пометка на сообщении пользователя: его ход «Чат» передал агенту. */
 export type ChatHandoffMarker = { reason: ChatHandoffReason };
 
+/** Решение о маршруте хода: пишется в журнал исполнения и в метрику. */
 export type ChatRouteDecision = {
   v: 1;
   /** Что запросил клиент. */
@@ -71,38 +58,15 @@ export type ChatRouteDecision = {
   route: ChatRoute;
   source: ChatRouteSource;
   reason: ChatRouteReason;
-  /** Уверенность LLM-роутера, 0..1; null для остальных слоёв. */
-  confidence: number | null;
-  latencyMs: number;
-  /** Решение принято в обход модели из-за сбоя (таймаут, невалидный JSON, нет модели). */
-  degraded: boolean;
-  /** Вердикт гейта честности от роутера (один вызов на оба решения); null — роутер не отвечал. */
-  citationRequired: boolean | null;
-  routerModel: string | null;
   decidedAt: string;
-  /** Решение взято из кэша повтора запроса, модель повторно не звали. */
-  reused: boolean;
-  /**
-   * «RAG перед RAG» (этап C): базы знаний, выбранные роутером из кандидатов каталога, — id в порядке
-   * ответа модели. Нет поля/null — кандидатов роутеру не показывали или модель не отвечала.
-   */
-  selectedKnowledgeBaseIds?: string[] | null;
-  /** Уверенность выбора баз, 0..1. */
-  basesConfidence?: number | null;
-  /**
-   * Кто выбрал базы в `selectedKnowledgeBaseIds`: llm — роутер из кандидатов каталога; user — пользователь
-   * явно указал базы в сообщении («@»-чипы): тогда решение любого слоя несёт его id, кандидаты не считаются.
-   */
-  knowledgeBasesSelectedBy?: "llm" | "user";
 };
 
-/** Компактный сигнал клиенту: в 202 JSON, событии user_message и non-stream JSON. */
+/** Компактный сигнал клиенту: в 202 JSON, событиях потока user_message и agent_handoff и в non-stream JSON. */
 export type ChatRouteSignal = {
   mode: ChatRequestMode;
   route: ChatRoute;
   source: ChatRouteSource;
   reason: ChatRouteReason;
-  degraded: boolean;
 };
 
 export function isChatRequestMode(value: unknown): value is ChatRequestMode {
@@ -113,7 +77,10 @@ export function isChatRoute(value: unknown): value is ChatRoute {
   return typeof value === "string" && (chatRoutes as readonly string[]).includes(value);
 }
 
-/** Неизвестное или пустое значение — «чат»: прежнее поведение платформы по умолчанию. */
+/**
+ * Неизвестное или пустое значение — «чат». Сюда же попадает снятый режим «auto»: его может прислать вкладка,
+ * открытая до обновления, и он хранится за старыми чатами — такие запросы и чаты идут как «Чат».
+ */
 export function resolveRequestedChatMode(value: unknown): ChatRequestMode {
   return isChatRequestMode(value) ? value : "chat";
 }
@@ -124,6 +91,5 @@ export function toChatRouteSignal(decision: ChatRouteDecision): ChatRouteSignal 
     route: decision.route,
     source: decision.source,
     reason: decision.reason,
-    degraded: decision.degraded,
   };
 }
