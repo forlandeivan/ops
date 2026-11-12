@@ -4888,6 +4888,8 @@ export const CHAT_SESSION_ORIGIN_PUBLIC_API = "public_api" as const;
 export const CHAT_SESSION_ORIGIN_SCHEDULED_TASK = "scheduled_task" as const;
 /** Служебный чат пробного прогона сценария агентом (workflows.test_run): в списке чатов человека его нет. */
 export const CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL = "workflow_trial" as const;
+/** Служебный чат прогона примера при обучении ассистента: в списке чатов человека его нет. */
+export const CHAT_SESSION_ORIGIN_ASSISTANT_TRAINING = "assistant_training" as const;
 
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
@@ -4900,7 +4902,7 @@ export type ChatSessionMetadata = {
   /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
   selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
-  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL;
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL | typeof CHAT_SESSION_ORIGIN_ASSISTANT_TRAINING;
   [key: string]: unknown;
 };
 
@@ -13009,3 +13011,213 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
   anchorCheck: check("chat_queued_messages_anchor_check", sql`(${table.afterRunId} IS NOT NULL AND ${table.workflowDefinitionId} IS NOT NULL AND ${table.afterOperationId} IS NULL) OR (${table.afterOperationId} IS NOT NULL AND ${table.afterRunId} IS NULL AND ${table.workflowDefinitionId} IS NULL)`),
   statusCheck: check("chat_queued_messages_status_check", sql`${table.status} IN ('queued','dispatching','failed','dispatched','canceled')`),
 }));
+
+// Обучение ассистента на примерах (план 11.11.2026): пример — вход, эталон и критерии сравнения.
+// Файлы лежат в хранилище пространства по storage_key; строки удаляются каскадом с ассистентом и пространством.
+export const assistantTrainingExamples = pgTable("assistant_training_examples", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  inputText: text("input_text").notNull().default(""),
+  referenceText: text("reference_text"),
+  role: text("role").notNull().default("train"),
+  criteria: jsonb("criteria").$type<Array<{ id: string; text: string }>>().notNull().default([]),
+  createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  assistantIdx: index("assistant_training_examples_assistant_idx").on(table.assistantId, table.createdAt),
+  workspaceIdx: index("assistant_training_examples_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("assistant_training_examples_creator_idx").on(table.createdByUserId),
+  roleCheck: check("assistant_training_examples_role_check", sql`${table.role} IN ('train','holdout')`),
+}));
+export type AssistantTrainingExampleRecord = typeof assistantTrainingExamples.$inferSelect;
+
+export const assistantTrainingExampleFiles = pgTable("assistant_training_example_files", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  exampleId: uuid("example_id").notNull().references(() => assistantTrainingExamples.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type"),
+  sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+  storageKey: text("storage_key").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  exampleIdx: index("assistant_training_example_files_example_idx").on(table.exampleId, table.createdAt),
+  workspaceIdx: index("assistant_training_example_files_workspace_idx").on(table.workspaceId),
+  referenceUnique: uniqueIndex("assistant_training_example_files_reference_unique").on(table.exampleId).where(sql`${table.kind} = 'reference'`),
+  kindCheck: check("assistant_training_example_files_kind_check", sql`${table.kind} IN ('input','reference')`),
+}));
+export type AssistantTrainingExampleFileRecord = typeof assistantTrainingExampleFiles.$inferSelect;
+
+// Проверка ассистента на примерах (план 11.11.2026, этап 2): прогон всех выбранных примеров и оценка по критериям.
+// Ведёт воркер монолита по аренде; примеры идут по одному. У ассистента одна незаконченная проверка.
+export const assistantTrainingChecks = pgTable("assistant_training_checks", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  requestedByUserId: varchar("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  status: text("status").notNull().default("queued"),
+  total: integer("total").notNull().default(0),
+  done: integer("done").notNull().default(0),
+  score: doublePrecision("score"),
+  trainScore: doublePrecision("train_score"),
+  holdoutScore: doublePrecision("holdout_score"),
+  usageTokens: bigint("usage_tokens", { mode: "number" }).notNull().default(0),
+  creditsChargedCents: bigint("credits_charged_cents", { mode: "number" }).notNull().default(0),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  leaseOwner: text("lease_owner"),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  assistantIdx: index("assistant_training_checks_assistant_idx").on(table.assistantId, table.createdAt),
+  workspaceIdx: index("assistant_training_checks_workspace_idx").on(table.workspaceId),
+  requesterIdx: index("assistant_training_checks_requester_idx").on(table.requestedByUserId),
+  queueIdx: index("assistant_training_checks_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
+  unfinishedUnique: uniqueIndex("assistant_training_checks_unfinished_unique").on(table.assistantId).where(sql`${table.status} IN ('queued','running')`),
+  statusCheck: check("assistant_training_checks_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
+}));
+export type AssistantTrainingCheckRecord = typeof assistantTrainingChecks.$inferSelect;
+
+export const assistantTrainingResults = pgTable("assistant_training_results", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  checkId: uuid("check_id").notNull().references(() => assistantTrainingChecks.id, { onDelete: "cascade" }),
+  exampleId: uuid("example_id").references(() => assistantTrainingExamples.id, { onDelete: "set null" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+  exampleTitle: text("example_title").notNull(),
+  role: text("role").notNull(),
+  status: text("status").notNull().default("queued"),
+  chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
+  workflowRunId: uuid("workflow_run_id"),
+  answerText: text("answer_text"),
+  files: jsonb("files").$type<Array<{ attachmentId: string; name: string }>>().notNull().default([]),
+  verdicts: jsonb("verdicts").$type<Array<Record<string, unknown>>>().notNull().default([]),
+  met: integer("met").notNull().default(0),
+  criteriaTotal: integer("criteria_total").notNull().default(0),
+  score: doublePrecision("score"),
+  usageTokens: bigint("usage_tokens", { mode: "number" }).notNull().default(0),
+  creditsChargedCents: bigint("credits_charged_cents", { mode: "number" }).notNull().default(0),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  checkIdx: index("assistant_training_results_check_idx").on(table.checkId, table.position),
+  exampleIdx: index("assistant_training_results_example_idx").on(table.exampleId, table.createdAt),
+  workspaceIdx: index("assistant_training_results_workspace_idx").on(table.workspaceId),
+  chatIdx: index("assistant_training_results_chat_idx").on(table.chatId),
+  statusCheck: check("assistant_training_results_status_check", sql`${table.status} IN ('queued','running','judging','succeeded','failed','skipped')`),
+  roleCheck: check("assistant_training_results_role_check", sql`${table.role} IN ('train','holdout')`),
+}));
+export type AssistantTrainingResultRecord = typeof assistantTrainingResults.$inferSelect;
+
+// Снимок ассистента для обучения на примерах (этап 3): инструкция, навыки с содержимым и правила ассистента — всё,
+// что обучение может поменять. Копии бинарных файлов навыков лежат в хранилище пространства под префиксом снимка.
+export const assistantTrainingSnapshots = pgTable("assistant_training_snapshots", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  label: text("label").notNull(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  restoredAt: timestamp("restored_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  assistantIdx: index("assistant_training_snapshots_assistant_idx").on(table.assistantId, table.createdAt),
+  workspaceIdx: index("assistant_training_snapshots_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("assistant_training_snapshots_creator_idx").on(table.createdByUserId),
+  kindCheck: check("assistant_training_snapshots_kind_check", sql`${table.kind} IN ('manual','before_training','round','before_restore')`),
+}));
+export type AssistantTrainingSnapshotRecord = typeof assistantTrainingSnapshots.$inferSelect;
+
+// Задание обучения ассистента на примерах (этап 4): круги «правка → проверка → принять или откатить». Ведёт воркер
+// монолита по аренде; пределы (потолок расхода, круги без прироста, всего кругов, длительность) держит платформа.
+export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  requestedByUserId: varchar("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** Чат, из которого обучение запустил агент: туда уходит отчёт по окончании. */
+  originChatId: varchar("origin_chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
+  status: text("status").notNull().default("queued"),
+  phase: text("phase").notNull().default("baseline"),
+  stopReason: text("stop_reason"),
+  goal: doublePrecision("goal").notNull(),
+  budgetCents: bigint("budget_cents", { mode: "number" }).notNull(),
+  spentCents: bigint("spent_cents", { mode: "number" }).notNull().default(0),
+  spentTokens: bigint("spent_tokens", { mode: "number" }).notNull().default(0),
+  round: integer("round").notNull().default(0),
+  roundsWithoutGain: integer("rounds_without_gain").notNull().default(0),
+  currentCheckId: uuid("current_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  beforeSnapshotId: uuid("before_snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
+  bestSnapshotId: uuid("best_snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
+  baselineScore: doublePrecision("baseline_score"),
+  baselineTrainScore: doublePrecision("baseline_train_score"),
+  baselineHoldoutScore: doublePrecision("baseline_holdout_score"),
+  bestScore: doublePrecision("best_score"),
+  bestTrainScore: doublePrecision("best_train_score"),
+  bestHoldoutScore: doublePrecision("best_holdout_score"),
+  bestCheckId: uuid("best_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  leaseOwner: text("lease_owner"),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  assistantIdx: index("assistant_training_jobs_assistant_idx").on(table.assistantId, table.createdAt),
+  workspaceIdx: index("assistant_training_jobs_workspace_idx").on(table.workspaceId),
+  requesterIdx: index("assistant_training_jobs_requester_idx").on(table.requestedByUserId),
+  originChatIdx: index("assistant_training_jobs_origin_chat_idx").on(table.originChatId),
+  currentCheckIdx: index("assistant_training_jobs_current_check_idx").on(table.currentCheckId),
+  bestCheckIdx: index("assistant_training_jobs_best_check_idx").on(table.bestCheckId),
+  beforeSnapshotIdx: index("assistant_training_jobs_before_snapshot_idx").on(table.beforeSnapshotId),
+  bestSnapshotIdx: index("assistant_training_jobs_best_snapshot_idx").on(table.bestSnapshotId),
+  queueIdx: index("assistant_training_jobs_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
+  unfinishedUnique: uniqueIndex("assistant_training_jobs_unfinished_unique").on(table.assistantId).where(sql`${table.status} IN ('queued','running')`),
+  statusCheck: check("assistant_training_jobs_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
+  phaseCheck: check("assistant_training_jobs_phase_check", sql`${table.phase} IN ('baseline','improving','evaluating','done')`),
+}));
+export type AssistantTrainingJobRecord = typeof assistantTrainingJobs.$inferSelect;
+
+export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  jobId: uuid("job_id").notNull().references(() => assistantTrainingJobs.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  round: integer("round").notNull(),
+  status: text("status").notNull().default("improving"),
+  changeKind: text("change_kind"),
+  changeTarget: text("change_target"),
+  changeSummary: text("change_summary"),
+  changeBefore: text("change_before"),
+  changeAfter: text("change_after"),
+  checkId: uuid("check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  score: doublePrecision("score"),
+  trainScore: doublePrecision("train_score"),
+  holdoutScore: doublePrecision("holdout_score"),
+  snapshotId: uuid("snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
+  spentCents: bigint("spent_cents", { mode: "number" }).notNull().default(0),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+}, (table) => ({
+  jobRoundUnique: uniqueIndex("assistant_training_rounds_job_round_unique").on(table.jobId, table.round),
+  workspaceIdx: index("assistant_training_rounds_workspace_idx").on(table.workspaceId),
+  checkIdx: index("assistant_training_rounds_check_idx").on(table.checkId),
+  snapshotIdx: index("assistant_training_rounds_snapshot_idx").on(table.snapshotId),
+  statusCheck: check("assistant_training_rounds_status_check", sql`${table.status} IN ('improving','evaluating','accepted','rejected','failed')`),
+}));
+export type AssistantTrainingRoundRecord = typeof assistantTrainingRounds.$inferSelect;
