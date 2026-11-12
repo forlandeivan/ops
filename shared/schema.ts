@@ -13252,3 +13252,25 @@ export const assistantTrainingMaterials = pgTable("assistant_training_materials"
   creatorIdx: index("assistant_training_materials_creator_idx").on(table.createdByUserId),
 }));
 export type AssistantTrainingMaterialRecord = typeof assistantTrainingMaterials.$inferSelect;
+
+// Паспорт задачи обучения (перестроение 12.11.2026): переменные результата, выбор шаблона и обязательные шаги —
+// платформа выводит их из примеров и материалов задачи; форма — shared/assistant-training.ts.
+export const assistantTrainingPassports = pgTable("assistant_training_passports", {
+  assistantId: varchar("assistant_id").primaryKey().references(() => assistants.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("building"),
+  passport: jsonb("passport"),
+  errorMessage: text("error_message"),
+  examplesUsed: integer("examples_used").notNull().default(0),
+  usageTokens: bigint("usage_tokens", { mode: "number" }).notNull().default(0),
+  creditsChargedCents: bigint("credits_charged_cents", { mode: "number" }).notNull().default(0),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  builtAt: timestamp("built_at", { withTimezone: true }),
+  updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceIdx: index("assistant_training_passports_workspace_idx").on(table.workspaceId),
+  updaterIdx: index("assistant_training_passports_updater_idx").on(table.updatedByUserId),
+  statusCheck: check("assistant_training_passports_status_check", sql`${table.status} IN ('building','ready','failed')`),
+}));
+export type AssistantTrainingPassportRecord = typeof assistantTrainingPassports.$inferSelect;
