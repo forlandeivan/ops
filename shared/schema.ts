@@ -13023,6 +13023,8 @@ export const assistantTrainingExamples = pgTable("assistant_training_examples", 
   referenceText: text("reference_text"),
   role: text("role").notNull().default("train"),
   criteria: jsonb("criteria").$type<Array<{ id: string; text: string }>>().notNull().default([]),
+  /** Откуда критерии: NULL — по эталону, 'manual' — правил человек, 'passport:<время>' — из паспорта задачи. */
+  criteriaBasis: text("criteria_basis"),
   createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13204,6 +13206,8 @@ export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
   changeSummary: text("change_summary"),
   changeBefore: text("change_before"),
   changeAfter: text("change_after"),
+  /** Служебный чат хода сборщика навыка, пока круг собирает навык; без внешнего ключа — круг остаётся историей. */
+  builderChatId: varchar("builder_chat_id"),
   checkId: uuid("check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
   score: doublePrecision("score"),
   trainScore: doublePrecision("train_score"),
