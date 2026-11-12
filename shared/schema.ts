@@ -13221,3 +13221,34 @@ export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
   statusCheck: check("assistant_training_rounds_status_check", sql`${table.status} IN ('improving','evaluating','accepted','rejected','failed')`),
 }));
 export type AssistantTrainingRoundRecord = typeof assistantTrainingRounds.$inferSelect;
+
+// Задача обучения ассистента (перестроение 12.11.2026): общий промпт на все примеры и материалы задачи — файлы,
+// общие для всех примеров (шаблоны, бланки, чек-листы, методики); агент кладёт их в навык.
+export const assistantTrainingTasks = pgTable("assistant_training_tasks", {
+  assistantId: varchar("assistant_id").primaryKey().references(() => assistants.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  prompt: text("prompt").notNull().default(""),
+  updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceIdx: index("assistant_training_tasks_workspace_idx").on(table.workspaceId),
+  updaterIdx: index("assistant_training_tasks_updater_idx").on(table.updatedByUserId),
+}));
+export type AssistantTrainingTaskRecord = typeof assistantTrainingTasks.$inferSelect;
+
+export const assistantTrainingMaterials = pgTable("assistant_training_materials", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type"),
+  sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+  storageKey: text("storage_key").notNull(),
+  createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  assistantIdx: index("assistant_training_materials_assistant_idx").on(table.assistantId, table.createdAt),
+  workspaceIdx: index("assistant_training_materials_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("assistant_training_materials_creator_idx").on(table.createdByUserId),
+}));
+export type AssistantTrainingMaterialRecord = typeof assistantTrainingMaterials.$inferSelect;
