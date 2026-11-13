@@ -22,6 +22,7 @@ export const MODULE_LABELS: Record<string, string> = {
   web: 'Интернет',
   agent: 'Агент пространства',
   models_api: 'Модели для IDE и программ',
+  devices: 'Компьютеры',
 };
 
 export const PERMISSION_MODULES = [
@@ -45,6 +46,7 @@ export const PERMISSION_MODULES = [
   'web',
   'agent',
   'models_api',
+  'devices',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
 
@@ -179,6 +181,9 @@ export const P = {
   // Cline, Kilo Code и подобные к моделям пространства своим личным токеном. Работает, только
   // если администратор установки включил доступ в «Политиках API».
   MODELS_API_USE: 'models_api:use',
+  // Unica Desktop (волна 1): свой компьютер и чтение разрешённых на нём папок агентом; управление — компьютеры участников.
+  DEVICES_USE: 'devices:use',
+  DEVICES_MANAGE: 'devices:manage',
 } as const;
 
 export type PermissionId = (typeof P)[keyof typeof P];
@@ -219,6 +224,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.MEMORY_MANAGE,
     P.RULES_VIEW, P.RULES_MANAGE,
     P.MODELS_API_USE,
+    P.DEVICES_USE, P.DEVICES_MANAGE,
   ],
   member: [
     P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN,
@@ -245,6 +251,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.WEB_USE,
     P.RULES_VIEW,
     P.MODELS_API_USE,
+    P.DEVICES_USE,
   ],
   viewer: [
     P.SCHEDULED_TASKS_VIEW,
@@ -420,6 +427,11 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Подключение IDE и программ', permissions: [P.MODELS_API_USE] },
   ],
+  devices: [
+    { code: 'none',    label: 'Нет доступа',                       permissions: [] },
+    { code: 'editor',  label: 'Свой компьютер',                    permissions: [P.DEVICES_USE] },
+    { code: 'manager', label: 'Компьютеры участников пространства', permissions: [P.DEVICES_USE, P.DEVICES_MANAGE] },
+  ],
 };
 
 /** Convert per-module access levels to a flat permission ID array. */
@@ -549,4 +561,6 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.RULES_VIEW, module: 'rules', action: 'view', description: 'Просмотр правил агента рабочего пространства и журнала их срабатываний', isSensitive: false },
   { id: P.RULES_MANAGE, module: 'rules', action: 'manage', description: 'Включение, смена режима, выключение и откат правил агента рабочего пространства', isSensitive: true },
   { id: P.MODELS_API_USE, module: 'models_api', action: 'use', description: 'Обращение к моделям пространства из IDE и программ личным API-токеном (если доступ включён администратором установки)', isSensitive: false },
+  { id: P.DEVICES_USE, module: 'devices', action: 'use', description: 'Подключать свой компьютер и давать агенту читать разрешённые на нём папки (если функция включена пространству)', isSensitive: false },
+  { id: P.DEVICES_MANAGE, module: 'devices', action: 'manage', description: 'Видеть компьютеры участников пространства и отключать их', isSensitive: true },
 ];

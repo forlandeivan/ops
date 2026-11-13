@@ -498,6 +498,30 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 400,
   }),
   task({
+    key: "pg.device_commands",
+    label: "Журнал команд компьютерам пользователей",
+    description:
+      "Удаляет записи журнала команд, которые агент отправлял на подключённые компьютеры (Unica Desktop), старше срока хранения: какая папка и файл запрашивались и чем закончилась команда. Содержимого файлов в журнале нет. Подключённые компьютеры и разрешённые папки уборка не трогает.",
+    category: "events",
+    action: "delete_rows",
+    table: "device_commands",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 90,
+  }),
+  task({
+    key: "pg.device_pairings",
+    label: "Заявки на подключение компьютеров",
+    description:
+      "Удаляет заявки на подключение компьютера по коду старше срока хранения. Заявка действует 10 минут; после подключения она больше не нужна. Подключённые компьютеры уборка не трогает.",
+    category: "events",
+    action: "delete_rows",
+    table: "device_pairings",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 1,
+  }),
+  task({
     key: "pg.directory_sync_events",
     label: "Журнал событий корпоративного каталога",
     description:

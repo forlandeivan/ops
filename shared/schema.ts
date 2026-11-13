@@ -6983,6 +6983,127 @@ export type AgentExecutionInsert = typeof agentExecutions.$inferInsert;
 export type AgentExecutionEventRecord = typeof agentExecutionEvents.$inferSelect;
 export type AgentExecutionEventInsert = typeof agentExecutionEvents.$inferInsert;
 
+// --- Устройства пользователей: приложение Unica Desktop (волна 1, shared/device-protocol.ts) ------------------------
+// Компьютер пользователя подключается к Унике исходящим соединением и выполняет команды агента в папках, которые
+// разрешил владелец компьютера. Полных путей здесь нет: папка — идентификатор, имя для показа и ключ пути `/device/…`.
+export const deviceFolderModeValues = ["read"] as const;
+export const devicePairingStatuses = ["pending", "approved", "claimed"] as const;
+export type DevicePairingStatus = (typeof devicePairingStatuses)[number];
+export const deviceCommandStatuses = ["sent", "acked", "done", "failed", "expired"] as const;
+export type DeviceCommandStatus = (typeof deviceCommandStatuses)[number];
+
+/** Привязка компьютера: пользователь и одно рабочее пространство. Отозванная строка остаётся для журнала. */
+export const userDevices = pgTable(
+  "user_devices",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    // Имя в пути агента: /device/<mount_key>/…; уникально среди действующих устройств человека в пространстве.
+    mountKey: text("mount_key").notNull(),
+    platform: text("platform").notNull(),
+    appVersion: text("app_version").notNull(),
+    protocolVersion: integer("protocol_version").notNull(),
+    // Токен устройства хранится только хэшем (sha256 hex); действует лишь на /api/device/v1.
+    tokenHash: text("token_hash").notNull(),
+    tokenLastFour: text("token_last_four").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: varchar("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (table) => ({
+    tokenHashIdx: uniqueIndex("user_devices_token_hash_idx").on(table.tokenHash),
+    ownerMountKeyIdx: uniqueIndex("user_devices_owner_mount_key_idx")
+      .on(table.userId, table.workspaceId, table.mountKey)
+      .where(sql`${table.revokedAt} IS NULL`),
+    workspaceIdx: index("user_devices_workspace_idx").on(table.workspaceId),
+    revokedByIdx: index("user_devices_revoked_by_idx").on(table.revokedBy).where(sql`${table.revokedBy} IS NOT NULL`),
+  }),
+);
+
+/** Разрешённые папки устройства: список целиком присылает компьютер, сервер его только хранит. */
+export const userDeviceFolders = pgTable(
+  "user_device_folders",
+  {
+    deviceId: uuid("device_id").notNull().references(() => userDevices.id, { onDelete: "cascade" }),
+    // Идентификатор выдаёт компьютер.
+    id: uuid("id").notNull(),
+    name: text("name").notNull(),
+    mountKey: text("mount_key").notNull(),
+    mode: text("mode").$type<(typeof deviceFolderModeValues)[number]>().notNull().default("read"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.deviceId, table.id] }),
+    mountKeyIdx: uniqueIndex("user_device_folders_mount_key_idx").on(table.deviceId, table.mountKey),
+    modeCheck: check("user_device_folders_mode_check", sql`${table.mode} IN ('read')`),
+  }),
+);
+
+/** Привязка по коду: компьютер просит, человек подтверждает на странице Уники, компьютер один раз забирает токен. */
+export const devicePairings = pgTable(
+  "device_pairings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userCode: text("user_code").notNull(),
+    pollTokenHash: text("poll_token_hash").notNull(),
+    deviceName: text("device_name").notNull(),
+    platform: text("platform").notNull(),
+    appVersion: text("app_version").notNull(),
+    protocolVersion: integer("protocol_version").notNull(),
+    status: text("status").$type<DevicePairingStatus>().notNull().default("pending"),
+    approvedBy: varchar("approved_by").references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id").references(() => userDevices.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    userCodeIdx: uniqueIndex("device_pairings_user_code_idx").on(table.userCode),
+    createdIdx: index("device_pairings_created_idx").on(table.createdAt),
+    approvedByIdx: index("device_pairings_approved_by_idx").on(table.approvedBy).where(sql`${table.approvedBy} IS NOT NULL`),
+    workspaceIdx: index("device_pairings_workspace_idx").on(table.workspaceId).where(sql`${table.workspaceId} IS NOT NULL`),
+    deviceIdx: index("device_pairings_device_idx").on(table.deviceId).where(sql`${table.deviceId} IS NOT NULL`),
+    statusCheck: check("device_pairings_status_check", sql`${table.status} IN ('pending', 'approved', 'claimed')`),
+  }),
+);
+
+/** Журнал команд устройству: что просили, чем кончилось. Содержимого файлов здесь нет. */
+export const deviceCommands = pgTable(
+  "device_commands",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    deviceId: uuid("device_id").notNull().references(() => userDevices.id, { onDelete: "cascade" }),
+    // Пространство и пользователь повторяют привязку устройства: для отбора в журнале без соединения таблиц.
+    workspaceId: varchar("workspace_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    executionId: varchar("execution_id"),
+    runId: varchar("run_id"),
+    op: text("op").notNull(),
+    folderId: uuid("folder_id"),
+    relativePath: text("relative_path"),
+    status: text("status").$type<DeviceCommandStatus>().notNull().default("sent"),
+    errorCode: text("error_code"),
+    resultBytes: integer("result_bytes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    deviceIdx: index("device_commands_device_idx").on(table.deviceId, table.createdAt),
+    workspaceIdx: index("device_commands_workspace_idx").on(table.workspaceId, table.createdAt),
+    createdIdx: index("device_commands_created_idx").on(table.createdAt),
+    statusCheck: check("device_commands_status_check", sql`${table.status} IN ('sent', 'acked', 'done', 'failed', 'expired')`),
+  }),
+);
+
+export type UserDeviceRecord = typeof userDevices.$inferSelect;
+export type UserDeviceFolderRecord = typeof userDeviceFolders.$inferSelect;
+export type DevicePairingRecord = typeof devicePairings.$inferSelect;
+export type DeviceCommandRecord = typeof deviceCommands.$inferSelect;
+
 // --- Новый агент: сервис сессий агента (Python, rospartner.ai.unica.agent, app/sessions) ---------------------------
 // Таблицы сервиса живут в базе монолита и заводятся миграциями 0386–0387: своей базы у сервиса нет. Пишет в них сервис;
 // монолит читает состояние сессий и удаляет их вместе с чатом, пространством и пользователем. Точки восстановления
