@@ -3626,10 +3626,11 @@ export const llmRequestConfigSchema = z
       .default({}),
     /**
      * Протокол API провайдера. `responses` — точка выхода переводит запросы генерации из формата
-     * chat/completions в Responses API и ответы обратно (`server/llm-egress/responses-adapter.ts`).
-     * Не задан — chat/completions.
+     * chat/completions в Responses API и ответы обратно (`server/llm-egress/responses-adapter.ts`);
+     * `anthropic_messages` — так же в Anthropic Messages с кэшем промптов
+     * (`server/llm-egress/anthropic-messages-adapter.ts`). Не задан — chat/completions.
      */
-    apiProtocol: z.enum(["chat_completions", "responses"]).optional(),
+    apiProtocol: z.enum(["chat_completions", "responses", "anthropic_messages"]).optional(),
   })
   .default({ messagesField: "messages", modelField: "model", additionalBodyFields: {} });
 
