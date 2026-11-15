@@ -37,9 +37,17 @@ export interface AgentSessionFoldersRequest {
 }
 export interface AgentSessionFoldersResult { purged: number; remaining: number }
 
+/** Шаг очистки удаляемых пространств: `limit` — строк одной таблицы за запрос. */
+export interface WorkspacePurgeRequest {
+  limit: number;
+  dryRun: boolean;
+}
+export interface WorkspacePurgeResult { purgedRows: number; purgedWorkspaces: number; remaining: number }
+
 /** Доменные операции уборки, исполняемые владельцем (монолитом). */
 export interface JanitorDomainGateway {
   purgeAgentSessionFolders(request: AgentSessionFoldersRequest, signal?: AbortSignal): Promise<AgentSessionFoldersResult>;
+  purgeWorkspaces(request: WorkspacePurgeRequest, signal?: AbortSignal): Promise<WorkspacePurgeResult>;
   cleanupFileArtifacts(request: GatewayFileArtifactCleanupRequest, signal?: AbortSignal): Promise<void>;
   purgeChatAttachmentArtifacts(workspaceId: string, attachment: GatewayChatAttachmentRef): Promise<void>;
   deleteWorkspaceFile(workspaceId: string, storageKey: string): Promise<void>;
@@ -151,6 +159,16 @@ export function createHttpJanitorDomainGateway(baseUrl: string): JanitorDomainGa
         throw new JanitorDomainGatewayError("Invalid agent folder purge response", 502, "JANITOR_GATEWAY_INVALID_RESPONSE");
       }
       return { purged: result.purged!, remaining: result.remaining! };
+    }),
+    purgeWorkspaces: (request, signal) => callGateway(baseUrl, "/workspaces/purge", { ...request }, signal, async (response) => {
+      const data: unknown = await response.json().catch(() => null);
+      const result = data as Partial<WorkspacePurgeResult> & { ok?: unknown } | null;
+      if (!result || result.ok !== true || !Number.isSafeInteger(result.purgedRows) || !Number.isSafeInteger(result.purgedWorkspaces)
+        || !Number.isSafeInteger(result.remaining) || result.purgedRows! < 0 || result.purgedWorkspaces! < 0 || result.remaining! < 0
+        || (request.dryRun && (result.purgedRows !== 0 || result.purgedWorkspaces !== 0))) {
+        throw new JanitorDomainGatewayError("Invalid workspace purge response", 502, "JANITOR_GATEWAY_INVALID_RESPONSE");
+      }
+      return { purgedRows: result.purgedRows!, purgedWorkspaces: result.purgedWorkspaces!, remaining: result.remaining! };
     }),
     cleanupFileArtifacts: (request, signal) =>
       callGateway(baseUrl, "/v1/file-artifacts/cleanup", request as unknown as Record<string, unknown>, signal),

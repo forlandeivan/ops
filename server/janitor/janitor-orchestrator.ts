@@ -42,6 +42,7 @@ import {
 import { runQdrantOrphanGcTask } from "./tasks/qdrant-orphan-gc-task";
 import { runStorageOrphanTask } from "./tasks/storage-orphan-task";
 import { runAgentSessionFoldersTask } from "./tasks/agent-session-folders-task";
+import { runWorkspacePurgeTask } from "./tasks/workspace-purge-task";
 
 // Тип сторов живёт в default-stores; реэкспорт сохраняет прежние импорты потребителей.
 export type { JanitorStores } from "./default-stores";
@@ -204,6 +205,13 @@ async function enforcePolicy(
       maxBatchesPerRun: MAX_BATCHES_PER_RUN,
       shouldAbort,
       onProgress: onFolderProgress,
+    });
+    return { ...result, matched: run.matched, deleted: run.deleted, aborted: run.aborted };
+  }
+  if (storageOf(task) === "workspace_purge") {
+    const run = await runWorkspacePurgeTask(resolved, stores.workspacePurge, {
+      maxBatchesPerRun: MAX_BATCHES_PER_RUN,
+      shouldAbort,
     });
     return { ...result, matched: run.matched, deleted: run.deleted, aborted: run.aborted };
   }
@@ -651,6 +659,13 @@ export async function previewPolicy(
   if (storageOf(taskDef) === "agent_session_folders") {
     const result = await runAgentSessionFoldersTask(
       { mode: "dry_run", retentionDays: policy.retentionDays, batchSize: policy.batchSize }, stores.agentSessionFolders,
+      { maxBatchesPerRun: 1 },
+    );
+    return { matched: result.matched };
+  }
+  if (storageOf(taskDef) === "workspace_purge") {
+    const result = await runWorkspacePurgeTask(
+      { mode: "dry_run", batchSize: policy.batchSize }, stores.workspacePurge,
       { maxBatchesPerRun: 1 },
     );
     return { matched: result.matched };

@@ -457,6 +457,9 @@ export type FileArtifactCleanupJob = typeof fileArtifactCleanupJobs.$inferSelect
 export type FileArtifactCleanupJobInsert = typeof fileArtifactCleanupJobs.$inferInsert;
 
 // TODO(usage): workspace_usage_month will become the single usage aggregate keyed by workspace_id + period_code (see docs/workspace-usage-foundation.md)
+export const workspaceLifecycleStatuses = ["active", "archived", "pending_deletion", "purging"] as const;
+export type WorkspaceLifecycleStatus = (typeof workspaceLifecycleStatuses)[number];
+
 export const workspaces = pgTable("workspaces", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
@@ -491,10 +494,28 @@ export const workspaces = pgTable("workspaces", {
   // Память агента в пространстве (shared/agent-memory.ts): выключает владелец пространства — тогда ни один уровень
   // памяти (пространство, ассистент, личная) здесь не читается и не пишется.
   memoryEnabled: boolean("memory_enabled").notNull().default(true),
+  /**
+   * Жизненный цикл пространства (0458). Всё, кроме `active`, недоступно пользователям и не выполняет
+   * фоновой работы: `archived` — бессрочно, вернуть может только администратор инстанса;
+   * `pending_deletion` — то же плюс срок `purge_after`; `purging` — идёт физическая очистка, возврата нет.
+   * Менять только через server/workspace-lifecycle: там же журнал, сброс кэшей и остановка фоновой работы.
+   */
+  lifecycleStatus: varchar("lifecycle_status", { length: 32 })
+    .$type<WorkspaceLifecycleStatus>()
+    .notNull()
+    .default("active"),
+  lifecycleChangedAt: timestamp("lifecycle_changed_at"),
+  // Без внешнего ключа: отметка переживает удаление учётной записи того, кто менял состояние.
+  lifecycleChangedBy: varchar("lifecycle_changed_by"),
+  purgeAfter: timestamp("purge_after"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (table) => ({
     createdAtIdx: index("workspaces_created_at_idx").on(table.createdAt),
+  // 0458: уборщик и админский список выбирают немногие неактивные пространства, не читая всю таблицу.
+  lifecycleIdx: index("workspaces_lifecycle_idx")
+    .on(table.lifecycleStatus, table.purgeAfter)
+    .where(sql`${table.lifecycleStatus} <> 'active'`),
   // 0261: hot WHERE owner_id=$1 (листинг/счётчики пространств владельца, ACL break-glass) + FK→users CASCADE.
   ownerIdx: index("workspaces_owner_id_idx").on(table.ownerId),
   singleSystemIdx: uniqueIndex("workspaces_single_system_idx")
@@ -11649,6 +11670,48 @@ export const permissionAuditLog = pgTable(
 
 export type PermissionAuditLog = typeof permissionAuditLog.$inferSelect;
 export type PermissionAuditLogInsert = typeof permissionAuditLog.$inferInsert;
+
+export const workspaceLifecycleActions = [
+  "archive",
+  "restore",
+  "schedule_deletion",
+  "delete_now",
+  "purge_started",
+  "purged",
+] as const;
+export type WorkspaceLifecycleAction = (typeof workspaceLifecycleActions)[number];
+
+/**
+ * Журнал архивации и удаления пространств (0458). Внешних ключей нет намеренно: запись должна
+ * пережить и само пространство, и учётные записи владельца и того, кто выполнил действие, —
+ * поэтому название и почта сохраняются снимком на момент действия.
+ */
+export const workspaceLifecycleEvents = pgTable(
+  "workspace_lifecycle_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    workspaceId: varchar("workspace_id").notNull(),
+    workspaceName: text("workspace_name").notNull(),
+    ownerUserId: varchar("owner_user_id"),
+    ownerEmail: text("owner_email"),
+    actorUserId: varchar("actor_user_id"),
+    actorEmail: text("actor_email"),
+    // system — действие уборщика по сроку; owner — владелец удалил своё пространство.
+    actorKind: varchar("actor_kind", { length: 16 }).$type<"admin" | "owner" | "system">().notNull(),
+    action: varchar("action", { length: 32 }).$type<WorkspaceLifecycleAction>().notNull(),
+    fromStatus: varchar("from_status", { length: 32 }).$type<WorkspaceLifecycleStatus>().notNull(),
+    toStatus: varchar("to_status", { length: 32 }).$type<WorkspaceLifecycleStatus | "deleted">().notNull(),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    createdAtIdx: index("workspace_lifecycle_events_created_at_idx").on(table.createdAt),
+    workspaceIdx: index("workspace_lifecycle_events_workspace_idx").on(table.workspaceId, table.createdAt),
+  }),
+);
+
+export type WorkspaceLifecycleEvent = typeof workspaceLifecycleEvents.$inferSelect;
+export type WorkspaceLifecycleEventInsert = typeof workspaceLifecycleEvents.$inferInsert;
 
 // Janitor (сервис-уборщик): переопределения политик уборки. Набор ресурсов и
 // дефолты задаются реестром в коде (server/janitor); здесь хранятся только override.

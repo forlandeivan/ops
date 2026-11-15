@@ -1,4 +1,9 @@
-import type { CleanupAction, CleanupCategory } from "@shared/cleanup-policies";
+import {
+  WORKSPACE_DELETION_DEFAULT_GRACE_DAYS,
+  WORKSPACE_DELETION_POLICY_KEY,
+  type CleanupAction,
+  type CleanupCategory,
+} from "@shared/cleanup-policies";
 
 /**
  * Декларативный реестр задач уборки (janitor). Источник правды о наборе ресурсов
@@ -65,9 +70,11 @@ export interface JanitorTaskDefinition {
    * для "qdrant" — GC осиротевших коллекций (tasks/qdrant-orphan-gc-task),
    * для "s3_reconcile" — сверку содержимого бакетов с базой (tasks/storage-orphan-task),
    * для "agent_session_folders" — вызов сервиса агента через монолит (tasks/agent-session-folders-task),
+   * для "workspace_purge" — порционную очистку удаляемых пространств силами монолита
+   * (tasks/workspace-purge-task): список таблиц пространства и порядок их очистки знает монолит,
    * а не PG-движок.
    */
-  storage?: "postgres" | "s3" | "qdrant" | "s3_reconcile" | "agent_session_folders";
+  storage?: "postgres" | "s3" | "qdrant" | "s3_reconcile" | "agent_session_folders" | "workspace_purge";
   /** S3: префиксы mime для отбора (напр. ["audio/", "video/"]); пусто — без фильтра по типу. */
   mimePrefixes?: string[];
   /** S3: true — отбирать строки, чей mime НЕ из mimePrefixes (включая mime IS NULL). */
@@ -254,6 +261,29 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultBatchSize: 500,
     intervalMinutes: 60,
     retentionNotLongerThan: AGENT_SESSIONS_POLICY_KEY,
+  }),
+
+  // ── Рабочие пространства (0458) ─────────────────────────────────────────────
+  // Срок хранения политики — это срок восстановления: столько дней пространство, поставленное
+  // на удаление, ждёт и может быть возвращено администратором. Политика включена по умолчанию:
+  // она касается только пространств, которые человек явно поставил на удаление.
+  task({
+    key: WORKSPACE_DELETION_POLICY_KEY,
+    label: "Пространства, поставленные на удаление",
+    description:
+      "Окончательно удаляет рабочие пространства, поставленные на удаление, когда истёк срок восстановления, и пространства, удалённые администратором сразу. До истечения срока администратор может вернуть пространство. Очистка идёт порциями: сначала самые большие таблицы пространства, затем само пространство и его файлы. Архивные пространства политика не трогает.",
+    category: "content",
+    action: "delete_rows",
+    storage: "workspace_purge",
+    table: "workspaces",
+    timeColumn: "lifecycle_changed_at",
+    defaultEnabled: true,
+    defaultRetentionDays: WORKSPACE_DELETION_DEFAULT_GRACE_DAYS,
+    defaultBatchSize: 2000,
+    intervalMinutes: 60,
+    sensitive: true,
+    cascadeNote:
+      "Удаляет всё содержимое пространства: чаты, ассистентов, базы знаний, файлы, историю агента и настройки. Размер батча — строк одной таблицы за запрос. Очистку выполняет платформа по вызову janitor. Действие необратимо; запись о нём остаётся в журнале архивации и удаления.",
   }),
 
   // ── Проверка достоверности ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md) ──

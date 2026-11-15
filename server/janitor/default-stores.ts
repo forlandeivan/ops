@@ -29,6 +29,7 @@ import {
 } from "./domain-gateway-client";
 import { createPgRetentionStore, type RetentionStore } from "./tasks/pg-retention-task";
 import type { AgentSessionFoldersStore } from "./tasks/agent-session-folders-task";
+import type { WorkspacePurgeStore } from "./tasks/workspace-purge-task";
 import {
   createChatAttachmentS3Store,
   createChatFeedbackAttachmentS3Store,
@@ -50,6 +51,7 @@ const logger = createLogger("janitor-default-stores");
 
 export interface JanitorStores {
   agentSessionFolders?: AgentSessionFoldersStore;
+  workspacePurge?: WorkspacePurgeStore;
   pg: RetentionStore;
   s3: Record<string, S3RetentionStore>;
   qdrant: QdrantOrphanStore;
@@ -169,6 +171,7 @@ export function defaultStores(): JanitorStores {
   const cleanupJobs = createFileArtifactCleanupJobStore();
   return {
     agentSessionFolders: { purge: (request) => gateway.purgeAgentSessionFolders(request) },
+    workspacePurge: { purge: (request) => gateway.purgeWorkspaces(request) },
     pg: createPgRetentionStore(),
     s3: {
       chat_attachments: createChatAttachmentS3Store(),
