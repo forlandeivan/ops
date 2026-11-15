@@ -13121,6 +13121,8 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
   leaseOwner: text("lease_owner"),
   leaseEpoch: integer("lease_epoch").notNull().default(0),
   leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  /** Неподтверждённые попытки отправки подряд (5xx, 408, 429, сеть); предел — в server/chat-queue/repository.ts. */
+  dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
   retryAt: timestamp("retry_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
