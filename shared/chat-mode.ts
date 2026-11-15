@@ -37,8 +37,11 @@ export type ChatRouteReason = (typeof chatRouteReasons)[number];
  * Передача хода из режима «Чат» агенту. Модель чата первой строкой ответа ставит метку
  * `[[АГЕНТ:причина]]`; сервер читает только начало ответа. Причина — закрытый словарь: что нужно
  * пользователю и чего «Чат» не умеет. Неизвестное слово после двоеточия — `other`.
+ *
+ * `material` ставит не модель, а сервер: в чате с поиском по базам знаний пришёл большой текст — материал для
+ * работы, а не вопрос к базе (`server/chat-router/chat-material-message.ts`). В правило о метке для модели не входит.
  */
-export const chatHandoffReasons = ["file", "web", "documents", "compute", "workspace", "skill", "memory", "other"] as const;
+export const chatHandoffReasons = ["file", "web", "documents", "compute", "workspace", "skill", "memory", "material", "other"] as const;
 export type ChatHandoffReason = (typeof chatHandoffReasons)[number];
 
 export function resolveChatHandoffReason(value: unknown): ChatHandoffReason {
