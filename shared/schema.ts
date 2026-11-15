@@ -4285,8 +4285,8 @@ export const assistants = pgTable(
       .references(() => workspaceVectorCollections.collectionName, { onDelete: "set null" }),
     isSystem: boolean("is_system").notNull().default(false),
       systemKey: text("system_key"),
-      // Память ассистента (shared/agent-memory.ts): факты, которые ассистент учитывает у всех пользователей. У системных
-      // ассистентов уровня нет независимо от флага. В манифест сборок не входит: это данные времени работы.
+      // «Запоминать в этом ассистенте» (shared/agent-memory.ts): личная память пользователей внутри ассистента. Общая
+      // память ассистента от флага не зависит. У системных ассистентов уровня нет. В манифест сборок не входит.
       memoryEnabled: boolean("memory_enabled").notNull().default(true),
       executionMode: text("execution_mode").$type<AssistantExecutionMode>().notNull().default("standard"),
       workflowDefinitionId: uuid("workflow_definition_id"),
@@ -4366,6 +4366,9 @@ export const assistants = pgTable(
     originBuildId: varchar("origin_build_id", { length: 255 }),
     originBuildVersionId: uuid("origin_build_version_id"),
     locked: boolean("locked").notNull().default(false),
+    // Черновик обучения: скрытая копия ассистента, в которой обучение ведёт круги, пока рабочий ассистент не меняется.
+    // Лучшая версия переносится в рабочего кнопкой «Применить» (решение владельца 14.11.2026).
+    trainingDraftOf: varchar("training_draft_of").references((): AnyPgColumn => assistants.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
@@ -4378,6 +4381,7 @@ export const assistants = pgTable(
     statusUpdatedIdx: index("assistants_status_updated_idx").on(table.status, table.updatedAt),
     // 0406: счётчик «пользуются за 30 дней» сборки — подписка и копия помнят сборку одинаково.
     originBuildIdx: index("assistants_origin_build_idx").on(table.originBuildId),
+    trainingDraftOfIdx: index("assistants_training_draft_of_idx").on(table.trainingDraftOf),
     workspaceSystemKeyUnique: uniqueIndex("assistants_workspace_system_key_unique_idx").on(
       table.workspaceId,
       table.systemKey,
@@ -5780,7 +5784,8 @@ export type AssistantExecutionMode = (typeof assistantExecutionModes)[number];
 export const assistantModes = ["rag", "llm"] as const;
 export type AssistantMode = (typeof assistantModes)[number];
 
-export const assistantStatuses = ["active", "archived"] as const;
+/** training_draft — черновик обучения: в списках и каталоге не виден, чаты проверки с ним работают. */
+export const assistantStatuses = ["active", "archived", "training_draft"] as const;
 export type AssistantStatus = (typeof assistantStatuses)[number];
 
 export const assistantWorkflowRunStatuses = [
@@ -11301,7 +11306,7 @@ export type InstructionDocumentInsert = typeof instructionDocuments.$inferInsert
 // (личная память — персональные данные). Личная память привязана к пространству: сведения пространства не утекают в
 // другие пространства и уходят вместе с ним. Лимиты и форма — shared/agent-memory.ts.
 
-export const memoryScopes = ["workspace", "assistant", "user"] as const;
+export const memoryScopes = ["workspace", "assistant_shared", "assistant", "user"] as const;
 export type MemoryScope = (typeof memoryScopes)[number];
 export const memoryNodeKinds = ["folder", "document"] as const;
 export type MemoryNodeKind = (typeof memoryNodeKinds)[number];
@@ -11310,20 +11315,20 @@ export type MemoryNodeKind = (typeof memoryNodeKinds)[number];
  * Память трёх уровней (shared/agent-memory.ts) — папка маленьких документов, как на диске: папки и документы с
  * заголовком, строкой описания и текстом. В промпт агента идёт только оглавление, текст он читает по требованию.
  * Уровни (scope): workspace — общий справочник пространства; user — личная память человека, одна на все пространства;
- * assistant — личная память человека внутри одного ассистента (у каждого пользователя своя, как чаты). Общей памяти
- * ассистента нет намеренно: в неё утекала бы личная переписка. Каскады: удаление папки уносит содержимое;
- * пространство, ассистент и пользователь — свою память.
+ * assistant — личная память человека внутри одного ассистента (у каждого пользователя своя, как чаты);
+ * assistant_shared — общая память ассистента для всех его пользователей (пишут `memory:manage` и обучение ассистента).
+ * Каскады: удаление папки уносит содержимое; пространство, ассистент и пользователь — свою память.
  */
 export const memoryNodes = pgTable(
   "memory_nodes",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    /** Пространство (scope workspace и assistant); у личной памяти NULL — она у человека одна на все пространства. */
+    /** Пространство (scope workspace, assistant и assistant_shared); у личной памяти NULL — она одна на все пространства. */
     workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
     scope: varchar("scope", { length: 16 }).$type<MemoryScope>().notNull(),
     /** Владелец личной памяти (scope user и assistant). */
     userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
-    /** Только scope='assistant': личная память пользователя внутри этого ассистента. */
+    /** scope='assistant' — личная память пользователя внутри ассистента; scope='assistant_shared' — общая память ассистента. */
     assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
     kind: varchar("kind", { length: 16 }).$type<MemoryNodeKind>().notNull().default("document"),
     /** Родительская папка; NULL — корень уровня. */
@@ -11339,7 +11344,7 @@ export const memoryNodes = pgTable(
     updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'assistant', 'user')`),
+    scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'assistant_shared', 'assistant', 'user')`),
     kindCheck: check(
       "memory_nodes_kind_check",
       sql`(${table.kind} = 'document' AND ${table.body} IS NOT NULL) OR (${table.kind} = 'folder' AND ${table.body} IS NULL)`,
@@ -11347,7 +11352,7 @@ export const memoryNodes = pgTable(
     // Строка принадлежит ровно той сущности, которую называет scope.
     scopeRefCheck: check(
       "memory_nodes_scope_ref_check",
-      sql`(${table.scope} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.userId} IS NULL AND ${table.assistantId} IS NULL) OR (${table.scope} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NOT NULL) OR (${table.scope} = 'user' AND ${table.workspaceId} IS NULL AND ${table.userId} IS NOT NULL AND ${table.assistantId} IS NULL)`,
+      sql`(${table.scope} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.userId} IS NULL AND ${table.assistantId} IS NULL) OR (${table.scope} = 'assistant_shared' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.scope} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NOT NULL) OR (${table.scope} = 'user' AND ${table.workspaceId} IS NULL AND ${table.userId} IS NOT NULL AND ${table.assistantId} IS NULL)`,
     ),
     // Один заголовок в папке без учёта регистра: «тот же документ» обновляется, а не дублируется.
     titleUniq: uniqueIndex("memory_nodes_title_uq").on(
@@ -13182,6 +13187,8 @@ export const assistantTrainingChecks = pgTable("assistant_training_checks", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  /** Кто выполняет примеры: черновик обучения; null — сам ассистент. Примеры и эталоны — всегда у `assistantId`. */
+  runAssistantId: varchar("run_assistant_id").references(() => assistants.id, { onDelete: "set null" }),
   requestedByUserId: varchar("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
   status: text("status").notNull().default("queued"),
   total: integer("total").notNull().default(0),
@@ -13202,6 +13209,7 @@ export const assistantTrainingChecks = pgTable("assistant_training_checks", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   assistantIdx: index("assistant_training_checks_assistant_idx").on(table.assistantId, table.createdAt),
+  runAssistantIdx: index("assistant_training_checks_run_assistant_idx").on(table.runAssistantId),
   workspaceIdx: index("assistant_training_checks_workspace_idx").on(table.workspaceId),
   requesterIdx: index("assistant_training_checks_requester_idx").on(table.requestedByUserId),
   queueIdx: index("assistant_training_checks_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
@@ -13292,6 +13300,12 @@ export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
   bestTrainScore: doublePrecision("best_train_score"),
   bestHoldoutScore: doublePrecision("best_holdout_score"),
   bestCheckId: uuid("best_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  /** Черновик ассистента, в котором идут круги; null — обучение старого вида (правило рабочего ассистента). */
+  draftAssistantId: varchar("draft_assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+  /** Соответствие навыков и правил черновика рабочим: { skills: { черновик: рабочий }, rules: { … } }. */
+  draftMap: jsonb("draft_map").$type<{ skills: Record<string, string>; rules: Record<string, string> }>(),
+  /** Решение по черновику: applied — перенесён в рабочего, discarded — отброшен; null — ждёт решения или его не было. */
+  draftResolution: text("draft_resolution"),
   errorCode: text("error_code"),
   errorMessage: text("error_message"),
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
@@ -13309,6 +13323,7 @@ export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
   currentCheckIdx: index("assistant_training_jobs_current_check_idx").on(table.currentCheckId),
   bestCheckIdx: index("assistant_training_jobs_best_check_idx").on(table.bestCheckId),
   beforeSnapshotIdx: index("assistant_training_jobs_before_snapshot_idx").on(table.beforeSnapshotId),
+  draftAssistantIdx: index("assistant_training_jobs_draft_assistant_idx").on(table.draftAssistantId),
   bestSnapshotIdx: index("assistant_training_jobs_best_snapshot_idx").on(table.bestSnapshotId),
   queueIdx: index("assistant_training_jobs_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
   unfinishedUnique: uniqueIndex("assistant_training_jobs_unfinished_unique").on(table.assistantId).where(sql`${table.status} IN ('queued','running')`),
@@ -13331,6 +13346,8 @@ export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
   /** Служебный чат хода сборщика навыка, пока круг собирает навык; без внешнего ключа — круг остаётся историей. */
   builderChatId: varchar("builder_chat_id"),
   checkId: uuid("check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  /** Перепроверка круга: прирост не больше разброса — вторая проверка, решение по среднему двух. */
+  confirmCheckId: uuid("confirm_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
   score: doublePrecision("score"),
   trainScore: doublePrecision("train_score"),
   holdoutScore: doublePrecision("holdout_score"),
@@ -13343,6 +13360,7 @@ export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
   jobRoundUnique: uniqueIndex("assistant_training_rounds_job_round_unique").on(table.jobId, table.round),
   workspaceIdx: index("assistant_training_rounds_workspace_idx").on(table.workspaceId),
   checkIdx: index("assistant_training_rounds_check_idx").on(table.checkId),
+  confirmCheckIdx: index("assistant_training_rounds_confirm_check_idx").on(table.confirmCheckId),
   snapshotIdx: index("assistant_training_rounds_snapshot_idx").on(table.snapshotId),
   statusCheck: check("assistant_training_rounds_status_check", sql`${table.status} IN ('improving','evaluating','accepted','rejected','failed')`),
 }));
