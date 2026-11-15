@@ -6986,7 +6986,7 @@ export type AgentExecutionEventInsert = typeof agentExecutionEvents.$inferInsert
 // --- Устройства пользователей: приложение Unica Desktop (волна 1, shared/device-protocol.ts) ------------------------
 // Компьютер пользователя подключается к Унике исходящим соединением и выполняет команды агента в папках, которые
 // разрешил владелец компьютера. Полных путей здесь нет: папка — идентификатор, имя для показа и ключ пути `/device/…`.
-export const deviceFolderModeValues = ["read"] as const;
+export const deviceFolderModeValues = ["read", "write"] as const;
 export const devicePairingStatuses = ["pending", "approved", "claimed"] as const;
 export type DevicePairingStatus = (typeof devicePairingStatuses)[number];
 export const deviceCommandStatuses = ["sent", "acked", "done", "failed", "expired"] as const;
@@ -7038,7 +7038,7 @@ export const userDeviceFolders = pgTable(
   (table) => ({
     pk: primaryKey({ columns: [table.deviceId, table.id] }),
     mountKeyIdx: uniqueIndex("user_device_folders_mount_key_idx").on(table.deviceId, table.mountKey),
-    modeCheck: check("user_device_folders_mode_check", sql`${table.mode} IN ('read')`),
+    modeCheck: check("user_device_folders_mode_check", sql`${table.mode} IN ('read', 'write')`),
   }),
 );
 
