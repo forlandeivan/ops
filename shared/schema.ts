@@ -2392,6 +2392,51 @@ export const knowledgeBaseTransferJobs = pgTable(
 export type KnowledgeBaseTransferJobRow = typeof knowledgeBaseTransferJobs.$inferSelect;
 export type KnowledgeBaseTransferJobInsert = typeof knowledgeBaseTransferJobs.$inferInsert;
 
+/**
+ * Диагностическая выгрузка платформы: обезличенный архив «как работала система» за период
+ * (shared/platform-diagnostics.ts, server/platform-diagnostics). Задание уровня инстанса: без
+ * workspace_id, запускает и скачивает только администратор платформы. Очередь — как у переноса баз
+ * знаний: pending → processing → completed | failed, повтор с задержкой, архив живёт ограниченный срок.
+ * Скачивания считаются в самой строке — это и есть след «кто и когда забрал архив».
+ */
+export const platformDiagnosticExports = pgTable(
+  "platform_diagnostic_exports",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    requestedByUserId: varchar("requested_by_user_id").notNull(),
+    /** Сутки UTC включительно, ГГГГ-ММ-ДД. */
+    rangeFrom: varchar("range_from", { length: 10 }).notNull(),
+    rangeTo: varchar("range_to", { length: 10 }).notNull(),
+    sections: jsonb("sections").notNull().default(sql`'[]'::jsonb`),
+    archiveObjectKey: text("archive_object_key"),
+    archiveSizeBytes: bigint("archive_size_bytes", { mode: "number" }),
+    archiveExpired: boolean("archive_expired").notNull().default(false),
+    totalUnits: integer("total_units").notNull().default(0),
+    processedUnits: integer("processed_units").notNull().default(0),
+    report: jsonb("report"),
+    error: text("error"),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    downloadCount: integer("download_count").notNull().default(0),
+    lastDownloadedAt: timestamp("last_downloaded_at", { withTimezone: true }),
+    lastDownloadedByUserId: varchar("last_downloaded_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => ({
+    claimIdx: index("platform_diagnostic_exports_claim_idx").on(table.status, table.nextRetryAt, table.createdAt),
+    // Ретенция архивов: свип ищет завершённые задания с ещё живым объектом.
+    retentionIdx: index("platform_diagnostic_exports_retention_idx")
+      .on(table.finishedAt)
+      .where(sql`archive_object_key IS NOT NULL AND archive_expired = false`),
+  }),
+);
+export type PlatformDiagnosticExportRow = typeof platformDiagnosticExports.$inferSelect;
+export type PlatformDiagnosticExportInsert = typeof platformDiagnosticExports.$inferInsert;
+
 export const knowledgeDocumentIndexRevisionStatuses = [
   "processing",
   "ready",
