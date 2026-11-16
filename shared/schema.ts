@@ -11363,6 +11363,8 @@ export const memoryNodes = pgTable(
     updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    /** Когда агент последний раз открывал документ (memory.read): по нему и по updated_at оглавление отбирает нужное. */
+    lastReadAt: timestamp("last_read_at"),
   },
   (table) => ({
     scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'assistant_shared', 'assistant', 'user')`),
