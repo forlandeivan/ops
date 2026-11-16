@@ -8031,6 +8031,48 @@ export const workspaceCreditLedger = pgTable(
   }),
 );
 
+/**
+ * Бонусный пакет кредитов (0463, #261): сумма, крайний срок использования, причина. Тратится до своего срока
+ * и не сгорает при ежемесячном пополнении. current_balance счёта включает остатки открытых пакетов;
+ * подписочная часть = current_balance − сумма remaining_cents открытых пакетов. Кто начислил — снимком.
+ */
+export const workspaceCreditGrantCloseReasons = ["expired", "revoked"] as const;
+export type WorkspaceCreditGrantCloseReason = (typeof workspaceCreditGrantCloseReasons)[number];
+
+export const workspaceCreditGrants = pgTable(
+  "workspace_credit_grants",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+    remainingCents: bigint("remaining_cents", { mode: "number" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    grantedByUserId: varchar("granted_by_user_id"),
+    grantedByEmail: text("granted_by_email"),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedReason: varchar("closed_reason", { length: 16 }).$type<WorkspaceCreditGrantCloseReason>(),
+    closedByUserId: varchar("closed_by_user_id"),
+  },
+  (table) => ({
+    openIdx: index("workspace_credit_grants_open_idx").on(table.workspaceId, table.expiresAt).where(sql`"closed_at" IS NULL`),
+    expiryIdx: index("workspace_credit_grants_expiry_idx").on(table.expiresAt).where(sql`"closed_at" IS NULL`),
+    amountCheck: check(
+      "workspace_credit_grants_amount_check",
+      sql`${table.amountCents} > 0 AND ${table.remainingCents} >= 0 AND ${table.remainingCents} <= ${table.amountCents}`,
+    ),
+    closedReasonCheck: check(
+      "workspace_credit_grants_closed_reason_check",
+      sql`${table.closedReason} IS NULL OR ${table.closedReason} IN ('expired', 'revoked')`,
+    ),
+  }),
+);
+
+export type WorkspaceCreditGrant = typeof workspaceCreditGrants.$inferSelect;
+
 export type WorkspaceCreditAccount = typeof workspaceCreditAccounts.$inferSelect;
 export type WorkspaceCreditAccountInsert = typeof workspaceCreditAccounts.$inferInsert;
 export type WorkspaceCreditLedgerEntry = typeof workspaceCreditLedger.$inferSelect;
