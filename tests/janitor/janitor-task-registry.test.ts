@@ -91,12 +91,16 @@ describe("janitor task registry", () => {
         // Журнал «Защиты данных» (0422) — 180 дней; фрагменты-доказательства (0426) стираются через 30 дней.
         "pg.data_protection_events",
         "pg.data_protection_events.evidence",
+        // Прежние «удалённые» чаты (#224): пользователь считал их удалёнными.
+        "pg.chat_sessions",
       ].sort(),
     );
     // примеры нового покрытия — выключены по умолчанию
     expect(getJanitorTask("pg.asr_executions.logs")?.defaultEnabled).toBe(false);
     expect(getJanitorTask("pg.mcp_execution_logs")?.defaultEnabled).toBe(false);
-    expect(getJanitorTask("pg.chat_sessions")?.defaultEnabled).toBe(false);
+    // Прежние «удалённые» чаты (#224) стираются из коробки: пользователь считал их удалёнными.
+    expect(getJanitorTask("pg.chat_sessions")?.defaultEnabled).toBe(true);
+    expect(getJanitorTask("pg.chat_sessions")?.defaultRetentionDays).toBe(1);
     // новые storage-политики по типу — выключены (opt-in)
     expect(getJanitorTask("s3.chat_attachments.audio_video")?.defaultEnabled).toBe(false);
     expect(getJanitorTask("s3.chat_attachments.other")?.defaultEnabled).toBe(false);

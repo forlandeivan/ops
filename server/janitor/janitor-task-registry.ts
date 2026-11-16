@@ -963,13 +963,16 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
   }),
   task({
     key: "pg.chat_sessions",
-    label: "Удалённые чаты (physical purge soft-deleted)",
+    label: "Удалённые чаты (прежняя логика)",
     description:
-      "Физически удаляет чаты, помеченные удалёнными (deleted_at), старше срока хранения. Перед каскадом snapshots вложений атомарно ставятся в durable file-cleanup очередь. Чаты с активной ASR откладываются.",
+      "Стирает чаты, которые пользователи удалили до перехода на удаление навсегда (#224): тогда чат только помечался удалённым (deleted_at) и оставался в базе. Сейчас «Удалить» стирает чат сразу, новые такие строки не появляются. Перед каскадом snapshots вложений атомарно ставятся в durable file-cleanup очередь. Чаты с активной ASR откладываются.",
     category: "assistants",
     action: "delete_rows",
     table: "chat_sessions",
     timeColumn: "deleted_at",
+    // Включено из коробки: пользователь нажимал «Удалить» и считал чат удалённым. Своя настройка администратора сохраняется.
+    defaultEnabled: true,
+    defaultRetentionDays: 1,
     sensitive: true,
     cascadeNote:
       "Каскадно удаляет сообщения, карточки, вложения и транскрипты; MinIO/Files очищает durable worker по сохранённым snapshots.",
