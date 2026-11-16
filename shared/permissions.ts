@@ -116,7 +116,6 @@ export const P = {
   WORKSPACE_EDIT: 'workspace:edit',
   WORKSPACE_ICON_MANAGE: 'workspace:icon:manage',
   WORKSPACE_PLAN_VIEW: 'workspace:plan:view',
-  WORKSPACE_PLAN_MANAGE: 'workspace:plan:manage',
   WORKSPACE_CREDITS_VIEW: 'workspace:credits:view',
   WORKSPACE_INSTRUCTIONS_MANAGE: 'workspace:instructions:manage',
 
@@ -366,7 +365,7 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
   workspace: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'viewer', label: 'Просмотр',       permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW] },
-    { code: 'editor', label: 'Редактирование', permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_EDIT, P.WORKSPACE_ICON_MANAGE, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_PLAN_MANAGE, P.WORKSPACE_CREDITS_VIEW] },
+    { code: 'editor', label: 'Редактирование', permissions: [P.WORKSPACE_VIEW, P.WORKSPACE_EDIT, P.WORKSPACE_ICON_MANAGE, P.WORKSPACE_PLAN_VIEW, P.WORKSPACE_CREDITS_VIEW] },
   ],
   members: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
@@ -529,7 +528,6 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.WORKSPACE_EDIT, module: 'workspace', action: 'edit', description: 'Редактирование настроек workspace', isSensitive: false },
   { id: P.WORKSPACE_ICON_MANAGE, module: 'workspace', action: 'icon:manage', description: 'Управление иконкой workspace', isSensitive: false },
   { id: P.WORKSPACE_PLAN_VIEW, module: 'workspace', action: 'plan:view', description: 'Просмотр тарифа workspace', isSensitive: false },
-  { id: P.WORKSPACE_PLAN_MANAGE, module: 'workspace', action: 'plan:manage', description: 'Управление тарифом workspace', isSensitive: true },
   { id: P.WORKSPACE_CREDITS_VIEW, module: 'workspace', action: 'credits:view', description: 'Просмотр кредитов workspace', isSensitive: false },
   { id: P.WORKSPACE_INSTRUCTIONS_MANAGE, module: 'workspace', action: 'instructions:manage', description: 'Управление инструкциями агента на уровне пространства', isSensitive: true },
   { id: P.MEMBERS_VIEW, module: 'members', action: 'view', description: 'Просмотр участников workspace', isSensitive: false },
