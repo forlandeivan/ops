@@ -204,6 +204,11 @@ export const users = pgTable("users", {
   yandexEmailVerified: boolean("yandex_email_verified").notNull().default(false),
   avatarKey: text("avatar_key"),
   avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
+  // Запрос на удаление (0462): учётная запись отключена и ждёт, пока решится судьба её пространств
+  // (workspaces.owner_id каскадом снёс бы их вместе со строкой). Статус остаётся `disabled`; «удаляется» —
+  // это непустая отметка. Внешнего ключа на исполнителя нет: отметка переживает его учётную запись.
+  deletionRequestedAt: timestamp("deletion_requested_at", { withTimezone: true }),
+  deletionRequestedBy: varchar("deletion_requested_by"),
 }, (table) => ({
   createdAtIdx: index("users_created_at_idx").on(table.createdAt),
 }));
@@ -11634,6 +11639,9 @@ export const auditActions = [
   'member.roles_changed',
   'member.role_assigned',
   'member.role_revoked',
+  // Уход из пространства (workspace-membership-service.ts): сам или по решению другого участника.
+  'member.left',
+  'member.removed',
   'resource.access_set',
   'resource.access_cleared',
   'resource.access_rule_added',
@@ -11680,6 +11688,11 @@ export const workspaceLifecycleActions = [
   "delete_now",
   "purge_started",
   "purged",
+  // Удаление отменено для пространства, которое до постановки на срок лежало в архиве: назад в архив,
+  // а не в работу (отмена удаления пользователя, admin-user-deletion-service.ts).
+  "return_to_archive",
+  // Смена владельца состояние не меняет, но в журнал пишется: по нему видно, кому ушло пространство.
+  "ownership_transferred",
 ] as const;
 export type WorkspaceLifecycleAction = (typeof workspaceLifecycleActions)[number];
 
