@@ -2406,9 +2406,9 @@ export const platformDiagnosticExports = pgTable(
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     requestedByUserId: varchar("requested_by_user_id").notNull(),
-    /** Сутки UTC включительно, ГГГГ-ММ-ДД. */
-    rangeFrom: varchar("range_from", { length: 10 }).notNull(),
-    rangeTo: varchar("range_to", { length: 10 }).notNull(),
+    /** «ГГГГ-ММ-ДД» — сутки UTC включительно; ISO-время в UTC — точная граница (server/platform-diagnostics/diagnostics-range.ts). */
+    rangeFrom: varchar("range_from", { length: 40 }).notNull(),
+    rangeTo: varchar("range_to", { length: 40 }).notNull(),
     sections: jsonb("sections").notNull().default(sql`'[]'::jsonb`),
     archiveObjectKey: text("archive_object_key"),
     archiveSizeBytes: bigint("archive_size_bytes", { mode: "number" }),
@@ -2418,6 +2418,8 @@ export const platformDiagnosticExports = pgTable(
     report: jsonb("report"),
     error: text("error"),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    /** Администратор попросил отменить идущую сборку: сборщик проверяет отметку вместе с прогрессом. */
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     downloadCount: integer("download_count").notNull().default(0),
     lastDownloadedAt: timestamp("last_downloaded_at", { withTimezone: true }),
     lastDownloadedByUserId: varchar("last_downloaded_by_user_id"),
