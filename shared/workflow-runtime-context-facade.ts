@@ -5,7 +5,7 @@
  * `WorkflowGateway.context` — без type-импортов соответствующих `server/**`.
  *
  * Параметры скопированы точно; тяжёлые возвраты ослаблены до полей, читаемых ядром.
- * `ContextRef`/`ComposerPart`/`ResolvedContextRef`, `AssistantDto`, `Model`/`ModelType`,
+ * `ContextRef`/`ComposerPart`/`ResolvedContextRef`, `AgentDto`, `Model`/`ModelType`,
  * `DocumentTabType` уже в `@shared`.
  */
 
@@ -15,7 +15,7 @@ import type {
   ContextRefSource,
   ResolvedContextRef,
 } from "@shared/context-refs";
-import type { AssistantDto } from "@shared/assistants";
+import type { AgentDto } from "@shared/agents";
 import type { DocumentTabType, Model, ModelType } from "@shared/schema";
 
 /** Контекст исполнения: ассистент, контекст-ссылки, вкладки чата, модели. */
@@ -45,7 +45,7 @@ export type WorkflowGatewayContextPort = {
       snippet: string;
     }>
   >;
-  getAssistantById(workspaceId: string, assistantId: string): Promise<AssistantDto | null>;
+  getAgentById(workspaceId: string, agentId: string): Promise<AgentDto | null>;
   composeChatInstructionsBlock(params: {
     workspaceId: string;
     assistantId?: string | null;

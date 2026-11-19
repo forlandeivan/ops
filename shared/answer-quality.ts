@@ -320,6 +320,7 @@ export const answerQualityPeriodSchema = z.object({
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   workspaceId: z.string().trim().min(1).optional(),
+  agentId: z.string().trim().min(1).optional(),
   assistantId: z.string().trim().min(1).optional(),
   llmModel: z.string().trim().min(1).optional(),
 });
@@ -357,7 +358,7 @@ export interface AnswerQualityDayPointDto {
   avgFaithfulness: number | null;
 }
 
-export const answerQualityBreakdownDimensions = ["assistant", "workspace", "model"] as const;
+export const answerQualityBreakdownDimensions = ["agent", "workspace", "model"] as const;
 export type AnswerQualityBreakdownDimension = (typeof answerQualityBreakdownDimensions)[number];
 
 export interface AnswerQualityBreakdownRowDto {
@@ -375,6 +376,8 @@ export interface AnswerQualityCheckListItemDto {
   createdAt: string;
   workspaceId: string;
   workspaceName: string | null;
+  agentId: string | null;
+  agentName: string | null;
   assistantId: string | null;
   assistantName: string | null;
   source: AnswerQualitySource;
@@ -393,6 +396,7 @@ export interface AnswerQualityCheckListItemDto {
   askAiRunId: string | null;
   chatId: string | null;
   chatMessageId: string | null;
+  agentResponseExecutionId: string | null;
   assistantExecutionId: string | null;
 }
 

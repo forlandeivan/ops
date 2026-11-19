@@ -242,7 +242,7 @@ function firstAffected(result: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-type CascadeCleanupRoot = "chat_sessions" | "assistants";
+type CascadeCleanupRoot = "chat_sessions" | "agents";
 
 type ChatReplayRetentionTable = "chat_queued_messages" | "chat_turn_receipts";
 
@@ -310,7 +310,7 @@ async function deleteChatReplayRows(
 }
 
 function isCascadeCleanupRoot(table: string): table is CascadeCleanupRoot {
-  return table === "chat_sessions" || table === "assistants";
+  return table === "chat_sessions" || table === "agents";
 }
 
 function rootHasNoActiveAsr(table: CascadeCleanupRoot) {
@@ -332,12 +332,12 @@ function rootHasNoActiveAsr(table: CascadeCleanupRoot) {
   return sql`
     NOT EXISTS (
       SELECT 1 FROM asr_completion_jobs AS completion
-      WHERE completion.assistant_id = root.id
+      WHERE completion.agent_id = root.id
         AND completion.status NOT IN ('success', 'error', 'cancelled')
     )
     AND NOT EXISTS (
       SELECT 1 FROM asr_executions AS execution
-      WHERE execution.assistant_id = root.id
+      WHERE execution.agent_id = root.id
         AND COALESCE(execution.lifecycle_status, execution.status, 'accepted')
             NOT IN ('completed', 'failed', 'cancelled', 'expired')
     )
@@ -459,12 +459,12 @@ async function deleteCascadeSafeRoots(
   const pkId = sql.identifier(params.pkColumn);
   const equals = cascadeRootEqualsFragment(params.equalsFilter);
   const noActiveAsr = rootHasNoActiveAsr(params.table);
-  const reason = params.table === "chat_sessions" ? "pg.chat_sessions" : "pg.assistants.archived";
-  const noRemainingChildren = params.table === "assistants"
+  const reason = params.table === "chat_sessions" ? "pg.chat_sessions" : "pg.agents.archived";
+  const noRemainingChildren = params.table === "agents"
     ? sql`
         AND NOT EXISTS (
           SELECT 1 FROM chat_sessions AS child
-          WHERE child.assistant_id = root.id
+          WHERE child.agent_id = root.id
         )`
     : sql``;
   const attachmentSource = params.table === "chat_sessions"
@@ -472,7 +472,7 @@ async function deleteCascadeSafeRoots(
           JOIN candidates ON candidates.id = attachment.chat_id`
     : sql`chat_attachments AS attachment
           JOIN chat_sessions AS session ON session.id = attachment.chat_id
-          JOIN candidates ON candidates.id = session.assistant_id`;
+          JOIN candidates ON candidates.id = session.agent_id`;
 
   const query = sql`
     WITH candidates AS MATERIALIZED (
@@ -509,7 +509,7 @@ async function drainAssistantChatSessions(
   const timeId = sql.identifier(params.timeColumn);
   const pkId = sql.identifier(params.pkColumn);
   const equals = cascadeRootEqualsFragment(params.equalsFilter);
-  const noActiveAsr = rootHasNoActiveAsr("assistants");
+  const noActiveAsr = rootHasNoActiveAsr("agents");
   const attachmentSource = sql`chat_attachments AS attachment
           JOIN candidates ON candidates.id = attachment.chat_id`;
 
@@ -517,13 +517,13 @@ async function drainAssistantChatSessions(
     WITH candidates AS MATERIALIZED (
       SELECT chat.id AS id
       FROM chat_sessions AS chat
-      JOIN assistants AS root ON root.id = chat.assistant_id
+      JOIN agents AS root ON root.id = chat.agent_id
       WHERE root.${timeId} < ${params.cutoff}${equals}
         AND ${noActiveAsr}
       ORDER BY root.${timeId}, root.${pkId}, chat.id
       FOR UPDATE OF chat, root SKIP LOCKED
       LIMIT ${params.batchSize}
-    ), ${attachmentCleanupCtes(attachmentSource, "pg.assistants.archived")}, deleted AS (
+    ), ${attachmentCleanupCtes(attachmentSource, "pg.agents.archived")}, deleted AS (
       DELETE FROM chat_sessions AS chat
       USING candidates, enqueue_barrier
       WHERE chat.id = candidates.id
@@ -658,7 +658,7 @@ export function createPgRetentionStore(
     },
 
     async drainChildrenBatch({ table, timeColumn, pkColumn, cutoff, equalsFilter, batchSize }) {
-      if (table !== "assistants") {
+      if (table !== "agents") {
         throw new Error(`pg retention: drainChildrenBatch поддерживает только assistants, получена таблица "${table}"`);
       }
       return drainAssistantChatSessions(database, {

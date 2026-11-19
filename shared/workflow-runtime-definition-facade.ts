@@ -6,14 +6,14 @@
  *
  * Row-типы дефиниции/версии уже экспортируются из `@shared/schema`
  * (`WorkflowDefinition`/`WorkflowDefinitionVersion` = `$inferSelect` тех же таблиц),
- * binding-типы — из `@shared/assistants`. Дрейф ловится на wire.
+ * binding-типы — из `@shared/agents`. Дрейф ловится на wire.
  */
 
 import type { WorkflowDefinition, WorkflowDefinitionVersion } from "@shared/schema";
 import type {
-  AssistantTranscriptionWorkflowBinding,
-  AssistantWorkflowBinding,
-} from "@shared/assistants";
+  AgentTranscriptionWorkflowBinding,
+  AgentWorkflowBinding,
+} from "@shared/agents";
 
 /** Скоуп исполнения — та же пара вариантов, что у definitions-service/рантайма. */
 export type WorkflowExecutionScope =
@@ -41,7 +41,7 @@ export type WorkflowDefinitionResolversFacade = {
   }): Promise<{
     definition: WorkflowDefinition;
     version: WorkflowDefinitionVersion;
-    binding: AssistantWorkflowBinding;
+    binding: AgentWorkflowBinding;
   }>;
   resolveAssistantTranscriptionWorkflowDefinition(params: {
     workspaceId: string;
@@ -50,6 +50,6 @@ export type WorkflowDefinitionResolversFacade = {
   }): Promise<{
     definition: WorkflowDefinition;
     version: WorkflowDefinitionVersion;
-    binding: AssistantTranscriptionWorkflowBinding;
+    binding: AgentTranscriptionWorkflowBinding;
   }>;
 };

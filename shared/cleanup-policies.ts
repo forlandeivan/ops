@@ -21,7 +21,7 @@ export const cleanupCategories = [
   "agent",
   "asr",
   "knowledge",
-  "assistants",
+  "agents",
   "logs",
   "events",
   "audit",

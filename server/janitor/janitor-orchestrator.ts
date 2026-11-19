@@ -620,11 +620,12 @@ export async function runPolicyNow(
   actorId: string | null = null,
 ): Promise<RunPolicyOutcome> {
   const policies = await listResolvedPolicies();
-  const policy = policies.find((item) => item.resourceKey === resourceKey);
+  const taskDef = getJanitorTask(resourceKey);
+  const policy = policies.find((item) => item.resourceKey === taskDef?.key);
   if (!policy) {
     return { status: "skipped_disabled", matched: 0, deleted: 0, freedBytes: 0 };
   }
-  if (!getJanitorTask(resourceKey)) {
+  if (!taskDef) {
     return { status: "skipped_disabled", matched: 0, deleted: 0, freedBytes: 0 };
   }
   const trigger: RunPolicyTrigger = { triggeredBy: "manual", actorId };
@@ -644,8 +645,8 @@ export async function previewPolicy(
   actorId: string | null = null,
 ): Promise<CleanupPreviewResultDto> {
   const policies = await listResolvedPolicies();
-  const policy = policies.find((item) => item.resourceKey === resourceKey);
   const taskDef = getJanitorTask(resourceKey);
+  const policy = policies.find((item) => item.resourceKey === taskDef?.key);
   if (!policy || !taskDef) {
     return { matched: 0 };
   }

@@ -5,7 +5,7 @@ export const MODULE_LABELS: Record<string, string> = {
   notifications: 'Уведомления',
   scheduled_tasks: 'Задачи по расписанию',
   kb: 'Базы знаний',
-  assistants: 'Ассистенты',
+  agents: 'Агенты',
   workflows: 'Workflow-сценарии',
   actions: 'Действия',
   chats: 'Чат',
@@ -20,7 +20,6 @@ export const MODULE_LABELS: Record<string, string> = {
   global_variables: 'Глобальные переменные',
   prompts: 'Промпты',
   web: 'Интернет',
-  agent: 'Агент пространства',
   models_api: 'Модели для IDE и программ',
   devices: 'Компьютеры',
 };
@@ -29,7 +28,7 @@ export const PERMISSION_MODULES = [
   'notifications',
   'scheduled_tasks',
   'kb',
-  'assistants',
+  'agents',
   'workflows',
   'actions',
   'chats',
@@ -44,7 +43,6 @@ export const PERMISSION_MODULES = [
   'global_variables',
   'prompts',
   'web',
-  'agent',
   'models_api',
   'devices',
 ] as const;
@@ -73,12 +71,12 @@ export const P = {
   KB_SHARE_MANAGE: 'kb:share:manage',
 
   // Assistants
-  ASSISTANTS_VIEW: 'assistants:view',
-  ASSISTANTS_CREATE: 'assistants:create',
-  ASSISTANTS_EDIT: 'assistants:edit',
-  ASSISTANTS_DELETE: 'assistants:delete',
-  ASSISTANTS_ACTIONS_MANAGE: 'assistants:actions:manage',
-  ASSISTANTS_ACTIONS_EXECUTE: 'assistants:actions:execute',
+  AGENTS_VIEW: 'agents:view',
+  AGENTS_CREATE: 'agents:create',
+  AGENTS_EDIT: 'agents:edit',
+  AGENTS_DELETE: 'agents:delete',
+  AGENTS_ACTIONS_MANAGE: 'agents:actions:manage',
+  AGENTS_ACTIONS_EXECUTE: 'agents:actions:execute',
 
   // Workflows
   WORKFLOWS_VIEW: 'workflows:view',
@@ -185,6 +183,23 @@ export const P = {
   DEVICES_MANAGE: 'devices:manage',
 } as const;
 
+const legacyAgentPermissions = new Map<string, string>([
+  ['assistants:view', P.AGENTS_VIEW],
+  ['assistants:create', P.AGENTS_CREATE],
+  ['assistants:edit', P.AGENTS_EDIT],
+  ['assistants:delete', P.AGENTS_DELETE],
+  ['assistants:actions:manage', P.AGENTS_ACTIONS_MANAGE],
+  ['assistants:actions:execute', P.AGENTS_ACTIONS_EXECUTE],
+]);
+
+export function canonicalPermissionId(id: string): string {
+  return legacyAgentPermissions.get(id) ?? id;
+}
+
+export function canonicalPermissionIds(ids: readonly string[]): string[] {
+  return [...new Set(ids.map(canonicalPermissionId))];
+}
+
 export type PermissionId = (typeof P)[keyof typeof P];
 
 export const ALL_PERMISSION_IDS: PermissionId[] = Object.values(P);
@@ -202,8 +217,8 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.KB_VIEW, P.KB_CREATE, P.KB_EDIT, P.KB_DELETE,
     P.KB_DOCUMENT_CREATE, P.KB_DOCUMENT_EDIT, P.KB_DOCUMENT_DELETE,
     P.KB_DOCUMENT_IMPORT, P.KB_INDEX, P.KB_EXPORT, P.KB_ACCESS_MANAGE, P.KB_SHARE_MANAGE,
-    P.ASSISTANTS_VIEW, P.ASSISTANTS_CREATE, P.ASSISTANTS_EDIT, P.ASSISTANTS_DELETE,
-    P.ASSISTANTS_ACTIONS_MANAGE, P.ASSISTANTS_ACTIONS_EXECUTE,
+    P.AGENTS_VIEW, P.AGENTS_CREATE, P.AGENTS_EDIT, P.AGENTS_DELETE,
+    P.AGENTS_ACTIONS_MANAGE, P.AGENTS_ACTIONS_EXECUTE,
     P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_PUBLISH, P.WORKFLOWS_ARCHIVE,
     P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE,
     P.ACTIONS_VIEW, P.ACTIONS_CREATE, P.ACTIONS_EDIT, P.ACTIONS_DELETE, P.ACTIONS_EXECUTE,
@@ -230,8 +245,8 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.KB_VIEW, P.KB_CREATE, P.KB_EDIT,
     P.KB_DOCUMENT_CREATE, P.KB_DOCUMENT_EDIT, P.KB_DOCUMENT_DELETE,
     P.KB_DOCUMENT_IMPORT, P.KB_INDEX, P.KB_EXPORT,
-    P.ASSISTANTS_VIEW, P.ASSISTANTS_CREATE, P.ASSISTANTS_EDIT,
-    P.ASSISTANTS_ACTIONS_MANAGE, P.ASSISTANTS_ACTIONS_EXECUTE,
+    P.AGENTS_VIEW, P.AGENTS_CREATE, P.AGENTS_EDIT,
+    P.AGENTS_ACTIONS_MANAGE, P.AGENTS_ACTIONS_EXECUTE,
     P.WORKFLOWS_VIEW, P.WORKFLOWS_EXECUTE, P.WORKFLOWS_CREATE, P.WORKFLOWS_EDIT, P.WORKFLOWS_DEBUG, P.WORKFLOWS_EDIT_CODE,
     P.ACTIONS_VIEW, P.ACTIONS_CREATE, P.ACTIONS_EDIT, P.ACTIONS_EXECUTE,
     P.CHATS_VIEW, P.CHATS_CREATE, P.CHATS_DELETE, P.CHATS_SEND, P.CHATS_FILES,
@@ -255,7 +270,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
   viewer: [
     P.SCHEDULED_TASKS_VIEW,
     P.KB_VIEW,
-    P.ASSISTANTS_VIEW, P.ASSISTANTS_ACTIONS_EXECUTE,
+    P.AGENTS_VIEW, P.AGENTS_ACTIONS_EXECUTE,
     P.WORKFLOWS_VIEW,
     P.ACTIONS_VIEW, P.ACTIONS_EXECUTE,
     P.CHATS_VIEW, P.CHATS_CREATE, P.CHATS_SEND,
@@ -312,7 +327,7 @@ export interface EffectivePermissions {
 // Hierarchical access levels per module
 // ---------------------------------------------------------------------------
 
-export type AccessLevelCode = 'none' | 'viewer' | 'user' | 'editor' | 'manager' | 'admin';
+export type AccessLevelCode = 'none' | 'viewer' | 'user' | 'editor' | 'manager' | 'admin' | 'custom';
 
 export interface AccessLevel {
   code: AccessLevelCode;
@@ -320,6 +335,10 @@ export interface AccessLevel {
   /** Cumulative permissions — includes all permissions from lower levels */
   permissions: readonly PermissionId[];
 }
+
+const agentViewerPermissions = [P.AGENTS_VIEW, P.RULES_VIEW] as const;
+const agentEditorPermissions = [...agentViewerPermissions, P.AGENTS_CREATE, P.AGENTS_EDIT,
+  P.AGENTS_DELETE, P.AGENTS_ACTIONS_MANAGE, P.AGENTS_ACTIONS_EXECUTE] as const;
 
 export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel[]> = {
   notifications: [
@@ -338,10 +357,11 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'viewer', label: 'Просмотр',       permissions: [P.KB_VIEW] },
     { code: 'editor', label: 'Редактирование', permissions: [P.KB_VIEW, P.KB_CREATE, P.KB_EDIT, P.KB_DELETE, P.KB_DOCUMENT_CREATE, P.KB_DOCUMENT_EDIT, P.KB_DOCUMENT_DELETE, P.KB_DOCUMENT_IMPORT, P.KB_INDEX, P.KB_EXPORT, P.KB_ACCESS_MANAGE, P.KB_SHARE_MANAGE] },
   ],
-  assistants: [
-    { code: 'none',   label: 'Нет доступа',   permissions: [] },
-    { code: 'viewer', label: 'Просмотр',       permissions: [P.ASSISTANTS_VIEW] },
-    { code: 'editor', label: 'Редактирование', permissions: [P.ASSISTANTS_VIEW, P.ASSISTANTS_CREATE, P.ASSISTANTS_EDIT, P.ASSISTANTS_DELETE, P.ASSISTANTS_ACTIONS_MANAGE, P.ASSISTANTS_ACTIONS_EXECUTE] },
+  agents: [
+    { code: 'none', label: 'Нет доступа', permissions: [] },
+    { code: 'viewer', label: 'Просмотр', permissions: agentViewerPermissions },
+    { code: 'editor', label: 'Редактирование', permissions: agentEditorPermissions },
+    { code: 'manager', label: 'Управление', permissions: [...agentEditorPermissions, P.RULES_MANAGE, P.MEMORY_MANAGE, P.WORKSPACE_INSTRUCTIONS_MANAGE] },
   ],
   workflows: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
@@ -415,13 +435,6 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Поиск и чтение страниц', permissions: [P.WEB_USE] },
   ],
-  // Инструкции, справочник и правила пространства читают все участники; «Просмотр» добавляет вкладку «Правила»
-  // с журналом, «Управление» — правку всего, что меняет поведение агента в пространстве.
-  agent: [
-    { code: 'none',   label: 'Нет доступа',   permissions: [] },
-    { code: 'viewer', label: 'Просмотр',       permissions: [P.RULES_VIEW] },
-    { code: 'editor', label: 'Управление',     permissions: [P.RULES_VIEW, P.RULES_MANAGE, P.MEMORY_MANAGE, P.WORKSPACE_INSTRUCTIONS_MANAGE] },
-  ],
   models_api: [
     { code: 'none',   label: 'Нет доступа',   permissions: [] },
     { code: 'editor', label: 'Подключение IDE и программ', permissions: [P.MODELS_API_USE] },
@@ -432,6 +445,23 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'manager', label: 'Компьютеры участников пространства', permissions: [P.DEVICES_USE, P.DEVICES_MANAGE] },
   ],
 };
+
+/** Update only explicitly edited modules. Preserve every other grant verbatim. */
+export function applyRoleLevelChanges(
+  original: readonly string[],
+  changes: Partial<Record<PermissionModule, AccessLevelCode>>,
+): string[] {
+  const result = new Set(canonicalPermissionIds(original));
+  for (const module of PERMISSION_MODULES) {
+    const level = MODULE_ACCESS_LEVELS[module].find(item => item.code === changes[module]);
+    if (!level) continue;
+    for (const preset of MODULE_ACCESS_LEVELS[module]) {
+      for (const id of preset.permissions) result.delete(id);
+    }
+    for (const id of level.permissions) result.add(id);
+  }
+  return [...result];
+}
 
 /** Convert per-module access levels to a flat permission ID array. */
 export function levelsToPermissions(
@@ -456,7 +486,7 @@ export function levelsToPermissions(
 export function permissionsToLevels(
   permissions: readonly string[],
 ): Record<PermissionModule, AccessLevelCode> {
-  const permSet = new Set(permissions);
+  const permSet = new Set(canonicalPermissionIds(permissions));
   const result = {} as Record<PermissionModule, AccessLevelCode>;
 
   for (const module of PERMISSION_MODULES) {
@@ -468,7 +498,8 @@ export function permissionsToLevels(
         break;
       }
     }
-    result[module] = matched.code;
+    const extraGrants = levels.some(level => level.permissions.some(id => permSet.has(id) && !matched.permissions.includes(id)));
+    result[module] = module === 'agents' && extraGrants ? 'custom' : matched.code;
   }
 
   return result;
@@ -500,12 +531,12 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.KB_EXPORT, module: 'kb', action: 'export', description: 'Экспорт баз знаний', isSensitive: false },
   { id: P.KB_ACCESS_MANAGE, module: 'kb', action: 'access:manage', description: 'Управление доступом к ресурсам KB', isSensitive: true },
   { id: P.KB_SHARE_MANAGE, module: 'kb', action: 'share:manage', description: 'Расшаривание баз знаний другим пространствам (on-prem)', isSensitive: true },
-  { id: P.ASSISTANTS_VIEW, module: 'assistants', action: 'view', description: 'Просмотр ассистентов', isSensitive: false },
-  { id: P.ASSISTANTS_CREATE, module: 'assistants', action: 'create', description: 'Создание ассистентов', isSensitive: false },
-  { id: P.ASSISTANTS_EDIT, module: 'assistants', action: 'edit', description: 'Редактирование ассистентов', isSensitive: false },
-  { id: P.ASSISTANTS_DELETE, module: 'assistants', action: 'delete', description: 'Удаление ассистентов', isSensitive: true },
-  { id: P.ASSISTANTS_ACTIONS_MANAGE, module: 'assistants', action: 'actions:manage', description: 'Управление действиями ассистентов', isSensitive: false },
-  { id: P.ASSISTANTS_ACTIONS_EXECUTE, module: 'assistants', action: 'actions:execute', description: 'Выполнение действий ассистентов', isSensitive: false },
+  { id: P.AGENTS_VIEW, module: 'agents', action: 'view', description: 'Просмотр агентов', isSensitive: false },
+  { id: P.AGENTS_CREATE, module: 'agents', action: 'create', description: 'Создание агентов', isSensitive: false },
+  { id: P.AGENTS_EDIT, module: 'agents', action: 'edit', description: 'Редактирование агентов', isSensitive: false },
+  { id: P.AGENTS_DELETE, module: 'agents', action: 'delete', description: 'Удаление агентов', isSensitive: true },
+  { id: P.AGENTS_ACTIONS_MANAGE, module: 'agents', action: 'actions:manage', description: 'Управление действиями агентов', isSensitive: false },
+  { id: P.AGENTS_ACTIONS_EXECUTE, module: 'agents', action: 'actions:execute', description: 'Выполнение действий агентов', isSensitive: false },
   { id: P.WORKFLOWS_VIEW, module: 'workflows', action: 'view', description: 'Просмотр workflow-сценариев и шаблонов', isSensitive: false },
   { id: P.WORKFLOWS_EXECUTE, module: 'workflows', action: 'execute', description: 'Запуск опубликованных workflow-сценариев', isSensitive: false },
   { id: P.WORKFLOWS_CREATE, module: 'workflows', action: 'create', description: 'Создание workflow-сценариев', isSensitive: false },
@@ -544,10 +575,10 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.DASHBOARD_VIEW, module: 'dashboard', action: 'view', description: 'Просмотр дашборда', isSensitive: false },
   { id: P.WORKSPACE_ANALYTICS_VIEW, module: 'workspace_analytics', action: 'view', description: 'Отчёт об активности и расходе участников пространства', isSensitive: true },
   { id: P.BUILDS_VIEW, module: 'builds', action: 'view', description: 'Просмотр витрины сборок', isSensitive: false },
-  { id: P.BUILDS_PUBLISH, module: 'builds', action: 'publish', description: 'Публикация ассистента как сборки', isSensitive: true },
+  { id: P.BUILDS_PUBLISH, module: 'builds', action: 'publish', description: 'Публикация агента как сборки', isSensitive: true },
   { id: P.BUILDS_INSTALL, module: 'builds', action: 'install', description: 'Установка сборки в рабочее пространство', isSensitive: false },
   { id: P.SKILLS_AUTHOR, module: 'skills', action: 'author', description: 'Создание и редактирование навыков пространства', isSensitive: false },
-  { id: P.SKILLS_PUBLISH, module: 'skills', action: 'publish', description: 'Публикация навыка по умолчанию для ассистентов пространства', isSensitive: true },
+  { id: P.SKILLS_PUBLISH, module: 'skills', action: 'publish', description: 'Публикация навыка по умолчанию для агентов пространства', isSensitive: true },
   { id: P.GLOBAL_VARIABLES_READ, module: 'global_variables', action: 'read', description: 'Просмотр глобальных переменных пространства', isSensitive: false },
   { id: P.GLOBAL_VARIABLES_WRITE, module: 'global_variables', action: 'write', description: 'Изменение значений глобальных переменных пространства', isSensitive: false },
   { id: P.GLOBAL_VARIABLES_READ_SECRET, module: 'global_variables', action: 'read_secret', description: 'Просмотр секретных значений глобальных переменных', isSensitive: true },
@@ -555,7 +586,7 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.PROMPTS_VIEW, module: 'prompts', action: 'view', description: 'Просмотр библиотеки промптов и стартовых подсказок', isSensitive: false },
   { id: P.PROMPTS_MANAGE, module: 'prompts', action: 'manage', description: 'Управление промптами пространства (создание, правка, удаление)', isSensitive: false },
   { id: P.WEB_USE, module: 'web', action: 'use', description: 'Поиск и чтение страниц в интернете агентом (если функция включена пространству)', isSensitive: false },
-  { id: P.MEMORY_MANAGE, module: 'memory', action: 'manage', description: 'Запись памяти рабочего пространства — фактов, которые ассистенты учитывают у всех участников', isSensitive: true },
+  { id: P.MEMORY_MANAGE, module: 'memory', action: 'manage', description: 'Запись памяти рабочего пространства — фактов, которые агенты учитывают у всех участников', isSensitive: true },
   { id: P.RULES_VIEW, module: 'rules', action: 'view', description: 'Просмотр правил агента рабочего пространства и журнала их срабатываний', isSensitive: false },
   { id: P.RULES_MANAGE, module: 'rules', action: 'manage', description: 'Включение, смена режима, выключение и откат правил агента рабочего пространства', isSensitive: true },
   { id: P.MODELS_API_USE, module: 'models_api', action: 'use', description: 'Обращение к моделям пространства из IDE и программ личным API-токеном (если доступ включён администратором установки)', isSensitive: false },

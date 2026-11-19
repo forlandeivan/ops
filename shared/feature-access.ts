@@ -7,18 +7,18 @@ export const platformFeatureKeys = [
   "knowledge.ai_import",
   "knowledge.web_crawl",
   "assistants.execution_policy",
-  "assistants.builds",
+  "agents.builds",
   "assistants.reasoning",
 ] as const;
 export type PlatformFeatureKey = (typeof platformFeatureKeys)[number];
 
-export const platformFeatureAreas = ["knowledge", "assistants"] as const;
+export const platformFeatureAreas = ["knowledge", "agents"] as const;
 export type PlatformFeatureArea = (typeof platformFeatureAreas)[number];
 
 export const platformFeatureValueKinds = [
   "boolean",
   "assistant_execution_policy",
-  "assistant_builds_access",
+  "agent_builds_access",
 ] as const;
 export type PlatformFeatureValueKind = (typeof platformFeatureValueKinds)[number];
 
@@ -34,8 +34,8 @@ export type AssistantExecutionPolicyValue = {
 };
 
 /**
- * Поднастройки доступа к сборкам внутри одной фичи `assistants.builds`:
- *  - canPublish — публикация ассистента как сборки;
+ * Поднастройки доступа к сборкам внутри одной фичи `agents.builds`:
+ *  - canPublish — публикация агента как сборки;
  *  - canConsume — доступ к витрине (просмотр) + установка/скачивание сборок.
  * Флаги независимы; гейтятся раздельно в рантайме.
  */
@@ -129,28 +129,28 @@ export const platformFeatureCatalog: Record<PlatformFeatureKey, PlatformFeatureC
   },
   "assistants.execution_policy": {
     key: "assistants.execution_policy",
-    title: "Режим сценария в Ассистентах",
+    title: "Режим сценария в Агентах",
     description:
-      "Управляет доступными режимами обработки для Ассистентов рабочего пространства и доступностью переключателя «Чат/Агент» в окне чата.",
-    area: "assistants",
-    areaLabel: "Ассистенты",
+      "Управляет доступными режимами обработки для Агентов рабочего пространства и доступностью переключателя «Чат/Агент» в окне чата.",
+    area: "agents",
+    areaLabel: "Агенты",
     valueKind: "assistant_execution_policy",
     defaultValue: {
       allowedExecutionModes: ["standard"],
       allowedWorkflowSources: [],
     },
   },
-  "assistants.builds": {
-    key: "assistants.builds",
-    title: "Сборки ассистентов: публикация и витрина",
+  "agents.builds": {
+    key: "agents.builds",
+    title: "Сборки агентов: публикация и витрина",
     description:
       "Управляет доступом пространства к сборкам через две независимые поднастройки: " +
-      "«Публикация сборок» (выкладывать ассистента как сборку) и «Витрина и скачивание» " +
+      "«Публикация сборок» (выкладывать агента как сборку) и «Витрина и скачивание» " +
       "(видеть витрину сборок и устанавливать их). По умолчанию публикация выключена, " +
       "а витрина и скачивание открыты всем пространствам.",
-    area: "assistants",
-    areaLabel: "Ассистенты",
-    valueKind: "assistant_builds_access",
+    area: "agents",
+    areaLabel: "Агенты",
+    valueKind: "agent_builds_access",
     defaultValue: {
       canPublish: false,
       canConsume: true,
@@ -162,8 +162,8 @@ export const platformFeatureCatalog: Record<PlatformFeatureKey, PlatformFeatureC
     description:
       "Разрешает пользователям включать режим размышления (reasoning/thinking) в окне чата. " +
       "По умолчанию выключено даже для моделей с поддержкой reasoning.",
-    area: "assistants",
-    areaLabel: "Ассистенты",
+    area: "agents",
+    areaLabel: "Агенты",
     valueKind: "boolean",
     defaultValue: false,
   },
@@ -221,7 +221,7 @@ export function parseFeatureAccessRuleValue(
     return z.boolean().parse(value);
   }
 
-  if (featureKey === "assistants.builds") {
+  if (featureKey === "agents.builds") {
     return parseBuildsAccessValue(value);
   }
 

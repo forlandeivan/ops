@@ -242,6 +242,8 @@ export const workflowRunEventSchema = z.object({
 export const workflowRunSummarySchema = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().min(1),
+  agentId: z.string().min(1).optional(),
+  agentName: z.string().nullable().optional(),
   assistantId: z.string().min(1),
   assistantName: z.string().nullable(),
   chatId: z.string().min(1),

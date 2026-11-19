@@ -3,8 +3,8 @@
 
 import type { WorkflowBundleV1Dto } from "@shared/workflows";
 import type {
-  AssistantWorkflowRunDispatchSource,
-  AssistantWorkflowRunStatus,
+  AgentWorkflowRunDispatchSource,
+  AgentWorkflowRunStatus,
 } from "@shared/schema";
 
 export type WorkflowInputKind = "message" | "transcript" | "file";
@@ -48,15 +48,17 @@ export type WorkflowEnqueueDebugContext = {
  * (`POST /v1/workflow-runs/enqueue`) после cutover WD4.2f. Все поля JSON-сериализуемы.
  */
 export type WorkflowEnqueuePayload = {
+  /** Repeat transport attempts with exactly the persisted payload. Scoped to workspace. */
+  idempotencyKey?: string;
   workspaceId: string;
-  assistantId: string;
+  agentId: string;
   chatId: string;
   userId: string | null;
   userMessageId?: string | null;
-  dispatchSource?: AssistantWorkflowRunDispatchSource;
+  dispatchSource?: AgentWorkflowRunDispatchSource;
   // Входы резолва версии — эхо для аудита/контракта (резолв уже выполнен продьюсером; хендлер их НЕ использует).
   workflowDefinitionIdOverride?: string | null;
-  allowNonWorkflowAssistant?: boolean;
+  allowNonWorkflowAgent?: boolean;
   envelope: WorkflowChatInputEnvelope;
   resolvedVersion: {
     workflowDefinitionId: string;
@@ -73,9 +75,32 @@ export type WorkflowEnqueuePayload = {
   debug?: WorkflowEnqueueDebugContext;
 };
 
+/** Queue rows written before the rename can be dispatched after an upgrade. */
+type StoredEnqueuePayload = Omit<WorkflowEnqueuePayload, "agentId"> & {
+  agentId?: string;
+  assistantId?: string;
+  allowNonWorkflowAssistant?: boolean;
+};
+
+export function normalizeStoredEnqueuePayload(payload: StoredEnqueuePayload): WorkflowEnqueuePayload {
+  const { assistantId, allowNonWorkflowAssistant, ...current } = payload;
+  if (current.agentId !== undefined && assistantId !== undefined && current.agentId !== assistantId) {
+    throw new Error("Workflow enqueue payload contains conflicting agent IDs");
+  }
+  if (current.allowNonWorkflowAgent !== undefined && allowNonWorkflowAssistant !== undefined
+      && current.allowNonWorkflowAgent !== allowNonWorkflowAssistant) {
+    throw new Error("Workflow enqueue payload contains conflicting execution flags");
+  }
+  const agentId = current.agentId ?? assistantId;
+  if (typeof agentId !== "string" || !agentId.trim()) throw new Error("Workflow enqueue payload requires an agent ID");
+  return allowNonWorkflowAssistant === undefined
+    ? { ...current, agentId }
+    : { ...current, agentId, allowNonWorkflowAgent: current.allowNonWorkflowAgent ?? allowNonWorkflowAssistant };
+}
+
 export type WorkflowRunAwaitResult = {
   /** Терминальный статус рана, либо "timeout" (включая вход в waiting-паузу), либо "not_found". */
-  status: AssistantWorkflowRunStatus | "timeout" | "not_found";
+  status: AgentWorkflowRunStatus | "timeout" | "not_found";
   responsePayload: Record<string, unknown> | null;
   errorCode: string | null;
   errorMessage: string | null;

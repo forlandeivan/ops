@@ -3,15 +3,15 @@
 //
 // Контракт «монолит ↔ workflow» (gateway-contract.md v1). Все DTO ниже JSON-сериализуемы: это HTTP-тело
 // direction-1 сервера. Форма ДОЛЖНА совпадать 1:1 с сигнатурами функций движка
-// (`assistant-workflow-runtime-service.ts`) — иначе HTTP-путь разъедется с in-process семантикой.
+// (`agent-workflow-runtime-service.ts`) — иначе HTTP-путь разъедется с in-process семантикой.
 //
 // Что переиспользуется, а не дублируется:
 // - `WorkflowEnqueuePayload`, `WorkflowRunAwaitResult` — @shared/workflow-enqueue-types (ре-экспорт ниже).
 // - `WorkflowRunSummaryDto` / `WorkflowRunDetailDto` / `WorkflowRunEventDto` — @shared/workflows.
-// - `AssistantWorkflow*Summary` / `*Submission` / `*Decision` — @shared/assistants.
-// - `AssistantWorkflowRun` — @shared/schema.
+// - `AssistantWorkflow*Summary` / `*Submission` / `*Decision` — @shared/agents.
+// - `AgentWorkflowRun` — @shared/schema.
 
-import type { AssistantWorkflowRun } from "@shared/schema";
+import type { AgentWorkflowRun } from "@shared/schema";
 import type { WorkflowRunSummaryDto } from "@shared/workflows";
 
 // Ре-экспорт контрактных типов постановки/ожидания (SoT — @shared/workflow-enqueue-types), чтобы порт
@@ -283,11 +283,11 @@ export type WorkflowExternalTranscriptionWait = {
 
 // JSON-снимок ряда прогона в HTTP-ответе op #18: через шов (`res.json`) `Date`-поля ряда
 // (createdAt/updatedAt/…) сериализуются в ISO-строки. Типизируем `run` ЧЕСТНО (Date→string), а не как
-// сырой `AssistantWorkflowRun` (тип-ложь: Date-методы в HTTP-режиме недоступны). Единственный текущий
+// сырой `AgentWorkflowRun` (тип-ложь: Date-методы в HTTP-режиме недоступны). Единственный текущий
 // потребитель (transcribe.routes) читает только `externalWait.*` и `run` не трогает.
 type JsonDateToString<V> = V extends Date ? string : V;
 type JsonSerializedWorkflowRun = {
-  [K in keyof AssistantWorkflowRun]: JsonDateToString<AssistantWorkflowRun[K]>;
+  [K in keyof AgentWorkflowRun]: JsonDateToString<AgentWorkflowRun[K]>;
 };
 
 /** Результат `findWaitingExternalTranscriptionContextByOperationId`. */

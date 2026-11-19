@@ -28,7 +28,7 @@ import type { RetentionStore } from "../../server/janitor/tasks/pg-retention-tas
 
 function makePolicy(): CleanupPolicyDto {
   return {
-    resourceKey: "pg.assistant_executions",
+    resourceKey: "pg.agent_response_executions",
     label: "Строки запусков LLM",
     description: "",
     category: "llm",
@@ -95,7 +95,7 @@ describe("runPolicy + shouldAbort", () => {
     expect(outcome.deleted).toBe(10);
     expect(recordRunMock).toHaveBeenCalledTimes(1);
     expect(recordRunMock.mock.calls[0][0]).toMatchObject({
-      resourceKey: "pg.assistant_executions",
+      resourceKey: "pg.agent_response_executions",
       status: "partial",
       deletedCount: 10,
     });

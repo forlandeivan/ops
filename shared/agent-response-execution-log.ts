@@ -24,7 +24,7 @@ import type { JsonValue } from "./json-types";
 /**
  * Общий статус запуска ассистента.
  */
-export const ASSISTANT_EXECUTION_STATUS = {
+export const AGENT_RESPONSE_EXECUTION_STATUS = {
   PENDING: "pending",
   RUNNING: "running",
   SUCCESS: "success",
@@ -32,16 +32,16 @@ export const ASSISTANT_EXECUTION_STATUS = {
   TIMEOUT: "timeout",
   CANCELLED: "cancelled",
 } as const;
-export type AssistantExecutionStatus = (typeof ASSISTANT_EXECUTION_STATUS)[keyof typeof ASSISTANT_EXECUTION_STATUS];
+export type AgentResponseExecutionStatus = (typeof AGENT_RESPONSE_EXECUTION_STATUS)[keyof typeof AGENT_RESPONSE_EXECUTION_STATUS];
 
 /**
  * Источник запуска (Unica Chat, кастомный ассистент, playground и т.д.).
  */
-export type AssistantExecutionSource =
+export type AgentResponseExecutionSource =
   | "system_unica_chat"
   | "manual_action"
   | "auto_action"
-  | "workspace_assistant"
+  | "workspace_agent"
   | "playground"
   | "api";
 
@@ -54,19 +54,19 @@ export type AssistantExecutionSource =
  * - (userId, startedAt DESC) — разбор активности пользователя.
  * - (chatId) — переход из UI чата к журналу.
  */
-export interface AssistantExecutionRecord {
+export interface AgentResponseExecutionRecord {
   id: string;
   workspaceId: string;
   userId: string | null;
-  assistantId: string;
+  agentId: string;
   chatId: string | null;
   userMessageId: string | null;
-  assistantMessageId: string | null;
+  agentMessageId: string | null;
   modelId?: string | null;
   modelKey?: string | null;
   modelName?: string | null;
-  source: AssistantExecutionSource;
-  status: AssistantExecutionStatus;
+  source: AgentResponseExecutionSource;
+  status: AgentResponseExecutionStatus;
   hasStepErrors: boolean;
   startedAt: Date;
   finishedAt: Date | null;
@@ -81,7 +81,7 @@ export interface AssistantExecutionRecord {
  * Набор типов шагов. Список синхронизирован с фактическим пайплайном (routes.ts + chat-service.ts
  * + llm-client.ts). При добавлении шагов реальной логики надо расширять enum и pipeline ниже.
  */
-export type AssistantExecutionStepType =
+export type AgentResponseExecutionStepType =
   | "RECEIVE_HTTP_REQUEST"
   | "VALIDATE_REQUEST"
   | "WRITE_USER_MESSAGE"
@@ -121,14 +121,14 @@ export type AssistantExecutionStepType =
 /**
  * Статус шага. Для канваса достаточно success/error/skipped.
  */
-export const ASSISTANT_EXECUTION_STEP_STATUS = {
+export const AGENT_RESPONSE_EXECUTION_STEP_STATUS = {
   PENDING: "pending",
   RUNNING: "running",
   SUCCESS: "success",
   ERROR: "error",
   SKIPPED: "skipped",
 } as const;
-export type AssistantExecutionStepStatus = (typeof ASSISTANT_EXECUTION_STEP_STATUS)[keyof typeof ASSISTANT_EXECUTION_STEP_STATUS];
+export type AgentResponseExecutionStepStatus = (typeof AGENT_RESPONSE_EXECUTION_STEP_STATUS)[keyof typeof AGENT_RESPONSE_EXECUTION_STEP_STATUS];
 
 /**
  * Запись шага выполнения.
@@ -138,12 +138,12 @@ export type AssistantExecutionStepStatus = (typeof ASSISTANT_EXECUTION_STEP_STAT
  * - при необходимости маскировать PII (например, вытаскивать только длину строки или hash),
  *   чтобы журнал можно было безопасно показывать в UI.
  */
-export interface AssistantExecutionStepRecord {
+export interface AgentResponseExecutionStepRecord {
   id: string;
   executionId: string;
   order: number;
-  type: AssistantExecutionStepType;
-  status: AssistantExecutionStepStatus;
+  type: AgentResponseExecutionStepType;
+  status: AgentResponseExecutionStepStatus;
   startedAt: Date;
   finishedAt: Date | null;
   inputPayload: JsonValue;
@@ -157,7 +157,7 @@ export interface AssistantExecutionStepRecord {
  * Формальная последовательность шагов пайплайна для системного Unica Chat.
  * Для других источников (playground, API) может отличаться.
  */
-export const UNICA_CHAT_PIPELINE: readonly AssistantExecutionStepType[] = [
+export const UNICA_CHAT_PIPELINE: readonly AgentResponseExecutionStepType[] = [
   "RECEIVE_HTTP_REQUEST",
   "VALIDATE_REQUEST",
   "WRITE_USER_MESSAGE",
@@ -174,18 +174,18 @@ export const UNICA_CHAT_PIPELINE: readonly AssistantExecutionStepType[] = [
 /**
  * Вспомогательные статусы: помогает быстро понять, завершён ли запуск.
  */
-export function isTerminalExecutionStatus(status: AssistantExecutionStatus): boolean {
+export function isTerminalExecutionStatus(status: AgentResponseExecutionStatus): boolean {
   return (
-    status === ASSISTANT_EXECUTION_STATUS.SUCCESS ||
-    status === ASSISTANT_EXECUTION_STATUS.ERROR ||
-    status === ASSISTANT_EXECUTION_STATUS.TIMEOUT ||
-    status === ASSISTANT_EXECUTION_STATUS.CANCELLED
+    status === AGENT_RESPONSE_EXECUTION_STATUS.SUCCESS ||
+    status === AGENT_RESPONSE_EXECUTION_STATUS.ERROR ||
+    status === AGENT_RESPONSE_EXECUTION_STATUS.TIMEOUT ||
+    status === AGENT_RESPONSE_EXECUTION_STATUS.CANCELLED
   );
 }
 
 /**
  * Проверяет, может ли шаг иметь данные стрима. Например, STREAM_TO_CLIENT_START/FINISH.
  */
-export function canStepEmitStreamData(type: AssistantExecutionStepType): boolean {
+export function canStepEmitStreamData(type: AgentResponseExecutionStepType): boolean {
   return type === "STREAM_TO_CLIENT_START" || type === "STREAM_TO_CLIENT_FINISH";
 }

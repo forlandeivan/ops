@@ -1,17 +1,17 @@
 import { z } from "zod";
 
-export const ASSISTANT_LLM_POLICY_ID = "singleton";
+export const AGENT_LLM_POLICY_ID = "singleton";
 
-export const assistantLlmPolicyEffectiveSources = ["configured", "fallback", "none"] as const;
-export type AssistantLlmPolicyEffectiveSource = (typeof assistantLlmPolicyEffectiveSources)[number];
+export const agentLlmPolicyEffectiveSources = ["configured", "fallback", "none"] as const;
+export type AgentLlmPolicyEffectiveSource = (typeof agentLlmPolicyEffectiveSources)[number];
 
-export const assistantLlmPolicyEffectiveStatuses = [
+export const agentLlmPolicyEffectiveStatuses = [
   "configured",
   "fallback_default_missing",
   "fallback_default_unavailable",
   "no_available_model",
 ] as const;
-export type AssistantLlmPolicyEffectiveStatus = (typeof assistantLlmPolicyEffectiveStatuses)[number];
+export type AgentLlmPolicyEffectiveStatus = (typeof agentLlmPolicyEffectiveStatuses)[number];
 
 function normalizeModelIdList(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -30,7 +30,7 @@ function normalizeModelIdList(value: unknown): string[] {
   return Array.from(unique);
 }
 
-export const updateAssistantLlmPolicySchema = z.object({
+export const updateAgentLlmPolicySchema = z.object({
   defaultModelId: z
     .union([z.string(), z.null()])
     .optional()
@@ -47,22 +47,22 @@ export const updateAssistantLlmPolicySchema = z.object({
     .transform((value) => normalizeModelIdList(value)),
 });
 
-export const assistantLlmPolicyEffectiveSchema = z.object({
+export const agentLlmPolicyEffectiveSchema = z.object({
   modelId: z.string().nullable(),
   modelKey: z.string().nullable(),
   providerId: z.string().nullable(),
   displayName: z.string().nullable(),
   providerName: z.string().nullable(),
-  source: z.enum(assistantLlmPolicyEffectiveSources),
-  status: z.enum(assistantLlmPolicyEffectiveStatuses),
+  source: z.enum(agentLlmPolicyEffectiveSources),
+  status: z.enum(agentLlmPolicyEffectiveStatuses),
 });
 
-export const assistantLlmPolicySchema = z.object({
+export const agentLlmPolicySchema = z.object({
   defaultModelId: z.string().nullable(),
   disabledModelIds: z.array(z.string()),
-  effective: assistantLlmPolicyEffectiveSchema,
-  remediatedAssistants: z.number().int().nonnegative().optional(),
+  effective: agentLlmPolicyEffectiveSchema,
+  remediatedAgents: z.number().int().nonnegative().optional(),
 });
 
-export type AssistantLlmPolicyDto = z.infer<typeof assistantLlmPolicySchema>;
-export type UpdateAssistantLlmPolicyDto = z.infer<typeof updateAssistantLlmPolicySchema>;
+export type AgentLlmPolicyDto = z.infer<typeof agentLlmPolicySchema>;
+export type UpdateAgentLlmPolicyDto = z.infer<typeof updateAgentLlmPolicySchema>;

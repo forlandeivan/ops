@@ -10,7 +10,7 @@
  */
 
 import type { Request } from "express";
-import type { AssistantDto } from "@shared/assistants";
+import type { AgentDto } from "@shared/agents";
 import type { WorkflowKnowledgeRagConfig } from "@shared/workflow-compiler";
 import type { RagPipelineExecutionSource } from "@shared/rag-errors";
 import type { SearchProfileDto } from "@shared/search-profiles";
@@ -122,7 +122,7 @@ export type RunKnowledgeBaseRagPipeline = (options: {
 /** server/chat-rag.ts callRagForAssistantChat. */
 export type CallRagForAssistantChatFacade = (options: {
   req: Request;
-  assistant: AssistantDto;
+  assistant: AgentDto;
   workspaceId: string;
   userMessage: string;
   chatId?: string;

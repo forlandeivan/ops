@@ -1,18 +1,19 @@
 import { z } from "zod";
+import { normalizeLegacyKeys } from "./legacy-keys";
 
-export const assistantActionSchedulerModes = ["fair", "fifo"] as const;
-export type AssistantActionSchedulerMode = (typeof assistantActionSchedulerModes)[number];
+export const agentActionSchedulerModes = ["fair", "fifo"] as const;
+export type AgentActionSchedulerMode = (typeof agentActionSchedulerModes)[number];
 
 export const MIN_LLM_COMPLETION_REQUEST_TIMEOUT_MS = 5_000;
 export const MAX_LLM_COMPLETION_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
-export const MIN_ASSISTANT_ACTION_WORKER_CONCURRENCY = 1;
-export const MAX_ASSISTANT_ACTION_WORKER_CONCURRENCY = 64;
-export const MIN_ASSISTANT_ACTION_LEASE_TTL_MS = 5_000;
-export const MAX_ASSISTANT_ACTION_LEASE_TTL_MS = 30 * 60 * 1000;
-export const MIN_ASSISTANT_ACTION_HEARTBEAT_INTERVAL_MS = 1_000;
-export const MAX_ASSISTANT_ACTION_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
-export const MIN_ASSISTANT_ACTION_TENANT_LIMIT = 1;
-export const MAX_ASSISTANT_ACTION_TENANT_LIMIT = 64;
+export const MIN_AGENT_ACTION_WORKER_CONCURRENCY = 1;
+export const MAX_AGENT_ACTION_WORKER_CONCURRENCY = 64;
+export const MIN_AGENT_ACTION_LEASE_TTL_MS = 5_000;
+export const MAX_AGENT_ACTION_LEASE_TTL_MS = 30 * 60 * 1000;
+export const MIN_AGENT_ACTION_HEARTBEAT_INTERVAL_MS = 1_000;
+export const MAX_AGENT_ACTION_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+export const MIN_AGENT_ACTION_TENANT_LIMIT = 1;
+export const MAX_AGENT_ACTION_TENANT_LIMIT = 64;
 
 const llmRuntimePolicyBaseSchema = z.object({
   llmCompletionRequestTimeoutMs: z
@@ -20,49 +21,63 @@ const llmRuntimePolicyBaseSchema = z.object({
     .int()
     .min(MIN_LLM_COMPLETION_REQUEST_TIMEOUT_MS)
     .max(MAX_LLM_COMPLETION_REQUEST_TIMEOUT_MS),
-  assistantActionWorkerConcurrency: z
+  agentActionWorkerConcurrency: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_WORKER_CONCURRENCY)
-    .max(MAX_ASSISTANT_ACTION_WORKER_CONCURRENCY),
-  assistantActionLeaseTtlMs: z
+    .min(MIN_AGENT_ACTION_WORKER_CONCURRENCY)
+    .max(MAX_AGENT_ACTION_WORKER_CONCURRENCY),
+  agentActionLeaseTtlMs: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_LEASE_TTL_MS)
-    .max(MAX_ASSISTANT_ACTION_LEASE_TTL_MS),
-  assistantActionHeartbeatIntervalMs: z
+    .min(MIN_AGENT_ACTION_LEASE_TTL_MS)
+    .max(MAX_AGENT_ACTION_LEASE_TTL_MS),
+  agentActionHeartbeatIntervalMs: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_HEARTBEAT_INTERVAL_MS)
-    .max(MAX_ASSISTANT_ACTION_HEARTBEAT_INTERVAL_MS),
-  assistantActionMaxConcurrentPerWorkspace: z
+    .min(MIN_AGENT_ACTION_HEARTBEAT_INTERVAL_MS)
+    .max(MAX_AGENT_ACTION_HEARTBEAT_INTERVAL_MS),
+  agentActionMaxConcurrentPerWorkspace: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_TENANT_LIMIT)
-    .max(MAX_ASSISTANT_ACTION_TENANT_LIMIT),
-  assistantActionMaxConcurrentPerAssistant: z
+    .min(MIN_AGENT_ACTION_TENANT_LIMIT)
+    .max(MAX_AGENT_ACTION_TENANT_LIMIT),
+  agentActionMaxConcurrentPerAgent: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_TENANT_LIMIT)
-    .max(MAX_ASSISTANT_ACTION_TENANT_LIMIT),
-  assistantActionMaxConcurrentPerUser: z
+    .min(MIN_AGENT_ACTION_TENANT_LIMIT)
+    .max(MAX_AGENT_ACTION_TENANT_LIMIT),
+  agentActionMaxConcurrentPerUser: z
     .number()
     .int()
-    .min(MIN_ASSISTANT_ACTION_TENANT_LIMIT)
-    .max(MAX_ASSISTANT_ACTION_TENANT_LIMIT),
-  assistantActionSchedulerMode: z.enum(assistantActionSchedulerModes),
+    .min(MIN_AGENT_ACTION_TENANT_LIMIT)
+    .max(MAX_AGENT_ACTION_TENANT_LIMIT),
+  agentActionSchedulerMode: z.enum(agentActionSchedulerModes),
 });
 
 export const llmRuntimePolicySchema = llmRuntimePolicyBaseSchema
   .refine(
-    (value) => value.assistantActionHeartbeatIntervalMs < value.assistantActionLeaseTtlMs,
+    (value) => value.agentActionHeartbeatIntervalMs < value.agentActionLeaseTtlMs,
     {
       message: "Интервал сигнала жизни должен быть меньше срока аренды задачи.",
-      path: ["assistantActionHeartbeatIntervalMs"],
+      path: ["agentActionHeartbeatIntervalMs"],
     },
   );
 
-export const updateLlmRuntimePolicySchema = llmRuntimePolicyBaseSchema
+const legacyRuntimeKeys = {
+  assistantActionWorkerConcurrency: "agentActionWorkerConcurrency",
+  assistantActionLeaseTtlMs: "agentActionLeaseTtlMs",
+  assistantActionHeartbeatIntervalMs: "agentActionHeartbeatIntervalMs",
+  assistantActionMaxConcurrentPerWorkspace: "agentActionMaxConcurrentPerWorkspace",
+  assistantActionMaxConcurrentPerAssistant: "agentActionMaxConcurrentPerAgent",
+  assistantActionMaxConcurrentPerUser: "agentActionMaxConcurrentPerUser",
+  assistantActionSchedulerMode: "agentActionSchedulerMode",
+} as const;
+
+export function withLegacyRuntimeKeys(policy: LlmRuntimePolicyDto) {
+  return { ...policy, ...Object.fromEntries(Object.entries(legacyRuntimeKeys).map(([legacy, key]) => [legacy, policy[key]])) };
+}
+
+const runtimePolicyPatch = llmRuntimePolicyBaseSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0, {
     message: "Нужно передать хотя бы одно поле параметров выполнения.",
@@ -70,18 +85,23 @@ export const updateLlmRuntimePolicySchema = llmRuntimePolicyBaseSchema
   .refine(
     (value) => {
       if (
-        value.assistantActionLeaseTtlMs === undefined ||
-        value.assistantActionHeartbeatIntervalMs === undefined
+        value.agentActionLeaseTtlMs === undefined ||
+        value.agentActionHeartbeatIntervalMs === undefined
       ) {
         return true;
       }
-      return value.assistantActionHeartbeatIntervalMs < value.assistantActionLeaseTtlMs;
+      return value.agentActionHeartbeatIntervalMs < value.agentActionLeaseTtlMs;
     },
     {
       message: "Интервал сигнала жизни должен быть меньше срока аренды задачи.",
-      path: ["assistantActionHeartbeatIntervalMs"],
+      path: ["agentActionHeartbeatIntervalMs"],
     },
   );
+
+export const updateLlmRuntimePolicySchema = z.preprocess(
+  (input, ctx) => normalizeLegacyKeys(input, ctx, legacyRuntimeKeys),
+  runtimePolicyPatch,
+);
 
 export type LlmRuntimePolicyDto = z.infer<typeof llmRuntimePolicySchema>;
 export type UpdateLlmRuntimePolicyDto = z.infer<typeof updateLlmRuntimePolicySchema>;

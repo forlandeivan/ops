@@ -1,6 +1,6 @@
 /**
  * @shared-фасад журнала исполнений ассистента для workflow-runtime (W2/S8 Tier-2,
- * docs/w2-workflow-packaging-plan.md §5). Подмножество `AssistantExecutionLogService`
+ * docs/w2-workflow-packaging-plan.md §5). Подмножество `AgentResponseExecutionLogService`
  * (`logStep`/`finishExecution`), которое использует ядро через `WorkflowGateway.executionLog`.
  *
  * Реализация (класс) остаётся в монолите; wire присваивает singleton-сервис полю порта, tsc
@@ -8,17 +8,17 @@
  */
 
 import type {
-  AssistantExecutionRecord,
-  AssistantExecutionStatus,
-  AssistantExecutionStepStatus,
-  AssistantExecutionStepType,
-} from "@shared/assistant-execution-log";
+  AgentResponseExecutionRecord,
+  AgentResponseExecutionStatus,
+  AgentResponseExecutionStepStatus,
+  AgentResponseExecutionStepType,
+} from "@shared/agent-response-execution-log";
 
-/** server/assistant-execution-log-service.ts — параметры записи шага исполнения. */
+/** server/agent-response-execution-log-service.ts — параметры записи шага исполнения. */
 export interface LogStepParams {
   executionId: string;
-  type: AssistantExecutionStepType;
-  status: AssistantExecutionStepStatus;
+  type: AgentResponseExecutionStepType;
+  status: AgentResponseExecutionStepStatus;
   input?: unknown;
   output?: unknown;
   errorCode?: string;
@@ -32,7 +32,7 @@ export type WorkflowGatewayExecutionLogPort = {
   logStep(params: LogStepParams): Promise<void>;
   finishExecution(
     executionId: string,
-    finalStatus: AssistantExecutionStatus,
-    extra?: Partial<Pick<AssistantExecutionRecord, "userMessageId" | "assistantMessageId">>,
+    finalStatus: AgentResponseExecutionStatus,
+    extra?: Partial<Pick<AgentResponseExecutionRecord, "userMessageId" | "agentMessageId">>,
   ): Promise<void>;
 };

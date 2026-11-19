@@ -364,7 +364,7 @@ export const fileStorageProviders = pgTable(
   }),
 );
 
-const fileKinds = ["attachment", "audio", "assistant_doc"] as const;
+const fileKinds = ["attachment", "audio", "agent_doc"] as const;
 const fileKindsEnum = pgEnum("file_kind", fileKinds);
 
 export const fileStorageTypes = ["standard_minio", "external_provider"] as const;
@@ -381,7 +381,7 @@ export const files = pgTable(
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id"),
+    agentId: varchar("agent_id"),
     chatId: varchar("chat_id"),
     messageId: varchar("message_id"),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
@@ -405,7 +405,7 @@ export const files = pgTable(
   },
   (table) => ({
     workspaceIdx: index("files_workspace_idx").on(table.workspaceId, table.createdAt),
-    assistantIdx: index("files_assistant_idx").on(table.assistantId),
+    agentIdx: index("files_agent_idx").on(table.agentId),
     chatIdx: index("files_chat_idx").on(table.chatId),
     messageIdx: index("files_message_idx").on(table.messageId),
   }),
@@ -589,7 +589,7 @@ export const workspaceUsageMonth = pgTable(
     embeddingsTokensTotal: bigint("embeddings_tokens_total", { mode: "bigint" }).notNull().default(0n),
     asrMinutesTotal: doublePrecision("asr_minutes_total").notNull().default(0),
     storageBytesTotal: bigint("storage_bytes_total", { mode: "bigint" }).notNull().default(0n),
-    assistantsCount: integer("assistants_count").notNull().default(0),
+    assistantsCount: integer("agents_count").notNull().default(0),
     actionsCount: integer("actions_count").notNull().default(0),
     knowledgeBasesCount: integer("knowledge_bases_count").notNull().default(0),
     membersCount: integer("members_count").notNull().default(0),
@@ -1652,9 +1652,9 @@ export const fileUploadLimits = pgTable("file_upload_limits", {
   chatAttachmentsTotalMaxMb: integer("chat_attachments_total_max_mb"),
   chatMaxFilesPerMessage: integer("chat_max_files_per_message"),
   // Файлы ассистента
-  assistantFileMaxSizeMb: integer("assistant_file_max_size_mb"),
-  assistantFilesPerRequest: integer("assistant_files_per_request"),
-  assistantMaterialsPerAssistant: integer("assistant_materials_per_assistant"),
+  agentFileMaxSizeMb: integer("agent_file_max_size_mb"),
+  agentFilesPerRequest: integer("agent_files_per_request"),
+  agentMaterialsPerAgent: integer("agent_materials_per_agent"),
   // Фидбэк
   feedbackAttachmentMaxSizeMb: integer("feedback_attachment_max_size_mb"),
   feedbackAttachmentsMaxCount: integer("feedback_attachments_max_count"),
@@ -1984,7 +1984,7 @@ export type KnowledgeUploadSourceKind = (typeof knowledgeUploadSourceKinds)[numb
  * и для постоянных файлов ассистента. Имя сохраняем ради rolling compatibility;
  * целевой домен задаётся явной парой scope + ссылкой на ровно один агрегат.
  */
-export type KnowledgeUploadSessionScope = Extract<IngestScope, "kb" | "assistant" | "chat">;
+export type KnowledgeUploadSessionScope = Extract<IngestScope, "kb" | "agent" | "chat">;
 
 export const knowledgeUploadSessionStatuses = [
   "pending",
@@ -2050,7 +2050,7 @@ export const knowledgeUploadSessions = pgTable(
     scope: text("scope").$type<KnowledgeUploadSessionScope>().notNull().default("kb"),
     baseId: varchar("base_id")
       .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     // Назначение "chat" (0358): медиа чата грузится тем же транспортом частями.
     chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
     parentId: varchar("parent_id"),
@@ -2075,16 +2075,16 @@ export const knowledgeUploadSessions = pgTable(
       table.baseId,
       table.updatedAt,
     ),
-    workspaceAssistantIdx: index("knowledge_upload_sessions_workspace_assistant_idx").on(
+    workspaceAgentIdx: index("knowledge_upload_sessions_workspace_agent_idx").on(
       table.workspaceId,
-      table.assistantId,
+      table.agentId,
       table.updatedAt,
     ),
     statusIdx: index("knowledge_upload_sessions_status_idx").on(table.status, table.updatedAt),
     // 0351: FK-индекс под каскад purge архивных ассистентов; частичный — NULL каскаду не нужен.
-    assistantIdx: index("knowledge_upload_sessions_assistant_idx")
-      .on(table.assistantId)
-      .where(sql`${table.assistantId} IS NOT NULL`),
+    agentIdx: index("knowledge_upload_sessions_agent_idx")
+      .on(table.agentId)
+      .where(sql`${table.agentId} IS NOT NULL`),
     // 0358: то же для каскада удаления чата.
     chatIdx: index("knowledge_upload_sessions_chat_idx")
       .on(table.chatId)
@@ -2096,17 +2096,17 @@ export const knowledgeUploadSessions = pgTable(
       table.workspaceId,
       table.clientSessionKey,
     ),
-    assistantClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_assistant_client_session_unique_idx")
-      .on(table.workspaceId, table.assistantId, table.clientSessionKey)
-      .where(sql`${table.scope} = 'assistant'`),
+    agentClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_agent_client_session_unique_idx")
+      .on(table.workspaceId, table.agentId, table.clientSessionKey)
+      .where(sql`${table.scope} = 'agent'`),
     // 0358: та же идемпотентность создания сессии, что у ассистента, — по чату.
     chatClientSessionUniqueIdx: uniqueIndex("knowledge_upload_sessions_chat_client_session_unique_idx")
       .on(table.workspaceId, table.chatId, table.clientSessionKey)
       .where(sql`${table.scope} = 'chat'`),
     targetCheck: check(
       "knowledge_upload_sessions_target_check",
-      sql`(${table.scope} = 'kb' AND ${table.baseId} IS NOT NULL AND ${table.assistantId} IS NULL AND ${table.chatId} IS NULL)
-          OR (${table.scope} = 'assistant' AND ${table.baseId} IS NULL AND ${table.assistantId} IS NOT NULL AND ${table.chatId} IS NULL)
+      sql`(${table.scope} = 'kb' AND ${table.baseId} IS NOT NULL AND ${table.agentId} IS NULL AND ${table.chatId} IS NULL)
+          OR (${table.scope} = 'agent' AND ${table.baseId} IS NULL AND ${table.agentId} IS NOT NULL AND ${table.chatId} IS NULL)
           OR (${table.scope} = 'chat' AND ${table.baseId} IS NULL AND ${table.chatId} IS NOT NULL)`,
     ),
   }),
@@ -4307,10 +4307,10 @@ export const agentToolEmbeddings = pgTable(
 export type AgentToolEmbeddingRow = typeof agentToolEmbeddings.$inferSelect;
 export type AgentToolEmbeddingInsert = typeof agentToolEmbeddings.$inferInsert;
 
-export const assistantLlmModelSelections = ["explicit", "default"] as const;
-export type AssistantLlmModelSelection = (typeof assistantLlmModelSelections)[number];
+export const agentLlmModelSelections = ["explicit", "default"] as const;
+export type AgentLlmModelSelection = (typeof agentLlmModelSelections)[number];
 
-export const assistantLlmPolicy = pgTable("assistant_llm_policy", {
+export const agentLlmPolicy = pgTable("agent_llm_policy", {
   id: varchar("id").primaryKey().default("singleton"),
   defaultModelId: varchar("default_model_id").references(() => models.id, {
     onDelete: "set null",
@@ -4326,19 +4326,19 @@ export const assistantLlmPolicy = pgTable("assistant_llm_policy", {
 export const llmRuntimePolicy = pgTable("llm_runtime_policy", {
   id: varchar("id").primaryKey().default("singleton"),
   llmCompletionRequestTimeoutMs: integer("llm_completion_request_timeout_ms").notNull(),
-  assistantActionWorkerConcurrency: integer("assistant_action_worker_concurrency").notNull(),
-  assistantActionLeaseTtlMs: integer("assistant_action_lease_ttl_ms").notNull(),
-  assistantActionHeartbeatIntervalMs: integer("assistant_action_heartbeat_interval_ms").notNull(),
-  assistantActionMaxConcurrentPerWorkspace: integer("assistant_action_max_concurrent_per_workspace").notNull(),
-  assistantActionMaxConcurrentPerAssistant: integer("assistant_action_max_concurrent_per_assistant").notNull(),
-  assistantActionMaxConcurrentPerUser: integer("assistant_action_max_concurrent_per_user").notNull(),
-  assistantActionSchedulerMode: text("assistant_action_scheduler_mode").notNull(),
+  agentActionWorkerConcurrency: integer("agent_action_worker_concurrency").notNull(),
+  agentActionLeaseTtlMs: integer("agent_action_lease_ttl_ms").notNull(),
+  agentActionHeartbeatIntervalMs: integer("agent_action_heartbeat_interval_ms").notNull(),
+  agentActionMaxConcurrentPerWorkspace: integer("agent_action_max_concurrent_per_workspace").notNull(),
+  agentActionMaxConcurrentPerAgent: integer("agent_action_max_concurrent_per_agent").notNull(),
+  agentActionMaxConcurrentPerUser: integer("agent_action_max_concurrent_per_user").notNull(),
+  agentActionSchedulerMode: text("agent_action_scheduler_mode").notNull(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
-export const assistants = pgTable(
-  "assistants",
+export const agents = pgTable(
+  "agents",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
     workspaceId: varchar("workspace_id")
@@ -4351,7 +4351,7 @@ export const assistants = pgTable(
     llmProviderConfigId: varchar("llm_provider_config_id")
       .references(() => llmProviders.id, { onDelete: "set null" }),
     llmModelSelection: text("llm_model_selection")
-      .$type<AssistantLlmModelSelection>()
+      .$type<AgentLlmModelSelection>()
       .notNull()
       .default("explicit"),
     collectionName: text("collection_name")
@@ -4361,14 +4361,14 @@ export const assistants = pgTable(
       // «Запоминать в этом ассистенте» (shared/agent-memory.ts): личная память пользователей внутри ассистента. Общая
       // память ассистента от флага не зависит. У системных ассистентов уровня нет. В манифест сборок не входит.
       memoryEnabled: boolean("memory_enabled").notNull().default(true),
-      executionMode: text("execution_mode").$type<AssistantExecutionMode>().notNull().default("standard"),
+      executionMode: text("execution_mode").$type<AgentExecutionMode>().notNull().default("standard"),
       workflowDefinitionId: uuid("workflow_definition_id"),
       workflowSystemTemplateKey: varchar("workflow_system_template_key", { length: 255 }),
       transcriptionWorkflowDefinitionId: uuid("transcription_workflow_definition_id"),
-      mode: text("mode").$type<AssistantMode>().notNull().default("rag"),
+      mode: text("mode").$type<AgentMode>().notNull().default("rag"),
     ragMode: text("rag_mode").notNull().default("all_collections"),
     ragCollectionIds: jsonb("rag_collection_ids").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
-    ragSearchMode: text("rag_search_mode").$type<AssistantSearchMode>().notNull().default("profile"),
+    ragSearchMode: text("rag_search_mode").$type<AgentSearchMode>().notNull().default("profile"),
     ragSearchStrategy: text("rag_search_strategy").$type<SearchProfileStrategy>(),
     ragTopK: integer("rag_top_k"),
     ragMinScore: doublePrecision("rag_min_score"),
@@ -4396,7 +4396,7 @@ export const assistants = pgTable(
     ragRerankModel: text("rag_rerank_model"),
     ragRerankPrompt: text("rag_rerank_prompt"),
     ragRerankCandidateCount: integer("rag_rerank_candidate_count"),
-    ragEmbeddingMode: text("rag_embedding_mode").$type<AssistantEmbeddingMode>().notNull().default("global"),
+    ragEmbeddingMode: text("rag_embedding_mode").$type<AgentEmbeddingMode>().notNull().default("global"),
     ragEmbeddingProviderId: varchar("rag_embedding_provider_id").references(() => embeddingProviders.id, {
       onDelete: "set null",
     }),
@@ -4414,23 +4414,23 @@ export const assistants = pgTable(
       .notNull()
       .default(sql`'{}'::jsonb`),
     mediaInputMode: text("media_input_mode")
-      .$type<AssistantMediaInputMode>()
+      .$type<AgentMediaInputMode>()
       .notNull()
       .default("default"),
     transcriptionFlowMode: text("transcription_flow_mode")
-      .$type<AssistantTranscriptionFlowMode>()
+      .$type<AgentTranscriptionFlowMode>()
       .notNull()
       .default("standard"),
     /** @deprecated Release-A compatibility; runtime uses SpeechRecognition v2. */
     asrProviderId: text("asr_provider_id").references(() => speechProviders.id, { onDelete: "set null" }),
     onTranscriptionMode: text("on_transcription_mode")
-      .$type<AssistantTranscriptionMode>()
+      .$type<AgentTranscriptionMode>()
       .notNull()
       .default("raw_only"),
     onTranscriptionAutoActionId: varchar("on_transcription_auto_action_id"),
-    status: text("status").$type<AssistantStatus>().notNull().default("active"),
+    status: text("status").$type<AgentStatus>().notNull().default("active"),
     sharedChatFiles: boolean("shared_chat_files").notNull().default(false),
-    // Стартовые подсказки ассистента (prompts, scope=assistant): клик по подсказке
+    // Стартовые подсказки агента: клик по подсказке
     // сразу отправляет сообщение вместо вставки в композер.
     starterPromptsAutoSend: boolean("starter_prompts_auto_send").notNull().default(false),
     icon: text("icon"),
@@ -4441,36 +4441,36 @@ export const assistants = pgTable(
     locked: boolean("locked").notNull().default(false),
     // Черновик обучения: скрытая копия ассистента, в которой обучение ведёт круги, пока рабочий ассистент не меняется.
     // Лучшая версия переносится в рабочего кнопкой «Применить» (решение владельца 14.11.2026).
-    trainingDraftOf: varchar("training_draft_of").references((): AnyPgColumn => assistants.id, { onDelete: "cascade" }),
+    trainingDraftOf: varchar("training_draft_of").references((): AnyPgColumn => agents.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    workspaceIdx: index("assistants_workspace_idx").on(table.workspaceId),
-    llmProviderConfigIdx: index("assistants_llm_provider_config_idx").on(table.llmProviderConfigId),
-    collectionIdx: index("assistants_collection_name_idx").on(table.collectionName),
-    workflowDefinitionIdx: index("assistants_workflow_definition_idx").on(table.workflowDefinitionId),
-    // 0351: отбор кандидатов janitor pg.assistants.archived (status='archived' AND updated_at < cutoff).
-    statusUpdatedIdx: index("assistants_status_updated_idx").on(table.status, table.updatedAt),
+    workspaceIdx: index("agents_workspace_idx").on(table.workspaceId),
+    llmProviderConfigIdx: index("agents_llm_provider_config_idx").on(table.llmProviderConfigId),
+    collectionIdx: index("agents_collection_name_idx").on(table.collectionName),
+    workflowDefinitionIdx: index("agents_workflow_definition_idx").on(table.workflowDefinitionId),
+    // 0351: отбор кандидатов janitor pg.agents.archived (status='archived' AND updated_at < cutoff).
+    statusUpdatedIdx: index("agents_status_updated_idx").on(table.status, table.updatedAt),
     // 0406: счётчик «пользуются за 30 дней» сборки — подписка и копия помнят сборку одинаково.
-    originBuildIdx: index("assistants_origin_build_idx").on(table.originBuildId),
-    trainingDraftOfIdx: index("assistants_training_draft_of_idx").on(table.trainingDraftOf),
-    workspaceSystemKeyUnique: uniqueIndex("assistants_workspace_system_key_unique_idx").on(
+    originBuildIdx: index("agents_origin_build_idx").on(table.originBuildId),
+    trainingDraftOfIdx: index("agents_training_draft_of_idx").on(table.trainingDraftOf),
+    workspaceSystemKeyUnique: uniqueIndex("agents_workspace_system_key_unique_idx").on(
       table.workspaceId,
       table.systemKey,
     ),
   }),
 );
 
-export const assistantUserTranscriptionPreferences = pgTable(
-  "assistant_user_transcription_preferences",
+export const agentUserTranscriptionPreferences = pgTable(
+  "agent_user_transcription_preferences",
   {
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     userId: varchar("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -4480,23 +4480,23 @@ export const assistantUserTranscriptionPreferences = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.workspaceId, table.assistantId, table.userId] }),
-    workspaceUserIdx: index("assistant_user_transcription_preferences_workspace_user_idx").on(
+    pk: primaryKey({ columns: [table.workspaceId, table.agentId, table.userId] }),
+    workspaceUserIdx: index("agent_user_transcription_preferences_workspace_user_idx").on(
       table.workspaceId,
       table.userId,
     ),
     // 0351: FK-индекс под каскад purge архивных ассистентов (в PK assistant_id не ведущая).
-    assistantIdx: index("assistant_user_transcription_preferences_assistant_idx").on(table.assistantId),
+    agentIdx: index("agent_user_transcription_preferences_agent_idx").on(table.agentId),
   }),
 );
 
-export type AssistantUserTranscriptionPreference =
-  typeof assistantUserTranscriptionPreferences.$inferSelect;
-export type AssistantUserTranscriptionPreferenceInsert =
-  typeof assistantUserTranscriptionPreferences.$inferInsert;
+export type AgentUserTranscriptionPreference =
+  typeof agentUserTranscriptionPreferences.$inferSelect;
+export type AgentUserTranscriptionPreferenceInsert =
+  typeof agentUserTranscriptionPreferences.$inferInsert;
 
-export const assistantUserMenuPreferences = pgTable(
-  "assistant_user_menu_preferences",
+export const agentUserMenuPreferences = pgTable(
+  "agent_user_menu_preferences",
   {
     workspaceId: varchar("workspace_id")
       .notNull()
@@ -4504,32 +4504,32 @@ export const assistantUserMenuPreferences = pgTable(
     userId: varchar("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     isPinned: boolean("is_pinned").notNull().default(false),
     sortOrder: integer("sort_order").notNull().default(0),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.workspaceId, table.userId, table.assistantId] }),
-    workspaceUserOrderIdx: index("assistant_user_menu_preferences_workspace_user_order_idx").on(
+    pk: primaryKey({ columns: [table.workspaceId, table.userId, table.agentId] }),
+    workspaceUserOrderIdx: index("agent_user_menu_preferences_workspace_user_order_idx").on(
       table.workspaceId,
       table.userId,
       table.isPinned,
       table.sortOrder,
     ),
-    assistantIdx: index("assistant_user_menu_preferences_assistant_idx").on(table.assistantId),
+    agentIdx: index("agent_user_menu_preferences_agent_idx").on(table.agentId),
     sortOrderCheck: check(
-      "assistant_user_menu_preferences_sort_order_check",
+      "agent_user_menu_preferences_sort_order_check",
       sql`${table.sortOrder} >= 0`,
     ),
   }),
 );
 
-export type AssistantUserMenuPreference = typeof assistantUserMenuPreferences.$inferSelect;
-export type AssistantUserMenuPreferenceInsert = typeof assistantUserMenuPreferences.$inferInsert;
+export type AgentUserMenuPreference = typeof agentUserMenuPreferences.$inferSelect;
+export type AgentUserMenuPreferenceInsert = typeof agentUserMenuPreferences.$inferInsert;
 
 // Action scopes, targets, placements and modes
 // ---------------------------------------------------------------------------
@@ -4551,7 +4551,7 @@ export type AssistantUserMenuPreferenceInsert = typeof assistantUserMenuPreferen
 // Держится гардом scripts/verify-no-prompt-reseed.cjs.
 // ---------------------------------------------------------------------------
 
-export const promptScopes = ["system", "instance", "workspace", "assistant", "personal"] as const;
+export const promptScopes = ["system", "instance", "workspace", "agent", "personal"] as const;
 export type PromptScope = (typeof promptScopes)[number];
 
 export const prompts = pgTable(
@@ -4560,7 +4560,7 @@ export const prompts = pgTable(
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
     scope: text("scope").$type<PromptScope>().notNull().default("workspace"),
     workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     // Владелец личного промпта (заполнен ⇔ scope=personal): CASCADE — личные промпты
     // уходят вместе с пользователем, в отличие от created_by (авторство, SET NULL).
     ownerUserId: varchar("owner_user_id").references(() => users.id, { onDelete: "cascade" }),
@@ -4579,7 +4579,7 @@ export const prompts = pgTable(
   (table) => ({
     workspaceIdx: index("prompts_workspace_idx").on(table.workspaceId),
     scopeIdx: index("prompts_scope_idx").on(table.scope),
-    assistantIdx: index("prompts_assistant_idx").on(table.assistantId),
+    agentIdx: index("prompts_agent_idx").on(table.agentId),
     ownerIdx: index("prompts_owner_idx").on(table.ownerUserId),
   }),
 );
@@ -4616,14 +4616,14 @@ export type ActionKind = (typeof actionKinds)[number];
 export const actionInvocableBy = ["user", "agent", "both"] as const;
 export type ActionInvocableBy = (typeof actionInvocableBy)[number];
 
-export const actionLlmPolicyModes = ["action_managed", "inherit_binding", "inherit_legacy_assistant"] as const;
+export const actionLlmPolicyModes = ["action_managed", "inherit_binding", "inherit_agent"] as const;
 export type ActionLlmPolicyMode = (typeof actionLlmPolicyModes)[number];
 
 export const actionStatuses = ["active", "archived"] as const;
 export type ActionStatus = (typeof actionStatuses)[number];
 
 export const actionBindingEntityTypes = [
-  "assistant",
+  "agent",
   "knowledge_document",
   "knowledge_base",
   "chat",
@@ -4646,8 +4646,8 @@ export type ActionExecutionTrigger = (typeof actionExecutionTriggers)[number];
 export const actionExecutionStatuses = ["running", "success", "failed"] as const;
 export type ActionExecutionStatus = (typeof actionExecutionStatuses)[number];
 
-export const assistantActionRunStatuses = ["pending", "running", "success", "error", "cancelled"] as const;
-export type AssistantActionRunStatus = (typeof assistantActionRunStatuses)[number];
+export const agentActionRunStatuses = ["pending", "running", "success", "error", "cancelled"] as const;
+export type AgentActionRunStatus = (typeof agentActionRunStatuses)[number];
 
 export const actions = pgTable(
   "actions",
@@ -4670,8 +4670,8 @@ export const actions = pgTable(
     llmPolicyMode: text("llm_policy_mode")
       .$type<ActionLlmPolicyMode>()
       .notNull()
-      .default("inherit_legacy_assistant"),
-    inheritAssistantSystemPrompt: boolean("inherit_assistant_system_prompt").notNull().default(false),
+      .default("inherit_agent"),
+    inheritAgentSystemPrompt: boolean("inherit_agent_system_prompt").notNull().default(false),
     llmProviderConfigId: varchar("llm_provider_config_id").references(() => llmProviders.id, { onDelete: "set null" }),
     llmModelId: text("llm_model_id"),
     llmTemperature: doublePrecision("llm_temperature"),
@@ -4773,16 +4773,16 @@ export const actionExecutions = pgTable(
   }),
 );
 
-export const assistantActionRuns = pgTable(
-  "assistant_action_runs",
+export const agentActionRuns = pgTable(
+  "agent_action_runs",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     actionId: varchar("action_id")
       .notNull()
       .references(() => actions.id, { onDelete: "cascade" }),
@@ -4795,7 +4795,7 @@ export const assistantActionRuns = pgTable(
     // NULL для ранов над вложением: текст живёт в chat_attachments, копировать документ в ран незачем.
   transcriptText: text("transcript_text"),
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    status: text("status").$type<AssistantActionRunStatus>().notNull().default("pending"),
+    status: text("status").$type<AgentActionRunStatus>().notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     workerId: text("worker_id"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
@@ -4813,39 +4813,39 @@ export const assistantActionRuns = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    workspaceStatusIdx: index("assistant_action_runs_workspace_status_idx").on(
+    workspaceStatusIdx: index("agent_action_runs_workspace_status_idx").on(
       table.workspaceId,
       table.status,
       table.createdAt,
     ),
-    assistantStatusIdx: index("assistant_action_runs_assistant_status_idx").on(table.assistantId, table.status, table.createdAt),
-    transcriptStatusIdx: index("assistant_action_runs_transcript_status_idx").on(
+    agentStatusIdx: index("agent_action_runs_agent_status_idx").on(table.agentId, table.status, table.createdAt),
+    transcriptStatusIdx: index("agent_action_runs_transcript_status_idx").on(
       table.transcriptId,
       table.status,
       table.createdAt,
     ),
-    statusCreatedIdx: index("assistant_action_runs_status_created_idx").on(table.status, table.createdAt),
-    statusLeaseIdx: index("assistant_action_runs_status_lease_idx").on(table.status, table.leaseExpiresAt),
-    workerStatusIdx: index("assistant_action_runs_worker_status_idx").on(table.workerId, table.status),
-    userStatusLeaseIdx: index("assistant_action_runs_user_status_lease_idx").on(
+    statusCreatedIdx: index("agent_action_runs_status_created_idx").on(table.status, table.createdAt),
+    statusLeaseIdx: index("agent_action_runs_status_lease_idx").on(table.status, table.leaseExpiresAt),
+    workerStatusIdx: index("agent_action_runs_worker_status_idx").on(table.workerId, table.status),
+    userStatusLeaseIdx: index("agent_action_runs_user_status_lease_idx").on(
       table.userId,
       table.status,
       table.leaseExpiresAt,
     ),
     // 0350: FK-индекс под каскад удаления чата; частичный — NULL каскаду не нужен.
-    chatIdx: index("assistant_action_runs_chat_idx")
+    chatIdx: index("agent_action_runs_chat_idx")
       .on(table.chatId)
       .where(sql`${table.chatId} IS NOT NULL`),
   }),
 );
 
-export const assistantActions = pgTable(
-  "assistant_actions",
+export const agentActions = pgTable(
+  "agent_actions",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     actionId: varchar("action_id")
       .notNull()
       .references(() => actions.id, { onDelete: "cascade" }),
@@ -4859,10 +4859,10 @@ export const assistantActions = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    workspaceIdx: index("assistant_actions_workspace_idx").on(table.workspaceId),
-    assistantIdx: index("assistant_actions_assistant_idx").on(table.assistantId),
-    actionIdx: index("assistant_actions_action_idx").on(table.actionId),
-    assistantActionUnique: uniqueIndex("assistant_actions_assistant_action_unique_idx").on(table.assistantId, table.actionId),
+    workspaceIdx: index("agent_actions_workspace_idx").on(table.workspaceId),
+    agentIdx: index("agent_actions_agent_idx").on(table.agentId),
+    actionIdx: index("agent_actions_action_idx").on(table.actionId),
+    agentActionUnique: uniqueIndex("agent_actions_unique_pair").on(table.agentId, table.actionId),
   }),
 );
 
@@ -4874,8 +4874,8 @@ export type ChatMessageType = (typeof chatMessageTypes)[number];
 export const chatStatuses = ["active", "archived", "deleted"] as const;
 export type ChatStatus = (typeof chatStatuses)[number];
 
-export const assistantActionTypes = ["ANALYZING", "TRANSCRIBING", "TYPING"] as const;
-export type AssistantActionType = (typeof assistantActionTypes)[number];
+export const agentActionTypes = ["ANALYZING", "TRANSCRIBING", "TYPING"] as const;
+export type AgentActionType = (typeof agentActionTypes)[number];
 
 export const botActionTypes = ["transcribe_audio", "summarize", "generate_image", "process_file"] as const;
 export type BotActionType = (typeof botActionTypes)[number];
@@ -4967,7 +4967,8 @@ export const CHAT_SESSION_ORIGIN_SCHEDULED_TASK = "scheduled_task" as const;
 /** Служебный чат пробного прогона сценария агентом (workflows.test_run): в списке чатов человека его нет. */
 export const CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL = "workflow_trial" as const;
 /** Служебный чат прогона примера при обучении ассистента: в списке чатов человека его нет. */
-export const CHAT_SESSION_ORIGIN_ASSISTANT_TRAINING = "assistant_training" as const;
+export const CHAT_SESSION_ORIGIN_AGENT_TRAINING = "agent_training" as const;
+export const LEGACY_CHAT_SESSION_ORIGIN_AGENT_TRAINING = "assistant_training" as const;
 
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
@@ -4980,7 +4981,7 @@ export type ChatSessionMetadata = {
   /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
   selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
-  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL | typeof CHAT_SESSION_ORIGIN_ASSISTANT_TRAINING;
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL | typeof CHAT_SESSION_ORIGIN_AGENT_TRAINING;
   [key: string]: unknown;
 };
 
@@ -4995,16 +4996,16 @@ export const chatSessions = pgTable(
     userId: varchar("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     title: text("title").notNull().default(""),
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
     status: text("status").$type<ChatStatus>().notNull().default("active"),
-    currentAssistantActionType: text("current_assistant_action_type").$type<AssistantActionType | null>(),
-    currentAssistantActionText: text("current_assistant_action_text"),
-    currentAssistantActionTriggerMessageId: text("current_assistant_action_trigger_message_id"),
-    currentAssistantActionUpdatedAt: timestamp("current_assistant_action_updated_at"),
+    currentAgentActionType: text("current_agent_action_type").$type<AgentActionType | null>(),
+    currentAgentActionText: text("current_agent_action_text"),
+    currentAgentActionTriggerMessageId: text("current_agent_action_trigger_message_id"),
+    currentAgentActionUpdatedAt: timestamp("current_agent_action_updated_at"),
     metadata: jsonb("metadata").$type<ChatSessionMetadata>().notNull().default(sql`'{}'::jsonb`),
     pinnedAt: timestamp("pinned_at"),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -5029,7 +5030,7 @@ export const chatSessions = pgTable(
       )
       .where(sql`"deleted_at" IS NULL`),
     // 0260: FK-индекс под каскад удаления ассистента (assistant_id).
-    assistantIdx: index("chat_sessions_assistant_id_idx").on(table.assistantId),
+    agentIdx: index("chat_sessions_agent_id_idx").on(table.agentId),
   }),
 );
 
@@ -5208,7 +5209,7 @@ export type ChatMessageMetadata = {
    * Структурно равен `ChatSourceScope` из `shared/chat-source-scope.ts`; тип повторён на месте, чтобы зеркала
    * schema.ts в соседних репозиториях оставались самодостаточными.
    */
-  sourceScope?: { knowledgeBaseIds: string[]; assistantFileIds: string[]; excludedChatAttachmentIds?: string[] } | null;
+  sourceScope?: { knowledgeBaseIds: string[]; agentFileIds?: string[]; assistantFileIds?: string[]; excludedChatAttachmentIds?: string[] } | null;
   workflowContextRequest?: WorkflowContextRequestChatMetadata;
   attachments?: ChatMessageAttachmentMetadata[];
   file?: {
@@ -5403,7 +5404,7 @@ export const chatFileIngestionJobs = pgTable(
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id").notNull(),
+    agentId: varchar("agent_id").notNull(),
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
@@ -5436,8 +5437,8 @@ export const chatFileIngestionJobs = pgTable(
 export type ChatFileIngestionJob = typeof chatFileIngestionJobs.$inferSelect;
 export type ChatFileIngestionJobInsert = typeof chatFileIngestionJobs.$inferInsert;
 
-export const assistantFileStatuses = ["uploaded", "processing", "ready", "error"] as const;
-export type AssistantFileStatus = (typeof assistantFileStatuses)[number];
+export const agentFileStatuses = ["uploaded", "processing", "ready", "error"] as const;
+export type AgentFileStatus = (typeof agentFileStatuses)[number];
 
 /**
  * Универсальная роль файла ассистента (домен/формат-агностично):
@@ -5445,20 +5446,20 @@ export type AssistantFileStatus = (typeof assistantFileStatuses)[number];
  * - `material` — файл доступен чатам ассистента ЦЕЛИКОМ как рабочий артефакт (шаблон / образец-эталон / few-shot).
  *   Материалы НЕ индексируются (не попадают в RAG-ретривал), а резолвятся лениво через `system.documents.*`.
  */
-export const assistantFileRoles = ["rag_source", "material"] as const;
-export type AssistantFileRole = (typeof assistantFileRoles)[number];
-export const ASSISTANT_FILE_ROLE_DEFAULT: AssistantFileRole = "rag_source";
+export const agentFileRoles = ["rag_source", "material"] as const;
+export type AgentFileRole = (typeof agentFileRoles)[number];
+export const AGENT_FILE_ROLE_DEFAULT: AgentFileRole = "rag_source";
 
-export const assistantFiles = pgTable(
-  "assistant_files",
+export const agentFiles = pgTable(
+  "agent_files",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     fileId: uuid("file_id").references(() => files.id, { onDelete: "set null" }),
     storageKey: text("storage_key").notNull(),
     originalName: text("original_name").notNull(),
@@ -5469,55 +5470,55 @@ export const assistantFiles = pgTable(
       .references(() => chatAttachments.id, { onDelete: "set null" }),
     clientUploadKey: varchar("client_upload_key", { length: 255 }),
     ingestSourceId: uuid("ingest_source_id").references(() => ingestSources.id, { onDelete: "set null" }),
-    role: text("role").$type<AssistantFileRole>().notNull().default(ASSISTANT_FILE_ROLE_DEFAULT),
-    status: text("status").$type<AssistantFileStatus>().notNull().default("uploaded"),
-    processingStatus: text("processing_status").$type<AssistantFileStatus>().notNull().default("processing"),
+    role: text("role").$type<AgentFileRole>().notNull().default(AGENT_FILE_ROLE_DEFAULT),
+    status: text("status").$type<AgentFileStatus>().notNull().default("uploaded"),
+    processingStatus: text("processing_status").$type<AgentFileStatus>().notNull().default("processing"),
     processingErrorMessage: text("processing_error_message"),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     errorMessage: text("error_message"),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    workspaceIdx: index("assistant_files_workspace_idx").on(table.workspaceId, table.createdAt),
-    assistantIdx: index("assistant_files_assistant_idx").on(table.assistantId, table.createdAt),
-    sourceChatAttachmentUniqueIdx: uniqueIndex("assistant_files_source_chat_attachment_unique_idx")
-      .on(table.assistantId, table.sourceChatAttachmentId)
+    workspaceIdx: index("agent_files_workspace_idx").on(table.workspaceId, table.createdAt),
+    agentIdx: index("agent_files_agent_idx").on(table.agentId, table.createdAt),
+    sourceChatAttachmentUniqueIdx: uniqueIndex("agent_files_source_chat_attachment_unique_idx")
+      .on(table.agentId, table.sourceChatAttachmentId)
       .where(sql`${table.sourceChatAttachmentId} IS NOT NULL`),
-    clientUploadKeyUniqueIdx: uniqueIndex("assistant_files_client_upload_key_unique_idx")
-      .on(table.workspaceId, table.assistantId, table.clientUploadKey)
+    clientUploadKeyUniqueIdx: uniqueIndex("agent_files_client_upload_key_unique_idx")
+      .on(table.workspaceId, table.agentId, table.clientUploadKey)
       .where(sql`${table.clientUploadKey} IS NOT NULL`),
-    ingestSourceUniqueIdx: uniqueIndex("assistant_files_ingest_source_id_unique_idx")
+    ingestSourceUniqueIdx: uniqueIndex("agent_files_ingest_source_id_unique_idx")
       .on(table.ingestSourceId)
       .where(sql`${table.ingestSourceId} IS NOT NULL`),
     // 0351: FK-индекс под SET NULL при уборке вложений чата (в unique выше колонка не ведущая).
-    sourceChatAttachmentIdx: index("assistant_files_source_chat_attachment_idx")
+    sourceChatAttachmentIdx: index("agent_files_source_chat_attachment_idx")
       .on(table.sourceChatAttachmentId)
       .where(sql`${table.sourceChatAttachmentId} IS NOT NULL`),
   }),
 );
 
-export type AssistantFile = typeof assistantFiles.$inferSelect;
-export type AssistantFileInsert = typeof assistantFiles.$inferInsert;
+export type AgentFile = typeof agentFiles.$inferSelect;
+export type AgentFileInsert = typeof agentFiles.$inferInsert;
 
-export const assistantFileIngestionJobStatuses = ["pending", "running", "done", "error"] as const;
-export type AssistantFileIngestionJobStatus = (typeof assistantFileIngestionJobStatuses)[number];
+export const agentFileIngestionJobStatuses = ["pending", "running", "done", "error"] as const;
+export type AgentFileIngestionJobStatus = (typeof agentFileIngestionJobStatuses)[number];
 
-export const assistantFileIngestionJobs = pgTable(
-  "assistant_file_ingestion_jobs",
+export const agentFileIngestionJobs = pgTable(
+  "agent_file_ingestion_jobs",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    jobType: text("job_type").notNull().default("assistant_file_ingestion"),
+    jobType: text("job_type").notNull().default("agent_file_ingestion"),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     fileId: uuid("file_id")
       .notNull()
-      .references(() => assistantFiles.id, { onDelete: "cascade" }),
+      .references(() => agentFiles.id, { onDelete: "cascade" }),
     fileVersion: integer("file_version").notNull(),
-    status: text("status").$type<AssistantFileIngestionJobStatus>().notNull().default("pending"),
+    status: text("status").$type<AgentFileIngestionJobStatus>().notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     nextRetryAt: timestamp("next_retry_at"),
     lastError: text("last_error"),
@@ -5531,25 +5532,25 @@ export const assistantFileIngestionJobs = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    uniqueJob: uniqueIndex("assistant_file_ingestion_jobs_unique_job_idx").on(
+    uniqueJob: uniqueIndex("agent_file_ingestion_jobs_unique_job_idx").on(
       table.jobType,
       table.fileId,
       table.fileVersion,
     ),
-    workspaceIdx: index("assistant_file_ingestion_jobs_workspace_idx").on(
+    workspaceIdx: index("agent_file_ingestion_jobs_workspace_idx").on(
       table.workspaceId,
       table.status,
       table.nextRetryAt,
     ),
-    assistantIdx: index("assistant_file_ingestion_jobs_assistant_idx").on(table.assistantId, table.status, table.nextRetryAt),
-    leaseIdx: index("assistant_file_ingestion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
+    agentIdx: index("agent_file_ingestion_jobs_agent_idx").on(table.agentId, table.status, table.nextRetryAt),
+    leaseIdx: index("agent_file_ingestion_jobs_lease_idx").on(table.status, table.leaseExpiresAt),
     // 0351: FK-индекс под каскад удаления assistant_files (в unique выше file_id не ведущая).
-    fileIdx: index("assistant_file_ingestion_jobs_file_idx").on(table.fileId),
+    fileIdx: index("agent_file_ingestion_jobs_file_idx").on(table.fileId),
   }),
 );
 
-export type AssistantFileIngestionJob = typeof assistantFileIngestionJobs.$inferSelect;
-export type AssistantFileIngestionJobInsert = typeof assistantFileIngestionJobs.$inferInsert;
+export type AgentFileIngestionJob = typeof agentFileIngestionJobs.$inferSelect;
+export type AgentFileIngestionJobInsert = typeof agentFileIngestionJobs.$inferInsert;
 
 export const canvasDocumentTypes = ["source", "derived", "summary", "cleaned", "custom"] as const;
 export type CanvasDocumentType = (typeof canvasDocumentTypes)[number];
@@ -5566,9 +5567,9 @@ export const canvasDocuments = pgTable(
       .references(() => chatSessions.id, { onDelete: "cascade" }),
     transcriptId: varchar("transcript_id").references(() => transcripts.id, { onDelete: "cascade" }),
     sourceMessageId: varchar("source_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
     actionId: varchar("action_id").references(() => actions.id, { onDelete: "set null" }),
-    assistantActionRunId: uuid("assistant_action_run_id").references(() => assistantActionRuns.id, {
+    agentActionRunId: uuid("agent_action_run_id").references(() => agentActionRuns.id, {
       onDelete: "set null",
     }),
     type: text("type").$type<CanvasDocumentType>().notNull().default("derived"),
@@ -5588,9 +5589,9 @@ export const canvasDocuments = pgTable(
     chatIdx: index("canvas_documents_chat_idx").on(table.chatId),
     chatSourceMessageIdx: index("canvas_documents_chat_source_message_idx").on(table.chatId, table.sourceMessageId),
     transcriptIdx: index("canvas_documents_transcript_idx").on(table.transcriptId),
-    assistantIdx: index("canvas_documents_assistant_idx").on(table.assistantId),
+    agentIdx: index("canvas_documents_agent_idx").on(table.agentId),
     actionIdx: index("canvas_documents_action_idx").on(table.actionId),
-    assistantActionRunIdx: index("canvas_documents_assistant_action_run_idx").on(table.assistantActionRunId),
+    agentActionRunIdx: index("canvas_documents_agent_action_run_idx").on(table.agentActionRunId),
     // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата; в композите выше колонка не ведущая.
     sourceMessageIdx: index("canvas_documents_source_message_idx")
       .on(table.sourceMessageId)
@@ -5692,7 +5693,7 @@ export const documentEditProposals = pgTable(
       .$type<DocumentProposalStatus>()
       .notNull()
       .default("pending"),
-    assistantMessageId: varchar("assistant_message_id").references(() => chatMessages.id, {
+    agentMessageId: varchar("agent_message_id").references(() => chatMessages.id, {
       onDelete: "set null",
     }),
     userMessageId: varchar("user_message_id").references(() => chatMessages.id, {
@@ -5719,9 +5720,9 @@ export const documentEditProposals = pgTable(
     userMessageIdx: index("document_edit_proposals_user_message_idx")
       .on(table.userMessageId)
       .where(sql`${table.userMessageId} IS NOT NULL`),
-    assistantMessageIdx: index("document_edit_proposals_assistant_message_idx")
-      .on(table.assistantMessageId)
-      .where(sql`${table.assistantMessageId} IS NOT NULL`),
+    agentMessageIdx: index("document_edit_proposals_agent_message_idx")
+      .on(table.agentMessageId)
+      .where(sql`${table.agentMessageId} IS NOT NULL`),
   }),
 );
 
@@ -5840,28 +5841,28 @@ export interface UnicaAsrAdvancedOptions {
   generalOptions?: UnicaAsrAdvancedOptionRecord;
 }
 
-export const assistantRagModes = ["all_collections", "selected_collections"] as const;
-export type AssistantRagMode = (typeof assistantRagModes)[number];
-export const assistantSearchModes = ["profile", "custom"] as const;
-export type AssistantSearchMode = (typeof assistantSearchModes)[number];
-export const assistantEmbeddingModes = ["global", "custom"] as const;
-export type AssistantEmbeddingMode = (typeof assistantEmbeddingModes)[number];
-export const assistantTranscriptionModes = ["raw_only", "auto_action"] as const;
-export type AssistantTranscriptionMode = (typeof assistantTranscriptionModes)[number];
-export const assistantTranscriptionFlowModes = ["standard", "workflow", "assistant_workflow"] as const;
-export type AssistantTranscriptionFlowMode = (typeof assistantTranscriptionFlowModes)[number];
-export const assistantMediaInputModes = ["default", "agent_intent_driven"] as const;
-export type AssistantMediaInputMode = (typeof assistantMediaInputModes)[number];
-export const assistantExecutionModes = ["standard", "workflow"] as const;
-export type AssistantExecutionMode = (typeof assistantExecutionModes)[number];
-export const assistantModes = ["rag", "llm"] as const;
-export type AssistantMode = (typeof assistantModes)[number];
+export const agentRagModes = ["all_collections", "selected_collections"] as const;
+export type AgentRagMode = (typeof agentRagModes)[number];
+export const agentSearchModes = ["profile", "custom"] as const;
+export type AgentSearchMode = (typeof agentSearchModes)[number];
+export const agentEmbeddingModes = ["global", "custom"] as const;
+export type AgentEmbeddingMode = (typeof agentEmbeddingModes)[number];
+export const agentTranscriptionModes = ["raw_only", "auto_action"] as const;
+export type AgentTranscriptionMode = (typeof agentTranscriptionModes)[number];
+export const agentTranscriptionFlowModes = ["standard", "workflow", "assistant_workflow"] as const;
+export type AgentTranscriptionFlowMode = (typeof agentTranscriptionFlowModes)[number];
+export const agentMediaInputModes = ["default", "agent_intent_driven"] as const;
+export type AgentMediaInputMode = (typeof agentMediaInputModes)[number];
+export const agentExecutionModes = ["standard", "workflow"] as const;
+export type AgentExecutionMode = (typeof agentExecutionModes)[number];
+export const agentModes = ["rag", "llm"] as const;
+export type AgentMode = (typeof agentModes)[number];
 
 /** training_draft — черновик обучения: в списках и каталоге не виден, чаты проверки с ним работают. */
-export const assistantStatuses = ["active", "archived", "training_draft"] as const;
-export type AssistantStatus = (typeof assistantStatuses)[number];
+export const agentStatuses = ["active", "archived", "training_draft"] as const;
+export type AgentStatus = (typeof agentStatuses)[number];
 
-export const assistantWorkflowRunStatuses = [
+export const agentWorkflowRunStatuses = [
   "queued",
   "pending",
   "running",
@@ -5874,19 +5875,19 @@ export const assistantWorkflowRunStatuses = [
   "error",
   "cancelled",
 ] as const;
-export type AssistantWorkflowRunStatus = (typeof assistantWorkflowRunStatuses)[number];
-export const assistantWorkflowRunDispatchSources = [
+export type AgentWorkflowRunStatus = (typeof agentWorkflowRunStatuses)[number];
+export const agentWorkflowRunDispatchSources = [
   "scheduled_task",
-  "assistant_execution",
-  "assistant_transcription",
+  "agent_execution",
+  "agent_transcription",
   "external_message",
   "webhook_trigger",
   // Дебаг-прогон step-debug: захваченный author-driven вызов, исполняется по draft-бандлу сессии.
   "debug",
 ] as const;
-export type AssistantWorkflowRunDispatchSource = (typeof assistantWorkflowRunDispatchSources)[number];
+export type AgentWorkflowRunDispatchSource = (typeof agentWorkflowRunDispatchSources)[number];
 
-export const assistantWorkflowRunStepStatuses = [
+export const agentWorkflowRunStepStatuses = [
   "running",
   "success",
   "error",
@@ -5895,41 +5896,41 @@ export const assistantWorkflowRunStepStatuses = [
   // Выход узла подставлен из пина дебаг-сессии (step-debug D3), узел не исполнялся.
   "pinned",
 ] as const;
-export type AssistantWorkflowRunStepStatus = (typeof assistantWorkflowRunStepStatuses)[number];
+export type AgentWorkflowRunStepStatus = (typeof agentWorkflowRunStepStatuses)[number];
 
-export const assistantWorkflowRunEventPhases = ["started", "completed", "failed", "info"] as const;
-export type AssistantWorkflowRunEventPhase = (typeof assistantWorkflowRunEventPhases)[number];
+export const agentWorkflowRunEventPhases = ["started", "completed", "failed", "info"] as const;
+export type AgentWorkflowRunEventPhase = (typeof agentWorkflowRunEventPhases)[number];
 
-export const assistantWorkflowRunEventActorKinds = ["workflow", "model", "tool", "approval", "system"] as const;
-export type AssistantWorkflowRunEventActorKind = (typeof assistantWorkflowRunEventActorKinds)[number];
+export const agentWorkflowRunEventActorKinds = ["workflow", "model", "tool", "approval", "system"] as const;
+export type AgentWorkflowRunEventActorKind = (typeof agentWorkflowRunEventActorKinds)[number];
 
-export const assistantWorkflowRunEventVisibilities = ["user", "debug"] as const;
-export type AssistantWorkflowRunEventVisibility = (typeof assistantWorkflowRunEventVisibilities)[number];
+export const agentWorkflowRunEventVisibilities = ["user", "debug"] as const;
+export type AgentWorkflowRunEventVisibility = (typeof agentWorkflowRunEventVisibilities)[number];
 
-export const assistantAgentArtifactMutationKinds = ["created", "updated", "renamed", "moved", "sent", "deleted"] as const;
-export type AssistantAgentArtifactMutationKind = (typeof assistantAgentArtifactMutationKinds)[number];
+export const agentProfileArtifactMutationKinds = ["created", "updated", "renamed", "moved", "sent", "deleted"] as const;
+export type AgentProfileArtifactMutationKind = (typeof agentProfileArtifactMutationKinds)[number];
 
-export const assistantAgentArtifactCleanupStrategies = ["delete", "restore", "none"] as const;
-export type AssistantAgentArtifactCleanupStrategy = (typeof assistantAgentArtifactCleanupStrategies)[number];
+export const agentProfileArtifactCleanupStrategies = ["delete", "restore", "none"] as const;
+export type AgentProfileArtifactCleanupStrategy = (typeof agentProfileArtifactCleanupStrategies)[number];
 
-export const assistantAgentArtifactStatuses = ["active", "cleaned", "cleanup_failed", "not_found", "unsupported"] as const;
-export type AssistantAgentArtifactStatus = (typeof assistantAgentArtifactStatuses)[number];
+export const agentProfileArtifactStatuses = ["active", "cleaned", "cleanup_failed", "not_found", "unsupported"] as const;
+export type AgentProfileArtifactStatus = (typeof agentProfileArtifactStatuses)[number];
 
-export const assistantWorkflowApprovalRequestStatuses = [
+export const agentWorkflowApprovalRequestStatuses = [
   "pending",
   "approved",
   "rejected",
   "expired",
   "cancelled",
 ] as const;
-export type AssistantWorkflowApprovalRequestStatus = (typeof assistantWorkflowApprovalRequestStatuses)[number];
+export type AgentWorkflowApprovalRequestStatus = (typeof agentWorkflowApprovalRequestStatuses)[number];
 
-export const assistantKnowledgeBases = pgTable(
-  "assistant_knowledge_bases",
+export const agentKnowledgeBases = pgTable(
+  "agent_knowledge_bases",
   {
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     knowledgeBaseId: varchar("knowledge_base_id")
       .notNull()
       .references(() => knowledgeBases.id, { onDelete: "cascade" }),
@@ -5939,9 +5940,9 @@ export const assistantKnowledgeBases = pgTable(
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.assistantId, table.knowledgeBaseId] }),
-    workspaceIdx: index("assistant_knowledge_bases_workspace_idx").on(table.workspaceId),
-    knowledgeBaseIdx: index("assistant_knowledge_bases_knowledge_base_idx").on(table.knowledgeBaseId),
+    pk: primaryKey({ columns: [table.agentId, table.knowledgeBaseId] }),
+    workspaceIdx: index("agent_knowledge_bases_workspace_idx").on(table.workspaceId),
+    knowledgeBaseIdx: index("agent_knowledge_bases_knowledge_base_idx").on(table.knowledgeBaseId),
   }),
 );
 
@@ -5961,8 +5962,8 @@ export const knowledgeBaseAskAiRuns = pgTable("knowledge_base_ask_ai_runs", {
   status: text("status").notNull().default("success"),
   errorMessage: text("error_message"),
   errorDetails: jsonb("error_details").$type<RagPipelineErrorDetails | null>(),
-  source: text("source").$type<RagPipelineExecutionSource>().notNull().default("assistant_chat"),
-  assistantExecutionId: uuid("assistant_execution_id").references(() => assistantExecutions.id, {
+  source: text("source").$type<RagPipelineExecutionSource>().notNull().default("agent_chat"),
+  agentResponseExecutionId: uuid("agent_response_execution_id").references(() => agentResponseExecutions.id, {
     onDelete: "set null",
   }),
   searchProfileId: varchar("search_profile_id").references(() => searchProfiles.id, { onDelete: "set null" }),
@@ -6073,11 +6074,11 @@ export const chatAnswerQualityChecks = pgTable(
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id"),
+    agentId: varchar("agent_id"),
     chatId: varchar("chat_id"),
     chatMessageId: varchar("chat_message_id"),
     askAiRunId: varchar("ask_ai_run_id").references(() => knowledgeBaseAskAiRuns.id, { onDelete: "set null" }),
-    assistantExecutionId: uuid("assistant_execution_id"),
+    agentResponseExecutionId: uuid("agent_response_execution_id"),
     source: text("source").$type<AnswerQualitySource>().notNull(),
     llmModel: text("llm_model"),
     embeddingProviderId: varchar("embedding_provider_id"),
@@ -6113,7 +6114,7 @@ export const chatAnswerQualityChecks = pgTable(
   (table) => ({
     createdIdx: index("chat_answer_quality_created_idx").on(table.createdAt),
     workspaceIdx: index("chat_answer_quality_workspace_idx").on(table.workspaceId, table.createdAt),
-    assistantIdx: index("chat_answer_quality_assistant_idx").on(table.assistantId, table.createdAt),
+    agentIdx: index("chat_answer_quality_agent_idx").on(table.agentId, table.createdAt),
     verdictIdx: index("chat_answer_quality_verdict_idx").on(table.verdict, table.createdAt),
     chatMessageUnique: uniqueIndex("chat_answer_quality_chat_message_uidx")
       .on(table.chatMessageId)
@@ -6121,7 +6122,7 @@ export const chatAnswerQualityChecks = pgTable(
     askAiRunUnique: uniqueIndex("chat_answer_quality_ask_ai_run_uidx")
       .on(table.askAiRunId)
       .where(sql`ask_ai_run_id IS NOT NULL`),
-    executionIdx: index("chat_answer_quality_execution_idx").on(table.assistantExecutionId),
+    executionIdx: index("chat_answer_quality_execution_idx").on(table.agentResponseExecutionId),
   }),
 );
 export type ChatAnswerQualityCheck = typeof chatAnswerQualityChecks.$inferSelect;
@@ -6139,10 +6140,10 @@ export const chatAnswerQualityJobs = pgTable(
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
     askAiRunId: varchar("ask_ai_run_id").notNull(),
     workspaceId: varchar("workspace_id").notNull(),
-    assistantId: varchar("assistant_id"),
+    agentId: varchar("agent_id"),
     chatId: varchar("chat_id"),
     chatMessageId: varchar("chat_message_id"),
-    assistantExecutionId: uuid("assistant_execution_id"),
+    agentResponseExecutionId: uuid("agent_response_execution_id"),
     source: text("source").$type<AnswerQualitySource>().notNull(),
     sourcesAttached: boolean("sources_attached"),
     requestedIdentifiersFound: boolean("requested_identifiers_found"),
@@ -6177,7 +6178,7 @@ export const chatAnswerQualityStatsDay = pgTable(
   {
     day: date("day").notNull(),
     workspaceId: varchar("workspace_id").notNull(),
-    assistantId: varchar("assistant_id").notNull().default(""),
+    agentId: varchar("agent_id").notNull().default(""),
     llmModel: text("llm_model").notNull().default(""),
     checksTotal: integer("checks_total").notNull().default(0),
     withSourcesTotal: integer("with_sources_total").notNull().default(0),
@@ -6200,7 +6201,7 @@ export const chatAnswerQualityStatsDay = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.day, table.workspaceId, table.assistantId, table.llmModel] }),
+    pk: primaryKey({ columns: [table.day, table.workspaceId, table.agentId, table.llmModel] }),
     workspaceDayIdx: index("chat_answer_quality_stats_day_workspace_idx").on(table.workspaceId, table.day),
     dayIdx: index("chat_answer_quality_stats_day_day_idx").on(table.day),
   }),
@@ -6776,16 +6777,16 @@ export const upsertAuthProviderSchema = z
   .strict();
 
 // Assistant execution log tables
-export const assistantExecutions = pgTable(
-  "assistant_executions",
+export const agentResponseExecutions = pgTable(
+  "agent_response_executions",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     workspaceId: varchar("workspace_id").notNull(),
     userId: varchar("user_id"),
-    assistantId: varchar("assistant_id").notNull(),
+    agentId: varchar("agent_id").notNull(),
     chatId: varchar("chat_id"),
     userMessageId: varchar("user_message_id"),
-    assistantMessageId: varchar("assistant_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+    agentMessageId: varchar("agent_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
     modelId: varchar("model_id").references(() => models.id, { onDelete: "set null" }),
     modelKey: text("model_key"),
     modelName: text("model_name"),
@@ -6797,22 +6798,22 @@ export const assistantExecutions = pgTable(
     metadata: jsonb("metadata"),
   },
   (table) => ({
-    startedAtIdx: index("assistant_executions_started_at_idx").on(table.startedAt),
-    workspaceIdx: index("assistant_executions_workspace_idx").on(table.workspaceId, table.startedAt),
-    assistantIdx: index("assistant_executions_assistant_idx").on(table.assistantId, table.startedAt),
-    chatIdx: index("assistant_executions_chat_idx").on(table.chatId),
-    userIdx: index("assistant_executions_user_idx").on(table.userId),
-    assistantMessageIdx: index("assistant_executions_assistant_message_idx").on(table.assistantMessageId),
+    startedAtIdx: index("agent_response_executions_started_at_idx").on(table.startedAt),
+    workspaceIdx: index("agent_response_executions_workspace_idx").on(table.workspaceId, table.startedAt),
+    agentIdx: index("agent_response_executions_agent_idx").on(table.agentId, table.startedAt),
+    chatIdx: index("agent_response_executions_chat_idx").on(table.chatId),
+    userIdx: index("agent_response_executions_user_idx").on(table.userId),
+    agentMessageIdx: index("agent_response_executions_agent_message_idx").on(table.agentMessageId),
   }),
 );
 
-export const assistantExecutionSteps = pgTable(
-  "assistant_execution_steps",
+export const agentResponseExecutionSteps = pgTable(
+  "agent_response_execution_steps",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     executionId: uuid("execution_id")
       .notNull()
-      .references(() => assistantExecutions.id, { onDelete: "cascade" }),
+      .references(() => agentResponseExecutions.id, { onDelete: "cascade" }),
     order: integer("order").notNull(),
     type: text("type").notNull(),
     status: text("status").notNull(),
@@ -6825,7 +6826,7 @@ export const assistantExecutionSteps = pgTable(
     diagnosticInfo: text("diagnostic_info"),
   },
   (table) => ({
-    executionIdx: index("assistant_execution_steps_execution_idx").on(table.executionId, table.order),
+    executionIdx: index("agent_response_execution_steps_execution_idx").on(table.executionId, table.order),
   }),
 );
 
@@ -6838,9 +6839,9 @@ export const chatMessageFeedback = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     kind: text("kind").$type<ChatFeedbackKind>().notNull().default("chat_answer"),
     chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
-    assistantMessageId: varchar("assistant_message_id").references(() => chatMessages.id, { onDelete: "cascade" }),
+    agentMessageId: varchar("agent_message_id").references(() => chatMessages.id, { onDelete: "cascade" }),
     userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
-    assistantExecutionId: uuid("assistant_execution_id").references(() => assistantExecutions.id, {
+    agentResponseExecutionId: uuid("agent_response_execution_id").references(() => agentResponseExecutions.id, {
       onDelete: "set null",
     }),
     userId: varchar("user_id")
@@ -6855,12 +6856,12 @@ export const chatMessageFeedback = pgTable(
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   },
   (table) => ({
-    assistantMessageCreatedIdx: index("chat_message_feedback_assistant_message_created_idx").on(
-      table.assistantMessageId,
+    agentMessageCreatedIdx: index("chat_message_feedback_agent_message_created_idx").on(
+      table.agentMessageId,
       table.createdAt,
     ),
     workspaceCreatedIdx: index("chat_message_feedback_workspace_created_idx").on(table.workspaceId, table.createdAt),
-    executionIdx: index("chat_message_feedback_execution_idx").on(table.assistantExecutionId),
+    executionIdx: index("chat_message_feedback_execution_idx").on(table.agentResponseExecutionId),
     chatCreatedIdx: index("chat_message_feedback_chat_created_idx").on(table.chatId, table.createdAt),
     voteReasonCreatedIdx: index("chat_message_feedback_vote_reason_created_idx").on(
       table.vote,
@@ -6875,11 +6876,11 @@ export const chatMessageFeedback = pgTable(
       .where(sql`${table.userMessageId} IS NOT NULL`),
     // Один отзыв-оценка на (ответ ассистента, пользователь). general (без assistant_message_id) — без ограничения.
     answerUserUniq: uniqueIndex("chat_message_feedback_answer_user_uniq")
-      .on(table.assistantMessageId, table.userId)
+      .on(table.agentMessageId, table.userId)
       .where(sql`kind = 'chat_answer'`),
     chatAnswerRequiresFields: check(
       "chat_message_feedback_chat_answer_requires_fields",
-      sql`kind <> 'chat_answer' OR (chat_id IS NOT NULL AND assistant_message_id IS NOT NULL AND vote IS NOT NULL)`,
+      sql`kind <> 'chat_answer' OR (chat_id IS NOT NULL AND agent_message_id IS NOT NULL AND vote IS NOT NULL)`,
     ),
   }),
 );
@@ -6929,7 +6930,7 @@ export const agentExecutions = pgTable(
     nodeId: varchar("node_id"),
     workspaceId: varchar("workspace_id").notNull(),
     userId: varchar("user_id"),
-    assistantId: varchar("assistant_id"),
+    agentId: varchar("agent_id"),
     chatId: varchar("chat_id"),
     dispatchSource: text("dispatch_source"),
     providerId: text("provider_id").notNull(),
@@ -6972,7 +6973,7 @@ export const agentExecutions = pgTable(
   (table) => ({
     startedAtIdx: index("agent_executions_started_at_idx").on(table.startedAt),
     workspaceIdx: index("agent_executions_workspace_idx").on(table.workspaceId, table.startedAt),
-    assistantIdx: index("agent_executions_assistant_idx").on(table.assistantId, table.startedAt),
+    agentIdx: index("agent_executions_agent_idx").on(table.agentId, table.startedAt),
     statusIdx: index("agent_executions_status_idx").on(table.status, table.startedAt),
     // З-08: срез «как часто и почему агент отказывается» по времени.
     refusalReasonIdx: index("agent_executions_refusal_reason_idx").on(table.refusalReason, table.startedAt),
@@ -7212,7 +7213,7 @@ export const agentSessions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id"),
+    agentId: varchar("agent_id"),
     actorUserId: varchar("actor_user_id"),
     status: text("status").$type<AgentSessionStatus>().notNull(),
     // Снимок настроек запуска без секретов.
@@ -7592,8 +7593,8 @@ export type LlmProvider = typeof llmProviders.$inferSelect;
 export type LlmProviderInsert = typeof llmProviders.$inferInsert;
 export type UnicaChatConfig = typeof unicaChatConfig.$inferSelect;
 export type UnicaChatConfigInsert = typeof unicaChatConfig.$inferInsert;
-export type AssistantLlmPolicy = typeof assistantLlmPolicy.$inferSelect;
-export type AssistantLlmPolicyInsert = typeof assistantLlmPolicy.$inferInsert;
+export type AgentLlmPolicy = typeof agentLlmPolicy.$inferSelect;
+export type AgentLlmPolicyInsert = typeof agentLlmPolicy.$inferInsert;
 export type LlmRuntimePolicy = typeof llmRuntimePolicy.$inferSelect;
 export type LlmRuntimePolicyInsert = typeof llmRuntimePolicy.$inferInsert;
 export type OcrProvider = typeof ocrProviders.$inferSelect;
@@ -7652,9 +7653,9 @@ export const asrExecutions = pgTable(
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     createdAt: timestamp("created_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`CURRENT_TIMESTAMP`).notNull(),
-    // Use text instead of uuid because workspaces.id and assistants.id are varchar, not uuid
+    // Use text instead of uuid because workspaces.id and agents.id are varchar, not uuid
     workspaceId: text("workspace_id"),
-    assistantId: text("assistant_id"),
+    agentId: text("agent_id"),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
     chatId: uuid("chat_id"),
     userMessageId: uuid("user_message_id"),
@@ -7716,9 +7717,9 @@ export const asrExecutions = pgTable(
     // 0350: janitor при purge чатов сравнивает chat_id::text с chat_sessions.id (varchar) — нужен expression-индекс.
     chatTextIdx: index("asr_executions_chat_text_idx").on(sql`(${table.chatId}::text)`),
     // 0351: анти-джойн janitor при purge архивных ассистентов (assistant_id = root.id).
-    assistantIdx: index("asr_executions_assistant_idx")
-      .on(table.assistantId)
-      .where(sql`${table.assistantId} IS NOT NULL`),
+    agentIdx: index("asr_executions_agent_idx")
+      .on(table.agentId)
+      .where(sql`${table.agentId} IS NOT NULL`),
   }),
 );
 
@@ -7787,9 +7788,9 @@ export const asrCompletionJobs = pgTable(
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
     // Nullable during rolling deploys; new runtime always writes all three fields.
     requestOperationId: text("request_operation_id"),
@@ -7850,7 +7851,7 @@ export const asrCompletionJobs = pgTable(
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_jobs_workspace_id_idx").on(table.workspaceId),
     // 0351: FK-индекс под каскад purge архивных ассистентов (он же анти-джойн janitor).
-    assistantIdx: index("asr_completion_jobs_assistant_idx").on(table.assistantId),
+    agentIdx: index("asr_completion_jobs_agent_idx").on(table.agentId),
     // 0351: SET NULL от transcripts/chat_messages внутри каскада чата.
     transcriptIdx: index("asr_completion_jobs_transcript_idx")
       .on(table.transcriptId)
@@ -7877,9 +7878,9 @@ export const asrCompletionJobActions = pgTable(
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
     transcriptId: varchar("transcript_id").references(() => transcripts.id, { onDelete: "set null" }),
     transcriptMessageId: varchar("transcript_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
@@ -7888,7 +7889,7 @@ export const asrCompletionJobActions = pgTable(
     actionLabel: text("action_label").notNull(),
     placement: text("placement").notNull().default("canvas"),
     status: text("status").$type<AsrCompletionJobActionStatus>().notNull().default("pending"),
-    assistantActionRunId: uuid("assistant_action_run_id").references(() => assistantActionRuns.id, { onDelete: "set null" }),
+    agentActionRunId: uuid("agent_action_run_id").references(() => agentActionRuns.id, { onDelete: "set null" }),
     statusMessageId: varchar("status_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
     documentId: uuid("document_id"),
     errorCode: text("error_code"),
@@ -7904,14 +7905,14 @@ export const asrCompletionJobActions = pgTable(
       table.sequenceIndex,
     ),
     jobStatusIdx: index("asr_completion_job_actions_job_status_idx").on(table.asrCompletionJobId, table.status),
-    runIdx: index("asr_completion_job_actions_run_idx").on(table.assistantActionRunId),
+    runIdx: index("asr_completion_job_actions_run_idx").on(table.agentActionRunId),
     transcriptIdx: index("asr_completion_job_actions_transcript_idx").on(table.transcriptId),
     // 0260: FK-индекс под каскад удаления пространства (workspace_id).
     workspaceIdx: index("asr_completion_job_actions_workspace_id_idx").on(table.workspaceId),
     // 0350: FK-индекс под каскад удаления чата (chat_id).
     chatIdx: index("asr_completion_job_actions_chat_idx").on(table.chatId),
     // 0351: FK-индекс под каскад purge архивных ассистентов.
-    assistantIdx: index("asr_completion_job_actions_assistant_idx").on(table.assistantId),
+    agentIdx: index("asr_completion_job_actions_agent_idx").on(table.agentId),
     // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
     statusMessageIdx: index("asr_completion_job_actions_status_message_idx")
       .on(table.statusMessageId)
@@ -7950,12 +7951,12 @@ export type Action = typeof actions.$inferSelect;
 export type ActionInsert = typeof actions.$inferInsert;
 export type ActionExecution = typeof actionExecutions.$inferSelect;
 export type ActionExecutionInsert = typeof actionExecutions.$inferInsert;
-export type AssistantActionRun = typeof assistantActionRuns.$inferSelect;
-export type AssistantActionRunInsert = typeof assistantActionRuns.$inferInsert;
+export type AgentActionRun = typeof agentActionRuns.$inferSelect;
+export type AgentActionRunInsert = typeof agentActionRuns.$inferInsert;
 export type AsrCompletionJobActionRecord = typeof asrCompletionJobActions.$inferSelect;
 export type AsrCompletionJobActionInsertRecord = typeof asrCompletionJobActions.$inferInsert;
-export type AssistantAction = typeof assistantActions.$inferSelect;
-export type AssistantActionInsert = typeof assistantActions.$inferInsert;
+export type AgentAction = typeof agentActions.$inferSelect;
+export type AgentActionInsert = typeof agentActions.$inferInsert;
 
 export const guardBlockEvents = pgTable(
   "guard_block_events",
@@ -8424,16 +8425,16 @@ export const workflowAuditLog = pgTable(
 export type WorkflowAuditLog = typeof workflowAuditLog.$inferSelect;
 export type WorkflowAuditLogInsert = typeof workflowAuditLog.$inferInsert;
 
-export const assistantWorkflowRuns = pgTable(
-  "assistant_workflow_runs",
+export const agentWorkflowRuns = pgTable(
+  "agent_workflow_runs",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
@@ -8449,12 +8450,12 @@ export const assistantWorkflowRuns = pgTable(
       resolvedWorkflowVersionNo: integer("resolved_workflow_version_no"),
       workflowContentHash: varchar("workflow_content_hash", { length: 64 }).notNull(),
       dispatchSource: varchar("dispatch_source", { length: 64 })
-        .$type<AssistantWorkflowRunDispatchSource>()
+        .$type<AgentWorkflowRunDispatchSource>()
         .notNull()
-        .default("assistant_execution"),
+        .default("agent_execution"),
       enqueueKey: varchar("enqueue_key", { length: 200 }),
       enqueuePayloadHash: varchar("enqueue_payload_hash", { length: 64 }),
-      status: varchar("status", { length: 32 }).$type<AssistantWorkflowRunStatus>().notNull().default("queued"),
+      status: varchar("status", { length: 32 }).$type<AgentWorkflowRunStatus>().notNull().default("queued"),
     queuePosition: integer("queue_position").notNull().default(1),
     queueKey: varchar("queue_key", { length: 255 }),
     inputEnvelope: jsonb("input_envelope").$type<Record<string, unknown>>().notNull().default({}),
@@ -8480,56 +8481,56 @@ export const assistantWorkflowRuns = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    chatStatusQueueIdx: index("assistant_workflow_runs_chat_status_queue_idx").on(
+    chatStatusQueueIdx: index("agent_workflow_runs_chat_status_queue_idx").on(
       table.chatId,
       table.status,
       table.queuePosition,
       table.createdAt,
     ),
-    enqueueKeyUnique: uniqueIndex("assistant_workflow_runs_enqueue_key_unique").on(table.workspaceId, table.enqueueKey).where(sql`${table.enqueueKey} IS NOT NULL`),
-    statusWakeIdx: index("assistant_workflow_runs_status_wake_idx").on(
+    enqueueKeyUnique: uniqueIndex("agent_workflow_runs_enqueue_key_unique").on(table.workspaceId, table.enqueueKey).where(sql`${table.enqueueKey} IS NOT NULL`),
+    statusWakeIdx: index("agent_workflow_runs_status_wake_idx").on(
       table.status,
       table.wakeAt,
       table.createdAt,
     ),
-    statusLeaseIdx: index("assistant_workflow_runs_status_lease_idx").on(
+    statusLeaseIdx: index("agent_workflow_runs_status_lease_idx").on(
       table.status,
       table.lastHeartbeatAt,
       table.lockedAt,
       table.queuePosition,
       table.createdAt,
     ),
-    assistantCreatedIdx: index("assistant_workflow_runs_assistant_created_idx").on(table.assistantId, table.createdAt),
-    resolvedVersionIdx: index("assistant_workflow_runs_resolved_version_idx").on(table.resolvedWorkflowVersionId),
-    queueKeyStatusIdx: index("assistant_workflow_runs_queue_key_status_idx").on(table.queueKey, table.status),
+    agentCreatedIdx: index("agent_workflow_runs_agent_created_idx").on(table.agentId, table.createdAt),
+    resolvedVersionIdx: index("agent_workflow_runs_resolved_version_idx").on(table.resolvedWorkflowVersionId),
+    queueKeyStatusIdx: index("agent_workflow_runs_queue_key_status_idx").on(table.queueKey, table.status),
     // 0351: SET NULL от chat_messages стреляет на каждое сообщение каскада чата.
-    userMessageIdx: index("assistant_workflow_runs_user_message_idx")
+    userMessageIdx: index("agent_workflow_runs_user_message_idx")
       .on(table.userMessageId)
       .where(sql`${table.userMessageId} IS NOT NULL`),
     // 0261: композит под листинг истории ранов определения (workspace_id + workflow_definition_id +
     // created_at DESC, listWorkflowRunsForDefinition). Ведущий workspace_id покрывает и FK-каскад
     // удаления пространства → заменяет одиночный workspace_id-индекс из 0260 (тот дропнут в 0261).
-    workspaceWorkflowCreatedIdx: index("assistant_workflow_runs_workspace_workflow_created_idx").on(
+    workspaceWorkflowCreatedIdx: index("agent_workflow_runs_workspace_workflow_created_idx").on(
       table.workspaceId,
       table.workflowDefinitionId,
       table.createdAt,
     ),
     // 0287: выборка прогонов дебаг-сессии (step-debug), частичная по непустому debug_session_id.
-    debugSessionCreatedIdx: index("assistant_workflow_runs_debug_session_created_idx")
+    debugSessionCreatedIdx: index("agent_workflow_runs_debug_session_created_idx")
       .on(table.debugSessionId, table.createdAt)
       .where(sql`"debug_session_id" IS NOT NULL`),
   }),
 );
 
-export type AssistantWorkflowRun = typeof assistantWorkflowRuns.$inferSelect;
-export type AssistantWorkflowRunInsert = typeof assistantWorkflowRuns.$inferInsert;
+export type AgentWorkflowRun = typeof agentWorkflowRuns.$inferSelect;
+export type AgentWorkflowRunInsert = typeof agentWorkflowRuns.$inferInsert;
 
 // Снапшот скомпилированного бандла прогона (миграция 0285). Ключ (resolvedWorkflowVersionId, contentHash):
 // персистится на enqueue, воркер читает IR/workflowJson ЛОКАЛЬНО — без definition-port (декаплинг
 // workflow-микросервиса, контракт §«Форма доставки IR»). БЕЗ FK на версии: рантайм не зависит от кластера
 // дефиниций (готовность к schema-per-service). Опубликованные версии иммутабельны → ключ стабилен.
-export const assistantWorkflowBundleSnapshots = pgTable(
-  "assistant_workflow_bundle_snapshots",
+export const agentWorkflowBundleSnapshots = pgTable(
+  "agent_workflow_bundle_snapshots",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     resolvedWorkflowVersionId: uuid("resolved_workflow_version_id").notNull(),
@@ -8541,14 +8542,14 @@ export const assistantWorkflowBundleSnapshots = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    versionHashUniq: uniqueIndex("assistant_workflow_bundle_snapshots_version_hash_uniq").on(
+    versionHashUniq: uniqueIndex("agent_workflow_bundle_snapshots_version_hash_uniq").on(
       table.resolvedWorkflowVersionId,
       table.contentHash,
     ),
   }),
 );
 
-export type AssistantWorkflowBundleSnapshot = typeof assistantWorkflowBundleSnapshots.$inferSelect;
+export type AgentWorkflowBundleSnapshot = typeof agentWorkflowBundleSnapshots.$inferSelect;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step-debug: дебаг-сессии и пины (0287, roadmap D1)
@@ -8653,22 +8654,22 @@ export const workflowDebugPins = pgTable(
 export type WorkflowDebugPin = typeof workflowDebugPins.$inferSelect;
 export type WorkflowDebugPinInsert = typeof workflowDebugPins.$inferInsert;
 
-export const assistantWorkflowFormRequestStatuses = ["pending", "submitted", "expired", "cancelled"] as const;
-export type AssistantWorkflowFormRequestStatus = (typeof assistantWorkflowFormRequestStatuses)[number];
+export const agentWorkflowFormRequestStatuses = ["pending", "submitted", "expired", "cancelled"] as const;
+export type AgentWorkflowFormRequestStatus = (typeof agentWorkflowFormRequestStatuses)[number];
 
-export const assistantWorkflowFormRequests = pgTable(
-  "assistant_workflow_form_requests",
+export const agentWorkflowFormRequests = pgTable(
+  "agent_workflow_form_requests",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     runId: uuid("run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
@@ -8681,7 +8682,7 @@ export const assistantWorkflowFormRequests = pgTable(
     initialPayload: jsonb("initial_payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     submittedPayload: jsonb("submitted_payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     status: varchar("status", { length: 32 })
-      .$type<AssistantWorkflowFormRequestStatus>()
+      .$type<AgentWorkflowFormRequestStatus>()
       .notNull()
       .default("pending"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -8689,40 +8690,40 @@ export const assistantWorkflowFormRequests = pgTable(
     submittedByUserId: varchar("submitted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (table) => ({
-    workspaceStatusRequestedIdx: index("assistant_workflow_forms_workspace_status_requested_idx").on(
+    workspaceStatusRequestedIdx: index("agent_workflow_forms_workspace_status_requested_idx").on(
       table.workspaceId,
       table.status,
       table.requestedAt,
     ),
-    runStatusIdx: index("assistant_workflow_forms_run_status_idx").on(table.runId, table.status),
-    chatStatusIdx: index("assistant_workflow_forms_chat_status_idx").on(table.chatId, table.status),
+    runStatusIdx: index("agent_workflow_forms_run_status_idx").on(table.runId, table.status),
+    chatStatusIdx: index("agent_workflow_forms_chat_status_idx").on(table.chatId, table.status),
     // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
-    assistantIdx: index("assistant_workflow_forms_assistant_idx").on(table.assistantId),
-    userMessageIdx: index("assistant_workflow_forms_user_message_idx")
+    agentIdx: index("agent_workflow_forms_agent_idx").on(table.agentId),
+    userMessageIdx: index("agent_workflow_forms_user_message_idx")
       .on(table.userMessageId)
       .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
-export type AssistantWorkflowFormRequest = typeof assistantWorkflowFormRequests.$inferSelect;
-export type AssistantWorkflowFormRequestInsert = typeof assistantWorkflowFormRequests.$inferInsert;
+export type AgentWorkflowFormRequest = typeof agentWorkflowFormRequests.$inferSelect;
+export type AgentWorkflowFormRequestInsert = typeof agentWorkflowFormRequests.$inferInsert;
 
-export const assistantWorkflowContextRequestStatuses = ["pending", "submitted", "expired", "cancelled"] as const;
-export type AssistantWorkflowContextRequestStatus = (typeof assistantWorkflowContextRequestStatuses)[number];
+export const agentWorkflowContextRequestStatuses = ["pending", "submitted", "expired", "cancelled"] as const;
+export type AgentWorkflowContextRequestStatus = (typeof agentWorkflowContextRequestStatuses)[number];
 
-export const assistantWorkflowContextRequests = pgTable(
-  "assistant_workflow_context_requests",
+export const agentWorkflowContextRequests = pgTable(
+  "agent_workflow_context_requests",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     runId: uuid("run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
@@ -8741,7 +8742,7 @@ export const assistantWorkflowContextRequests = pgTable(
       .notNull()
       .default(sql`'[]'::jsonb`),
     status: varchar("status", { length: 32 })
-      .$type<AssistantWorkflowContextRequestStatus>()
+      .$type<AgentWorkflowContextRequestStatus>()
       .notNull()
       .default("pending"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -8749,36 +8750,36 @@ export const assistantWorkflowContextRequests = pgTable(
     submittedByUserId: varchar("submitted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (table) => ({
-    workspaceStatusRequestedIdx: index("assistant_workflow_context_workspace_status_requested_idx").on(
+    workspaceStatusRequestedIdx: index("agent_workflow_context_workspace_status_requested_idx").on(
       table.workspaceId,
       table.status,
       table.requestedAt,
     ),
-    runStatusIdx: index("assistant_workflow_context_run_status_idx").on(table.runId, table.status),
-    chatStatusIdx: index("assistant_workflow_context_chat_status_idx").on(table.chatId, table.status),
+    runStatusIdx: index("agent_workflow_context_run_status_idx").on(table.runId, table.status),
+    chatStatusIdx: index("agent_workflow_context_chat_status_idx").on(table.chatId, table.status),
     // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
-    assistantIdx: index("assistant_workflow_context_assistant_idx").on(table.assistantId),
-    userMessageIdx: index("assistant_workflow_context_user_message_idx")
+    agentIdx: index("agent_workflow_context_agent_idx").on(table.agentId),
+    userMessageIdx: index("agent_workflow_context_user_message_idx")
       .on(table.userMessageId)
       .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
-export type AssistantWorkflowContextRequest = typeof assistantWorkflowContextRequests.$inferSelect;
-export type AssistantWorkflowContextRequestInsert = typeof assistantWorkflowContextRequests.$inferInsert;
+export type AgentWorkflowContextRequest = typeof agentWorkflowContextRequests.$inferSelect;
+export type AgentWorkflowContextRequestInsert = typeof agentWorkflowContextRequests.$inferInsert;
 
-export const assistantWorkflowRunSteps = pgTable(
-  "assistant_workflow_run_steps",
+export const agentWorkflowRunSteps = pgTable(
+  "agent_workflow_run_steps",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     runId: uuid("run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     sequenceNo: integer("sequence_no").notNull(),
     nodeId: varchar("node_id", { length: 255 }).notNull(),
     stepId: varchar("step_id", { length: 255 }).notNull(),
     nodeKind: varchar("node_kind", { length: 32 }).$type<(typeof workflowNodeKinds)[number]>().notNull(),
-    status: varchar("status", { length: 32 }).$type<AssistantWorkflowRunStepStatus>().notNull(),
+    status: varchar("status", { length: 32 }).$type<AgentWorkflowRunStepStatus>().notNull(),
     branchPortId: varchar("branch_port_id", { length: 255 }),
     // 0287: номер попытки узла в дебаг-прогоне (step-debug rerun); NULL = обычный (первичный) проход.
     attemptNo: integer("attempt_no"),
@@ -8791,32 +8792,32 @@ export const assistantWorkflowRunSteps = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    runSequenceUniqueIdx: uniqueIndex("assistant_workflow_run_steps_run_sequence_uq").on(
+    runSequenceUniqueIdx: uniqueIndex("agent_workflow_run_steps_run_sequence_uq").on(
       table.runId,
       table.sequenceNo,
     ),
-    runNodeIdx: index("assistant_workflow_run_steps_run_node_idx").on(table.runId, table.nodeId, table.createdAt),
+    runNodeIdx: index("agent_workflow_run_steps_run_node_idx").on(table.runId, table.nodeId, table.createdAt),
   }),
 );
 
-export type AssistantWorkflowRunStep = typeof assistantWorkflowRunSteps.$inferSelect;
-export type AssistantWorkflowRunStepInsert = typeof assistantWorkflowRunSteps.$inferInsert;
+export type AgentWorkflowRunStep = typeof agentWorkflowRunSteps.$inferSelect;
+export type AgentWorkflowRunStepInsert = typeof agentWorkflowRunSteps.$inferInsert;
 
-export const assistantWorkflowRunEvents = pgTable(
-  "assistant_workflow_run_events",
+export const agentWorkflowRunEvents = pgTable(
+  "agent_workflow_run_events",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     runId: uuid("run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     sequenceNo: integer("sequence_no").notNull(),
     nodeId: varchar("node_id", { length: 255 }),
     stepId: varchar("step_id", { length: 255 }),
     eventType: varchar("event_type", { length: 255 }).notNull(),
-    phase: varchar("phase", { length: 32 }).$type<AssistantWorkflowRunEventPhase>().notNull(),
-    actorKind: varchar("actor_kind", { length: 32 }).$type<AssistantWorkflowRunEventActorKind>().notNull(),
+    phase: varchar("phase", { length: 32 }).$type<AgentWorkflowRunEventPhase>().notNull(),
+    actorKind: varchar("actor_kind", { length: 32 }).$type<AgentWorkflowRunEventActorKind>().notNull(),
     visibility: varchar("visibility", { length: 32 })
-      .$type<AssistantWorkflowRunEventVisibility>()
+      .$type<AgentWorkflowRunEventVisibility>()
       .notNull()
       .default("debug"),
     capabilityKey: varchar("capability_key", { length: 255 }),
@@ -8833,13 +8834,13 @@ export const assistantWorkflowRunEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    createdAtIdx: index("assistant_workflow_run_events_created_at_idx").on(table.createdAt),
-    runSequenceUniqueIdx: uniqueIndex("assistant_workflow_run_events_run_sequence_uq").on(
+    createdAtIdx: index("agent_workflow_run_events_created_at_idx").on(table.createdAt),
+    runSequenceUniqueIdx: uniqueIndex("agent_workflow_run_events_run_sequence_uq").on(
       table.runId,
       table.sequenceNo,
     ),
-    runCreatedIdx: index("assistant_workflow_run_events_run_created_idx").on(table.runId, table.createdAt),
-    runVisibilityIdx: index("assistant_workflow_run_events_run_visibility_idx").on(
+    runCreatedIdx: index("agent_workflow_run_events_run_created_idx").on(table.runId, table.createdAt),
+    runVisibilityIdx: index("agent_workflow_run_events_run_visibility_idx").on(
       table.runId,
       table.visibility,
       table.createdAt,
@@ -8847,24 +8848,24 @@ export const assistantWorkflowRunEvents = pgTable(
   }),
 );
 
-export type AssistantWorkflowRunEvent = typeof assistantWorkflowRunEvents.$inferSelect;
-export type AssistantWorkflowRunEventInsert = typeof assistantWorkflowRunEvents.$inferInsert;
+export type AgentWorkflowRunEvent = typeof agentWorkflowRunEvents.$inferSelect;
+export type AgentWorkflowRunEventInsert = typeof agentWorkflowRunEvents.$inferInsert;
 
-export const assistantAgentArtifacts = pgTable(
-  "assistant_agent_artifacts",
+export const agentProfileArtifacts = pgTable(
+  "agent_profile_artifacts",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
-    runId: uuid("run_id").references(() => assistantWorkflowRuns.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => agentWorkflowRuns.id, { onDelete: "set null" }),
     stepId: varchar("step_id", { length: 255 }),
     nodeId: varchar("node_id", { length: 255 }),
     operationKey: varchar("operation_key", { length: 255 }).notNull(),
     inputHash: varchar("input_hash", { length: 128 }),
     mutationKind: varchar("mutation_kind", { length: 32 })
-      .$type<AssistantAgentArtifactMutationKind>()
+      .$type<AgentProfileArtifactMutationKind>()
       .notNull(),
     resourceType: varchar("resource_type", { length: 128 }).notNull(),
     resourceId: varchar("resource_id", { length: 255 }).notNull(),
@@ -8877,37 +8878,37 @@ export const assistantAgentArtifacts = pgTable(
     afterSnapshot: jsonb("after_snapshot").$type<Record<string, unknown> | null>(),
     resultEntity: jsonb("result_entity").$type<Record<string, unknown> | null>(),
     cleanupStrategy: varchar("cleanup_strategy", { length: 32 })
-      .$type<AssistantAgentArtifactCleanupStrategy>()
+      .$type<AgentProfileArtifactCleanupStrategy>()
       .notNull()
       .default("none"),
     cleanupInput: jsonb("cleanup_input").$type<Record<string, unknown>>().notNull().default({}),
-    status: varchar("status", { length: 32 }).$type<AssistantAgentArtifactStatus>().notNull().default("active"),
+    status: varchar("status", { length: 32 }).$type<AgentProfileArtifactStatus>().notNull().default("active"),
     cleanupError: text("cleanup_error"),
     cleanedAt: timestamp("cleaned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    workspaceChatStatusCreatedIdx: index("assistant_agent_artifacts_ws_chat_status_created_idx").on(
+    workspaceChatStatusCreatedIdx: index("agent_profile_artifacts_ws_chat_status_created_idx").on(
       table.workspaceId,
       table.chatId,
       table.status,
       table.createdAt,
     ),
-    runCreatedIdx: index("assistant_agent_artifacts_run_created_idx").on(table.runId, table.createdAt),
-    resourceIdx: index("assistant_agent_artifacts_resource_idx").on(
+    runCreatedIdx: index("agent_profile_artifacts_run_created_idx").on(table.runId, table.createdAt),
+    resourceIdx: index("agent_profile_artifacts_resource_idx").on(
       table.workspaceId,
       table.resourceType,
       table.resourceId,
     ),
-    operationIdx: index("assistant_agent_artifacts_operation_idx").on(table.operationKey, table.createdAt),
+    operationIdx: index("agent_profile_artifacts_operation_idx").on(table.operationKey, table.createdAt),
     // 0260: FK-индекс под каскад удаления чат-сессии (chat_id; в составном он 2-й после workspace_id).
-    chatIdx: index("assistant_agent_artifacts_chat_id_idx").on(table.chatId),
+    chatIdx: index("agent_profile_artifacts_chat_id_idx").on(table.chatId),
   }),
 );
 
-export type AssistantAgentArtifact = typeof assistantAgentArtifacts.$inferSelect;
-export type AssistantAgentArtifactInsert = typeof assistantAgentArtifacts.$inferInsert;
+export type AgentProfileArtifact = typeof agentProfileArtifacts.$inferSelect;
+export type AgentProfileArtifactInsert = typeof agentProfileArtifacts.$inferInsert;
 
 // --- З-33 (волна 5): двухфазный lifecycle файловых артефактов агента (draft → commit) ---
 // Терминальная операция не только рендерит файл, но и сразу публикует карточку в чат. При
@@ -8961,19 +8962,19 @@ export const agentArtifactDrafts = pgTable(
 export type AgentArtifactDraft = typeof agentArtifactDrafts.$inferSelect;
 export type AgentArtifactDraftInsert = typeof agentArtifactDrafts.$inferInsert;
 
-export const assistantWorkflowApprovalRequests = pgTable(
-  "assistant_workflow_approval_requests",
+export const agentWorkflowApprovalRequests = pgTable(
+  "agent_workflow_approval_requests",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     runId: uuid("run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     workspaceId: varchar("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     chatId: varchar("chat_id")
       .notNull()
       .references(() => chatSessions.id, { onDelete: "cascade" }),
@@ -8982,7 +8983,7 @@ export const assistantWorkflowApprovalRequests = pgTable(
     stepId: varchar("step_id", { length: 255 }).notNull(),
     approvalRoleCode: varchar("approval_role_code", { length: 255 }).notNull(),
     status: varchar("status", { length: 32 })
-      .$type<AssistantWorkflowApprovalRequestStatus>()
+      .$type<AgentWorkflowApprovalRequestStatus>()
       .notNull()
       .default("pending"),
     decisionComment: text("decision_comment"),
@@ -8994,23 +8995,23 @@ export const assistantWorkflowApprovalRequests = pgTable(
     decidedByUserId: varchar("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (table) => ({
-    workspaceStatusRequestedIdx: index("assistant_workflow_approvals_workspace_status_requested_idx").on(
+    workspaceStatusRequestedIdx: index("agent_workflow_approvals_workspace_status_requested_idx").on(
       table.workspaceId,
       table.status,
       table.requestedAt,
     ),
-    runStatusIdx: index("assistant_workflow_approvals_run_status_idx").on(table.runId, table.status),
-    chatStatusIdx: index("assistant_workflow_approvals_chat_status_idx").on(table.chatId, table.status),
+    runStatusIdx: index("agent_workflow_approvals_run_status_idx").on(table.runId, table.status),
+    chatStatusIdx: index("agent_workflow_approvals_chat_status_idx").on(table.chatId, table.status),
     // 0351: FK-индексы под каскад purge архивных ассистентов и SET NULL от chat_messages.
-    assistantIdx: index("assistant_workflow_approvals_assistant_idx").on(table.assistantId),
-    userMessageIdx: index("assistant_workflow_approvals_user_message_idx")
+    agentIdx: index("agent_workflow_approvals_agent_idx").on(table.agentId),
+    userMessageIdx: index("agent_workflow_approvals_user_message_idx")
       .on(table.userMessageId)
       .where(sql`${table.userMessageId} IS NOT NULL`),
   }),
 );
 
-export type AssistantWorkflowApprovalRequest = typeof assistantWorkflowApprovalRequests.$inferSelect;
-export type AssistantWorkflowApprovalRequestInsert = typeof assistantWorkflowApprovalRequests.$inferInsert;
+export type AgentWorkflowApprovalRequest = typeof agentWorkflowApprovalRequests.$inferSelect;
+export type AgentWorkflowApprovalRequestInsert = typeof agentWorkflowApprovalRequests.$inferInsert;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugins / Skills / Connections v1
@@ -9099,7 +9100,7 @@ export const skillRegistry = pgTable(
     managedByBuild: boolean("managed_by_build").notNull().default(false),
     // Кому виден навык пространства: `assistants` — «Уника AI» и ассистентам, к которым привязан; `workspace` —
     // любому ассистенту пространства (фирменный стиль, общий регламент). CHECK — миграция 0432.
-    availability: varchar("availability", { length: 32 }).$type<"assistants" | "workspace">().notNull().default("assistants"),
+    availability: varchar("availability", { length: 32 }).$type<"agents" | "workspace">().notNull().default("agents"),
     metadata: jsonb("metadata").$type<JsonObject>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -9571,7 +9572,7 @@ export const installedBuilds = pgTable(
       .notNull()
       .references(() => builds.id, { onDelete: "cascade" }),
     buildVersionId: uuid("build_version_id").references(() => buildVersions.id, { onDelete: "set null" }),
-    materializedAssistantId: varchar("materialized_assistant_id").references(() => assistants.id, {
+    materializedAgentId: varchar("materialized_agent_id").references(() => agents.id, {
       onDelete: "set null",
     }),
     mode: varchar("mode", { length: 32 }).$type<InstallMode>().notNull().default("reference"),
@@ -9592,9 +9593,9 @@ export const installedBuilds = pgTable(
     workspaceBuildUniqueIdx: uniqueIndex("installed_builds_workspace_build_uq").on(table.workspaceId, table.buildId),
     workspaceIdx: index("installed_builds_workspace_idx").on(table.workspaceId, table.status, table.updatedAt),
     // 0351: SET NULL при каскаде purge архивных ассистентов.
-    materializedAssistantIdx: index("installed_builds_materialized_assistant_idx")
-      .on(table.materializedAssistantId)
-      .where(sql`${table.materializedAssistantId} IS NOT NULL`),
+    materializedAgentIdx: index("installed_builds_materialized_agent_idx")
+      .on(table.materializedAgentId)
+      .where(sql`${table.materializedAgentId} IS NOT NULL`),
   }),
 );
 
@@ -9696,9 +9697,9 @@ export const externalTriggerBindings = pgTable(
       .references(() => workspaceConnections.id, { onDelete: "cascade" }),
     provider: varchar("provider", { length: 64 }).$type<ExternalTriggerProvider>().notNull(),
     eventKey: varchar("event_key", { length: 64 }).$type<ExternalTriggerEventKey>().notNull().default("message"),
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     workflowDefinitionId: uuid("workflow_definition_id")
       .notNull()
       .references(() => workflowDefinitions.id, { onDelete: "cascade" }),
@@ -9723,10 +9724,10 @@ export const externalTriggerBindings = pgTable(
       table.updatedAt,
     ),
     // 0351: FK-индекс под каскад purge архивных ассистентов.
-    assistantIdx: index("external_trigger_bindings_assistant_idx").on(table.assistantId),
-    assistantConnectionTitleUniqueIdx: uniqueIndex("external_trigger_bindings_assistant_connection_title_uq").on(
+    agentIdx: index("external_trigger_bindings_agent_idx").on(table.agentId),
+    agentConnectionTitleUniqueIdx: uniqueIndex("external_trigger_bindings_agent_connection_title_uq").on(
       table.connectionId,
-      table.assistantId,
+      table.agentId,
       table.title,
     ),
   }),
@@ -9789,7 +9790,7 @@ export const externalTriggerReceipts = pgTable(
     providerEventId: varchar("provider_event_id", { length: 255 }).notNull(),
     externalConversationKey: varchar("external_conversation_key", { length: 255 }),
     status: varchar("status", { length: 64 }).$type<ExternalTriggerReceiptStatus>().notNull().default("received"),
-    workflowRunId: uuid("workflow_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "set null" }),
+    workflowRunId: uuid("workflow_run_id").references(() => agentWorkflowRuns.id, { onDelete: "set null" }),
     userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
     errorCode: varchar("error_code", { length: 128 }),
     errorMessage: text("error_message"),
@@ -9845,7 +9846,7 @@ export const externalTriggerDeliveries = pgTable(
       .references(() => workspaceConnections.id, { onDelete: "cascade" }),
     workflowRunId: uuid("workflow_run_id")
       .notNull()
-      .references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
     internalMessageId: varchar("internal_message_id")
       .notNull()
       .references(() => chatMessages.id, { onDelete: "cascade" }),
@@ -9910,7 +9911,7 @@ export const workflowWebhookTriggers = pgTable(
     nodeId: varchar("node_id", { length: 255 }).notNull(),
     // Nullable: триггер регистрируется при публикации сценария (ассистент может быть ещё не
     // привязан), а исполняющий ассистент резолвится в рантайме по 1:1-привязке definitionId.
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
     slug: varchar("slug", { length: 64 }).notNull(),
     authMode: varchar("auth_mode", { length: 32 })
@@ -9935,9 +9936,9 @@ export const workflowWebhookTriggers = pgTable(
     ),
     workspaceIdx: index("workflow_webhook_triggers_workspace_idx").on(table.workspaceId),
     // 0351: FK-индекс под каскад purge архивных ассистентов.
-    assistantIdx: index("workflow_webhook_triggers_assistant_idx")
-      .on(table.assistantId)
-      .where(sql`${table.assistantId} IS NOT NULL`),
+    agentIdx: index("workflow_webhook_triggers_agent_idx")
+      .on(table.agentId)
+      .where(sql`${table.agentId} IS NOT NULL`),
   }),
 );
 
@@ -9956,7 +9957,7 @@ export const workflowTriggerEvents = pgTable(
       .references(() => workflowWebhookTriggers.id, { onDelete: "cascade" }),
     eventId: varchar("event_id", { length: 255 }).notNull(),
     status: varchar("status", { length: 32 }).$type<WorkflowTriggerEventStatus>().notNull(),
-    workflowRunId: uuid("workflow_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "set null" }),
+    workflowRunId: uuid("workflow_run_id").references(() => agentWorkflowRuns.id, { onDelete: "set null" }),
     chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
     errorCode: varchar("error_code", { length: 128 }),
     errorMessage: text("error_message"),
@@ -11375,7 +11376,7 @@ export const instanceInstructions = pgTable("instance_instructions", {
 export type InstanceInstruction = typeof instanceInstructions.$inferSelect;
 export type InstanceInstructionInsert = typeof instanceInstructions.$inferInsert;
 
-export const instructionDocumentScopes = ["workspace", "assistant", "user"] as const;
+export const instructionDocumentScopes = ["workspace", "agent", "user"] as const;
 export type InstructionDocumentScope = (typeof instructionDocumentScopes)[number];
 
 /** Инструкции уровня пространство/ассистент/[личный] (workspace-домен), версионируемый текст-слой. */
@@ -11421,7 +11422,7 @@ export type InstructionDocumentInsert = typeof instructionDocuments.$inferInsert
 // (личная память — персональные данные). Личная память привязана к пространству: сведения пространства не утекают в
 // другие пространства и уходят вместе с ним. Лимиты и форма — shared/agent-memory.ts.
 
-export const memoryScopes = ["workspace", "assistant_shared", "assistant", "user"] as const;
+export const memoryScopes = ["workspace", "agent_shared", "agent", "user"] as const;
 export type MemoryScope = (typeof memoryScopes)[number];
 export const memoryNodeKinds = ["folder", "document"] as const;
 export type MemoryNodeKind = (typeof memoryNodeKinds)[number];
@@ -11431,20 +11432,20 @@ export type MemoryNodeKind = (typeof memoryNodeKinds)[number];
  * заголовком, строкой описания и текстом. В промпт агента идёт только оглавление, текст он читает по требованию.
  * Уровни (scope): workspace — общий справочник пространства; user — личная память человека, одна на все пространства;
  * assistant — личная память человека внутри одного ассистента (у каждого пользователя своя, как чаты);
- * assistant_shared — общая память ассистента для всех его пользователей (пишут `memory:manage` и обучение ассистента).
+ * agent_shared — общая память ассистента для всех его пользователей (пишут `memory:manage` и обучение ассистента).
  * Каскады: удаление папки уносит содержимое; пространство, ассистент и пользователь — свою память.
  */
 export const memoryNodes = pgTable(
   "memory_nodes",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    /** Пространство (scope workspace, assistant и assistant_shared); у личной памяти NULL — она одна на все пространства. */
+    /** Пространство (scope workspace, assistant и agent_shared); у личной памяти NULL — она одна на все пространства. */
     workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
     scope: varchar("scope", { length: 16 }).$type<MemoryScope>().notNull(),
     /** Владелец личной памяти (scope user и assistant). */
     userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
-    /** scope='assistant' — личная память пользователя внутри ассистента; scope='assistant_shared' — общая память ассистента. */
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    /** scope='agent' — личная память пользователя внутри ассистента; scope='agent_shared' — общая память ассистента. */
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     kind: varchar("kind", { length: 16 }).$type<MemoryNodeKind>().notNull().default("document"),
     /** Родительская папка; NULL — корень уровня. */
     parentId: varchar("parent_id").references((): AnyPgColumn => memoryNodes.id, { onDelete: "cascade" }),
@@ -11461,7 +11462,7 @@ export const memoryNodes = pgTable(
     lastReadAt: timestamp("last_read_at"),
   },
   (table) => ({
-    scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'assistant_shared', 'assistant', 'user')`),
+    scopeCheck: check("memory_nodes_scope_check", sql`${table.scope} IN ('workspace', 'agent_shared', 'agent', 'user')`),
     kindCheck: check(
       "memory_nodes_kind_check",
       sql`(${table.kind} = 'document' AND ${table.body} IS NOT NULL) OR (${table.kind} = 'folder' AND ${table.body} IS NULL)`,
@@ -11469,22 +11470,22 @@ export const memoryNodes = pgTable(
     // Строка принадлежит ровно той сущности, которую называет scope.
     scopeRefCheck: check(
       "memory_nodes_scope_ref_check",
-      sql`(${table.scope} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.userId} IS NULL AND ${table.assistantId} IS NULL) OR (${table.scope} = 'assistant_shared' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.scope} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NOT NULL) OR (${table.scope} = 'user' AND ${table.workspaceId} IS NULL AND ${table.userId} IS NOT NULL AND ${table.assistantId} IS NULL)`,
+      sql`(${table.scope} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.userId} IS NULL AND ${table.agentId} IS NULL) OR (${table.scope} = 'agent_shared' AND ${table.workspaceId} IS NOT NULL AND ${table.agentId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.scope} = 'agent' AND ${table.workspaceId} IS NOT NULL AND ${table.agentId} IS NOT NULL AND ${table.userId} IS NOT NULL) OR (${table.scope} = 'user' AND ${table.workspaceId} IS NULL AND ${table.userId} IS NOT NULL AND ${table.agentId} IS NULL)`,
     ),
     // Один заголовок в папке без учёта регистра: «тот же документ» обновляется, а не дублируется.
     titleUniq: uniqueIndex("memory_nodes_title_uq").on(
       sql`COALESCE(${table.workspaceId}, '')`,
       table.scope,
       sql`COALESCE(${table.userId}, '')`,
-      sql`COALESCE(${table.assistantId}, '')`,
+      sql`COALESCE(${table.agentId}, '')`,
       sql`COALESCE(${table.parentId}, '')`,
       sql`lower(${table.title})`,
     ),
     parentIdx: index("memory_nodes_parent_idx").on(table.parentId),
     workspaceIdx: index("memory_nodes_workspace_idx").on(table.workspaceId, table.scope, table.updatedAt),
-    assistantIdx: index("memory_nodes_assistant_idx")
-      .on(table.assistantId, table.userId, table.updatedAt)
-      .where(sql`${table.assistantId} IS NOT NULL`),
+    agentIdx: index("memory_nodes_agent_idx")
+      .on(table.agentId, table.userId, table.updatedAt)
+      .where(sql`${table.agentId} IS NOT NULL`),
     userIdx: index("memory_nodes_user_idx")
       .on(table.userId, table.scope, table.updatedAt)
       .where(sql`${table.userId} IS NOT NULL`),
@@ -11498,7 +11499,7 @@ export type MemoryNodeInsert = typeof memoryNodes.$inferInsert;
 // «Правила» — клиентские хуки агента (shared/agent-rules.ts, миграция 0430): проверка перед сдачей результата, до и после
 // операции. Версии неизменяемы (триггер), включение привязано к отпечатку версии; агент правило только предлагает.
 
-export const agentRuleLevels = ["instance", "workspace", "assistant", "user"] as const;
+export const agentRuleLevels = ["instance", "workspace", "agent", "user"] as const;
 export type AgentRuleLevel = (typeof agentRuleLevels)[number];
 export const agentRuleEventKinds = ["before_submit", "before_operation", "after_operation"] as const;
 export type AgentRuleEventKind = (typeof agentRuleEventKinds)[number];
@@ -11515,7 +11516,7 @@ export const agentRules = pgTable(
     level: varchar("level", { length: 16 }).$type<AgentRuleLevel>().notNull(),
     /** Пространство (уровни workspace и assistant); у инсталляции и личных — NULL. */
     workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
-    assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     /** Владелец личного правила: действует в его сессиях во всех пространствах. */
     userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 120 }).notNull(),
@@ -11536,21 +11537,21 @@ export const agentRules = pgTable(
     updatedAt: timestamp("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    levelCheck: check("agent_rules_level_check", sql`${table.level} IN ('instance', 'workspace', 'assistant', 'user')`),
+    levelCheck: check("agent_rules_level_check", sql`${table.level} IN ('instance', 'workspace', 'agent', 'user')`),
     eventCheck: check("agent_rules_event_check", sql`${table.event} IN ('before_submit', 'before_operation', 'after_operation')`),
     stateCheck: check("agent_rules_state_check", sql`${table.state} IN ('draft', 'active', 'disabled', 'archived')`),
     modeCheck: check("agent_rules_mode_check", sql`${table.mode} IN ('observe', 'remind', 'return', 'deny', 'require_approval')`),
     originCheck: check("agent_rules_origin_check", sql`${table.origin} IN ('agent', 'human')`),
     levelRefCheck: check(
       "agent_rules_level_ref_check",
-      sql`(${table.level} = 'instance' AND ${table.workspaceId} IS NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'assistant' AND ${table.workspaceId} IS NOT NULL AND ${table.assistantId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.level} = 'user' AND ${table.workspaceId} IS NULL AND ${table.assistantId} IS NULL AND ${table.userId} IS NOT NULL)`,
+      sql`(${table.level} = 'instance' AND ${table.workspaceId} IS NULL AND ${table.agentId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'workspace' AND ${table.workspaceId} IS NOT NULL AND ${table.agentId} IS NULL AND ${table.userId} IS NULL) OR (${table.level} = 'agent' AND ${table.workspaceId} IS NOT NULL AND ${table.agentId} IS NOT NULL AND ${table.userId} IS NULL) OR (${table.level} = 'user' AND ${table.workspaceId} IS NULL AND ${table.agentId} IS NULL AND ${table.userId} IS NOT NULL)`,
     ),
     activeVersionCheck: check(
       "agent_rules_active_version_check",
       sql`${table.state} <> 'active' OR (${table.activeVersionId} IS NOT NULL AND ${table.enabledSpecHash} IS NOT NULL)`,
     ),
     workspaceIdx: index("agent_rules_workspace_idx").on(table.workspaceId, table.state).where(sql`${table.workspaceId} IS NOT NULL`),
-    assistantIdx: index("agent_rules_assistant_idx").on(table.assistantId).where(sql`${table.assistantId} IS NOT NULL`),
+    agentIdx: index("agent_rules_agent_idx").on(table.agentId).where(sql`${table.agentId} IS NOT NULL`),
     userIdx: index("agent_rules_user_idx").on(table.userId, table.state).where(sql`${table.userId} IS NOT NULL`),
     instanceIdx: index("agent_rules_instance_idx").on(table.state).where(sql`${table.level} = 'instance'`),
     activeVersionIdx: index("agent_rules_active_version_idx").on(table.activeVersionId),
@@ -11692,14 +11693,14 @@ export const agentRuleWorkspaceFreezes = pgTable(
 /**
  * Навыки, объявленные на ассистенте (источник истины) — §4.4.
  * Шаг universal-agent воркфлоу наполняет skillIds из этой привязки (∪ навыки, заданные явно на шаге).
- * Управление в рамках `assistants:edit` (отдельного RBAC-права не требует).
+ * Управление в рамках `agents:edit` (отдельного RBAC-права не требует).
  */
-export const assistantSkills = pgTable(
-  "assistant_skills",
+export const agentSkills = pgTable(
+  "agent_skills",
   {
-    assistantId: varchar("assistant_id")
+    agentId: varchar("agent_id")
       .notNull()
-      .references(() => assistants.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "cascade" }),
     skillId: varchar("skill_id")
       .notNull()
       .references(() => skillRegistry.id, { onDelete: "cascade" }),
@@ -11709,14 +11710,14 @@ export const assistantSkills = pgTable(
     createdAt: timestamp("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.assistantId, table.skillId] }),
-    workspaceIdx: index("assistant_skills_workspace_idx").on(table.workspaceId),
-    skillIdx: index("assistant_skills_skill_idx").on(table.skillId),
+    pk: primaryKey({ columns: [table.agentId, table.skillId] }),
+    workspaceIdx: index("agent_skills_workspace_idx").on(table.workspaceId),
+    skillIdx: index("agent_skills_skill_idx").on(table.skillId),
   }),
 );
 
-export type AssistantSkill = typeof assistantSkills.$inferSelect;
-export type AssistantSkillInsert = typeof assistantSkills.$inferInsert;
+export type AgentSkill = typeof agentSkills.$inferSelect;
+export type AgentSkillInsert = typeof agentSkills.$inferInsert;
 
 // ─── Permission Audit Log (Epic 7) ───────────────────────────────────────────
 
@@ -12115,7 +12116,7 @@ export type ReferenceSetAuditLogInsert = typeof referenceSetAuditLog.$inferInser
 // заводится: таблицы существуют только после миграции 0311.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export const ingestScopes = ["kb", "assistant", "chat"] as const;
+export const ingestScopes = ["kb", "agent", "chat"] as const;
 export type IngestScope = (typeof ingestScopes)[number];
 
 export const ingestOriginKinds = ["upload", "url", "expanded", "connector"] as const;
@@ -12972,7 +12973,7 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   ownerUserId: varchar("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   actorUserId: varchar("actor_user_id").references(() => users.id, { onDelete: "set null" }),
-  assistantId: varchar("assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+  agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
   name: text("name").notNull(),
   state: text("state").notNull().default("active"),
   revision: integer("revision").notNull().default(1),
@@ -12990,7 +12991,7 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   dueIdx: index("scheduled_tasks_due_idx").on(table.nextRunAt).where(sql`${table.state} = 'active'`),
   ownerIdx: index("scheduled_tasks_owner_idx").on(table.ownerUserId),
   actorIdx: index("scheduled_tasks_actor_idx").on(table.actorUserId),
-  assistantIdx: index("scheduled_tasks_assistant_idx").on(table.assistantId),
+  agentIdx: index("scheduled_tasks_agent_idx").on(table.agentId),
   revisionFk: foreignKey({ name: "scheduled_tasks_current_revision_fk", columns: [table.id, table.currentRevisionId], foreignColumns: [scheduledTaskRevisions.taskId, scheduledTaskRevisions.id] }),
   stateCheck: check("scheduled_tasks_state_check", sql`${table.state} IN ('active','paused','completed','archived')`),
 }));
@@ -13273,10 +13274,10 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   chatId: varchar("chat_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   afterOperationId: uuid("after_operation_id"),
-  afterRunId: uuid("after_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "cascade" }),
+  afterRunId: uuid("after_run_id").references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
   workflowDefinitionId: uuid("workflow_definition_id").references(() => workflowDefinitions.id, { onDelete: "restrict" }),
   content: text("content").notNull(),
   input: jsonb("input").$type<Record<string, unknown>>().notNull(),
@@ -13284,7 +13285,7 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
   error: text("error"),
   userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
   enqueuePayload: jsonb("enqueue_payload").$type<Record<string, unknown>>(),
-  workflowRunId: uuid("workflow_run_id").references(() => assistantWorkflowRuns.id, { onDelete: "set null" }),
+  workflowRunId: uuid("workflow_run_id").references(() => agentWorkflowRuns.id, { onDelete: "set null" }),
   leaseOwner: text("lease_owner"),
   leaseEpoch: integer("lease_epoch").notNull().default(0),
   leaseUntil: timestamp("lease_until", { withTimezone: true }),
@@ -13299,7 +13300,7 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
   pendingIdx: index("chat_queued_messages_pending_idx").on(table.retryAt).where(sql`${table.status} IN ('queued','dispatching')`),
   workspaceIdx: index("chat_queued_messages_workspace_idx").on(table.workspaceId),
   userIdx: index("chat_queued_messages_user_idx").on(table.userId),
-  assistantIdx: index("chat_queued_messages_assistant_idx").on(table.assistantId),
+  agentIdx: index("chat_queued_messages_agent_idx").on(table.agentId),
   afterRunIdx: index("chat_queued_messages_after_run_idx").on(table.afterRunId),
   definitionIdx: index("chat_queued_messages_definition_idx").on(table.workflowDefinitionId),
   userMessageIdx: index("chat_queued_messages_user_message_idx").on(table.userMessageId),
@@ -13310,10 +13311,10 @@ export const chatQueuedMessages = pgTable("chat_queued_messages", {
 
 // Обучение ассистента на примерах (план 11.11.2026): пример — вход, эталон и критерии сравнения.
 // Файлы лежат в хранилище пространства по storage_key; строки удаляются каскадом с ассистентом и пространством.
-export const assistantTrainingExamples = pgTable("assistant_training_examples", {
+export const agentTrainingExamples = pgTable("agent_training_examples", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   inputText: text("input_text").notNull().default(""),
   referenceText: text("reference_text"),
@@ -13325,16 +13326,16 @@ export const assistantTrainingExamples = pgTable("assistant_training_examples", 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  assistantIdx: index("assistant_training_examples_assistant_idx").on(table.assistantId, table.createdAt),
-  workspaceIdx: index("assistant_training_examples_workspace_idx").on(table.workspaceId),
-  creatorIdx: index("assistant_training_examples_creator_idx").on(table.createdByUserId),
-  roleCheck: check("assistant_training_examples_role_check", sql`${table.role} IN ('train','holdout')`),
+  agentIdx: index("agent_training_examples_agent_idx").on(table.agentId, table.createdAt),
+  workspaceIdx: index("agent_training_examples_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("agent_training_examples_creator_idx").on(table.createdByUserId),
+  roleCheck: check("agent_training_examples_role_check", sql`${table.role} IN ('train','holdout')`),
 }));
-export type AssistantTrainingExampleRecord = typeof assistantTrainingExamples.$inferSelect;
+export type AgentTrainingExampleRecord = typeof agentTrainingExamples.$inferSelect;
 
-export const assistantTrainingExampleFiles = pgTable("assistant_training_example_files", {
+export const agentTrainingExampleFiles = pgTable("agent_training_example_files", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  exampleId: uuid("example_id").notNull().references(() => assistantTrainingExamples.id, { onDelete: "cascade" }),
+  exampleId: uuid("example_id").notNull().references(() => agentTrainingExamples.id, { onDelete: "cascade" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
   fileName: text("file_name").notNull(),
@@ -13343,21 +13344,21 @@ export const assistantTrainingExampleFiles = pgTable("assistant_training_example
   storageKey: text("storage_key").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  exampleIdx: index("assistant_training_example_files_example_idx").on(table.exampleId, table.createdAt),
-  workspaceIdx: index("assistant_training_example_files_workspace_idx").on(table.workspaceId),
-  referenceUnique: uniqueIndex("assistant_training_example_files_reference_unique").on(table.exampleId).where(sql`${table.kind} = 'reference'`),
-  kindCheck: check("assistant_training_example_files_kind_check", sql`${table.kind} IN ('input','reference')`),
+  exampleIdx: index("agent_training_example_files_example_idx").on(table.exampleId, table.createdAt),
+  workspaceIdx: index("agent_training_example_files_workspace_idx").on(table.workspaceId),
+  referenceUnique: uniqueIndex("agent_training_example_files_reference_unique").on(table.exampleId).where(sql`${table.kind} = 'reference'`),
+  kindCheck: check("agent_training_example_files_kind_check", sql`${table.kind} IN ('input','reference')`),
 }));
-export type AssistantTrainingExampleFileRecord = typeof assistantTrainingExampleFiles.$inferSelect;
+export type AgentTrainingExampleFileRecord = typeof agentTrainingExampleFiles.$inferSelect;
 
 // Проверка ассистента на примерах (план 11.11.2026, этап 2): прогон всех выбранных примеров и оценка по критериям.
 // Ведёт воркер монолита по аренде; примеры идут по одному. У ассистента одна незаконченная проверка.
-export const assistantTrainingChecks = pgTable("assistant_training_checks", {
+export const agentTrainingChecks = pgTable("agent_training_checks", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
-  /** Кто выполняет примеры: черновик обучения; null — сам ассистент. Примеры и эталоны — всегда у `assistantId`. */
-  runAssistantId: varchar("run_assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  /** Кто выполняет примеры: черновик обучения; null — сам ассистент. Примеры и эталоны — всегда у `agentId`. */
+  runAgentId: varchar("run_agent_id").references(() => agents.id, { onDelete: "set null" }),
   requestedByUserId: varchar("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
   status: text("status").notNull().default("queued"),
   total: integer("total").notNull().default(0),
@@ -13377,20 +13378,20 @@ export const assistantTrainingChecks = pgTable("assistant_training_checks", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  assistantIdx: index("assistant_training_checks_assistant_idx").on(table.assistantId, table.createdAt),
-  runAssistantIdx: index("assistant_training_checks_run_assistant_idx").on(table.runAssistantId),
-  workspaceIdx: index("assistant_training_checks_workspace_idx").on(table.workspaceId),
-  requesterIdx: index("assistant_training_checks_requester_idx").on(table.requestedByUserId),
-  queueIdx: index("assistant_training_checks_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
-  unfinishedUnique: uniqueIndex("assistant_training_checks_unfinished_unique").on(table.assistantId).where(sql`${table.status} IN ('queued','running')`),
-  statusCheck: check("assistant_training_checks_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
+  agentIdx: index("agent_training_checks_agent_idx").on(table.agentId, table.createdAt),
+  runAgentIdx: index("agent_training_checks_run_agent_idx").on(table.runAgentId),
+  workspaceIdx: index("agent_training_checks_workspace_idx").on(table.workspaceId),
+  requesterIdx: index("agent_training_checks_requester_idx").on(table.requestedByUserId),
+  queueIdx: index("agent_training_checks_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
+  unfinishedUnique: uniqueIndex("agent_training_checks_unfinished_unique").on(table.agentId).where(sql`${table.status} IN ('queued','running')`),
+  statusCheck: check("agent_training_checks_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
 }));
-export type AssistantTrainingCheckRecord = typeof assistantTrainingChecks.$inferSelect;
+export type AgentTrainingCheckRecord = typeof agentTrainingChecks.$inferSelect;
 
-export const assistantTrainingResults = pgTable("assistant_training_results", {
+export const agentTrainingResults = pgTable("agent_training_results", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  checkId: uuid("check_id").notNull().references(() => assistantTrainingChecks.id, { onDelete: "cascade" }),
-  exampleId: uuid("example_id").references(() => assistantTrainingExamples.id, { onDelete: "set null" }),
+  checkId: uuid("check_id").notNull().references(() => agentTrainingChecks.id, { onDelete: "cascade" }),
+  exampleId: uuid("example_id").references(() => agentTrainingExamples.id, { onDelete: "set null" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   position: integer("position").notNull(),
   exampleTitle: text("example_title").notNull(),
@@ -13412,21 +13413,21 @@ export const assistantTrainingResults = pgTable("assistant_training_results", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  checkIdx: index("assistant_training_results_check_idx").on(table.checkId, table.position),
-  exampleIdx: index("assistant_training_results_example_idx").on(table.exampleId, table.createdAt),
-  workspaceIdx: index("assistant_training_results_workspace_idx").on(table.workspaceId),
-  chatIdx: index("assistant_training_results_chat_idx").on(table.chatId),
-  statusCheck: check("assistant_training_results_status_check", sql`${table.status} IN ('queued','running','judging','succeeded','failed','skipped')`),
-  roleCheck: check("assistant_training_results_role_check", sql`${table.role} IN ('train','holdout')`),
+  checkIdx: index("agent_training_results_check_idx").on(table.checkId, table.position),
+  exampleIdx: index("agent_training_results_example_idx").on(table.exampleId, table.createdAt),
+  workspaceIdx: index("agent_training_results_workspace_idx").on(table.workspaceId),
+  chatIdx: index("agent_training_results_chat_idx").on(table.chatId),
+  statusCheck: check("agent_training_results_status_check", sql`${table.status} IN ('queued','running','judging','succeeded','failed','skipped')`),
+  roleCheck: check("agent_training_results_role_check", sql`${table.role} IN ('train','holdout')`),
 }));
-export type AssistantTrainingResultRecord = typeof assistantTrainingResults.$inferSelect;
+export type AgentTrainingResultRecord = typeof agentTrainingResults.$inferSelect;
 
 // Снимок ассистента для обучения на примерах (этап 3): инструкция, навыки с содержимым и правила ассистента — всё,
 // что обучение может поменять. Копии бинарных файлов навыков лежат в хранилище пространства под префиксом снимка.
-export const assistantTrainingSnapshots = pgTable("assistant_training_snapshots", {
+export const agentTrainingSnapshots = pgTable("agent_training_snapshots", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
   label: text("label").notNull(),
   payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
@@ -13434,19 +13435,19 @@ export const assistantTrainingSnapshots = pgTable("assistant_training_snapshots"
   restoredAt: timestamp("restored_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  assistantIdx: index("assistant_training_snapshots_assistant_idx").on(table.assistantId, table.createdAt),
-  workspaceIdx: index("assistant_training_snapshots_workspace_idx").on(table.workspaceId),
-  creatorIdx: index("assistant_training_snapshots_creator_idx").on(table.createdByUserId),
-  kindCheck: check("assistant_training_snapshots_kind_check", sql`${table.kind} IN ('manual','before_training','round','before_restore')`),
+  agentIdx: index("agent_training_snapshots_agent_idx").on(table.agentId, table.createdAt),
+  workspaceIdx: index("agent_training_snapshots_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("agent_training_snapshots_creator_idx").on(table.createdByUserId),
+  kindCheck: check("agent_training_snapshots_kind_check", sql`${table.kind} IN ('manual','before_training','round','before_restore')`),
 }));
-export type AssistantTrainingSnapshotRecord = typeof assistantTrainingSnapshots.$inferSelect;
+export type AgentTrainingSnapshotRecord = typeof agentTrainingSnapshots.$inferSelect;
 
 // Задание обучения ассистента на примерах (этап 4): круги «правка → проверка → принять или откатить». Ведёт воркер
 // монолита по аренде; пределы (потолок расхода, круги без прироста, всего кругов, длительность) держит платформа.
-export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
+export const agentTrainingJobs = pgTable("agent_training_jobs", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
   requestedByUserId: varchar("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
   /** Чат, из которого обучение запустил агент: туда уходит отчёт по окончании. */
   originChatId: varchar("origin_chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
@@ -13459,18 +13460,18 @@ export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
   spentTokens: bigint("spent_tokens", { mode: "number" }).notNull().default(0),
   round: integer("round").notNull().default(0),
   roundsWithoutGain: integer("rounds_without_gain").notNull().default(0),
-  currentCheckId: uuid("current_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
-  beforeSnapshotId: uuid("before_snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
-  bestSnapshotId: uuid("best_snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
+  currentCheckId: uuid("current_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
+  beforeSnapshotId: uuid("before_snapshot_id").references(() => agentTrainingSnapshots.id, { onDelete: "set null" }),
+  bestSnapshotId: uuid("best_snapshot_id").references(() => agentTrainingSnapshots.id, { onDelete: "set null" }),
   baselineScore: doublePrecision("baseline_score"),
   baselineTrainScore: doublePrecision("baseline_train_score"),
   baselineHoldoutScore: doublePrecision("baseline_holdout_score"),
   bestScore: doublePrecision("best_score"),
   bestTrainScore: doublePrecision("best_train_score"),
   bestHoldoutScore: doublePrecision("best_holdout_score"),
-  bestCheckId: uuid("best_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  bestCheckId: uuid("best_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
   /** Черновик ассистента, в котором идут круги; null — обучение старого вида (правило рабочего ассистента). */
-  draftAssistantId: varchar("draft_assistant_id").references(() => assistants.id, { onDelete: "set null" }),
+  draftAgentId: varchar("draft_agent_id").references(() => agents.id, { onDelete: "set null" }),
   /** Соответствие навыков и правил черновика рабочим: { skills: { черновик: рабочий }, rules: { … } }. */
   draftMap: jsonb("draft_map").$type<{ skills: Record<string, string>; rules: Record<string, string> }>(),
   /** Решение по черновику: applied — перенесён в рабочего, discarded — отброшен; null — ждёт решения или его не было. */
@@ -13485,25 +13486,25 @@ export const assistantTrainingJobs = pgTable("assistant_training_jobs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  assistantIdx: index("assistant_training_jobs_assistant_idx").on(table.assistantId, table.createdAt),
-  workspaceIdx: index("assistant_training_jobs_workspace_idx").on(table.workspaceId),
-  requesterIdx: index("assistant_training_jobs_requester_idx").on(table.requestedByUserId),
-  originChatIdx: index("assistant_training_jobs_origin_chat_idx").on(table.originChatId),
-  currentCheckIdx: index("assistant_training_jobs_current_check_idx").on(table.currentCheckId),
-  bestCheckIdx: index("assistant_training_jobs_best_check_idx").on(table.bestCheckId),
-  beforeSnapshotIdx: index("assistant_training_jobs_before_snapshot_idx").on(table.beforeSnapshotId),
-  draftAssistantIdx: index("assistant_training_jobs_draft_assistant_idx").on(table.draftAssistantId),
-  bestSnapshotIdx: index("assistant_training_jobs_best_snapshot_idx").on(table.bestSnapshotId),
-  queueIdx: index("assistant_training_jobs_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
-  unfinishedUnique: uniqueIndex("assistant_training_jobs_unfinished_unique").on(table.assistantId).where(sql`${table.status} IN ('queued','running')`),
-  statusCheck: check("assistant_training_jobs_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
-  phaseCheck: check("assistant_training_jobs_phase_check", sql`${table.phase} IN ('baseline','improving','evaluating','done')`),
+  agentIdx: index("agent_training_jobs_agent_idx").on(table.agentId, table.createdAt),
+  workspaceIdx: index("agent_training_jobs_workspace_idx").on(table.workspaceId),
+  requesterIdx: index("agent_training_jobs_requester_idx").on(table.requestedByUserId),
+  originChatIdx: index("agent_training_jobs_origin_chat_idx").on(table.originChatId),
+  currentCheckIdx: index("agent_training_jobs_current_check_idx").on(table.currentCheckId),
+  bestCheckIdx: index("agent_training_jobs_best_check_idx").on(table.bestCheckId),
+  beforeSnapshotIdx: index("agent_training_jobs_before_snapshot_idx").on(table.beforeSnapshotId),
+  draftAgentIdx: index("agent_training_jobs_draft_agent_idx").on(table.draftAgentId),
+  bestSnapshotIdx: index("agent_training_jobs_best_snapshot_idx").on(table.bestSnapshotId),
+  queueIdx: index("agent_training_jobs_queue_idx").on(table.status, table.leaseUntil).where(sql`${table.status} IN ('queued','running')`),
+  unfinishedUnique: uniqueIndex("agent_training_jobs_unfinished_unique").on(table.agentId).where(sql`${table.status} IN ('queued','running')`),
+  statusCheck: check("agent_training_jobs_status_check", sql`${table.status} IN ('queued','running','succeeded','failed','canceled')`),
+  phaseCheck: check("agent_training_jobs_phase_check", sql`${table.phase} IN ('baseline','improving','evaluating','done')`),
 }));
-export type AssistantTrainingJobRecord = typeof assistantTrainingJobs.$inferSelect;
+export type AgentTrainingJobRecord = typeof agentTrainingJobs.$inferSelect;
 
-export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
+export const agentTrainingRounds = pgTable("agent_training_rounds", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  jobId: uuid("job_id").notNull().references(() => assistantTrainingJobs.id, { onDelete: "cascade" }),
+  jobId: uuid("job_id").notNull().references(() => agentTrainingJobs.id, { onDelete: "cascade" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   round: integer("round").notNull(),
   status: text("status").notNull().default("improving"),
@@ -13514,44 +13515,44 @@ export const assistantTrainingRounds = pgTable("assistant_training_rounds", {
   changeAfter: text("change_after"),
   /** Служебный чат хода сборщика навыка, пока круг собирает навык; без внешнего ключа — круг остаётся историей. */
   builderChatId: varchar("builder_chat_id"),
-  checkId: uuid("check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  checkId: uuid("check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
   /** Перепроверка круга: прирост не больше разброса — вторая проверка, решение по среднему двух. */
-  confirmCheckId: uuid("confirm_check_id").references(() => assistantTrainingChecks.id, { onDelete: "set null" }),
+  confirmCheckId: uuid("confirm_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
   score: doublePrecision("score"),
   trainScore: doublePrecision("train_score"),
   holdoutScore: doublePrecision("holdout_score"),
-  snapshotId: uuid("snapshot_id").references(() => assistantTrainingSnapshots.id, { onDelete: "set null" }),
+  snapshotId: uuid("snapshot_id").references(() => agentTrainingSnapshots.id, { onDelete: "set null" }),
   spentCents: bigint("spent_cents", { mode: "number" }).notNull().default(0),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 }, (table) => ({
-  jobRoundUnique: uniqueIndex("assistant_training_rounds_job_round_unique").on(table.jobId, table.round),
-  workspaceIdx: index("assistant_training_rounds_workspace_idx").on(table.workspaceId),
-  checkIdx: index("assistant_training_rounds_check_idx").on(table.checkId),
-  confirmCheckIdx: index("assistant_training_rounds_confirm_check_idx").on(table.confirmCheckId),
-  snapshotIdx: index("assistant_training_rounds_snapshot_idx").on(table.snapshotId),
-  statusCheck: check("assistant_training_rounds_status_check", sql`${table.status} IN ('improving','evaluating','accepted','rejected','failed')`),
+  jobRoundUnique: uniqueIndex("agent_training_rounds_job_round_unique").on(table.jobId, table.round),
+  workspaceIdx: index("agent_training_rounds_workspace_idx").on(table.workspaceId),
+  checkIdx: index("agent_training_rounds_check_idx").on(table.checkId),
+  confirmCheckIdx: index("agent_training_rounds_confirm_check_idx").on(table.confirmCheckId),
+  snapshotIdx: index("agent_training_rounds_snapshot_idx").on(table.snapshotId),
+  statusCheck: check("agent_training_rounds_status_check", sql`${table.status} IN ('improving','evaluating','accepted','rejected','failed')`),
 }));
-export type AssistantTrainingRoundRecord = typeof assistantTrainingRounds.$inferSelect;
+export type AgentTrainingRoundRecord = typeof agentTrainingRounds.$inferSelect;
 
 // Задача обучения ассистента (перестроение 12.11.2026): общий промпт на все примеры и материалы задачи — файлы,
 // общие для всех примеров (шаблоны, бланки, чек-листы, методики); агент кладёт их в навык.
-export const assistantTrainingTasks = pgTable("assistant_training_tasks", {
-  assistantId: varchar("assistant_id").primaryKey().references(() => assistants.id, { onDelete: "cascade" }),
+export const agentTrainingTasks = pgTable("agent_training_tasks", {
+  agentId: varchar("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   prompt: text("prompt").notNull().default(""),
   updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  workspaceIdx: index("assistant_training_tasks_workspace_idx").on(table.workspaceId),
-  updaterIdx: index("assistant_training_tasks_updater_idx").on(table.updatedByUserId),
+  workspaceIdx: index("agent_training_tasks_workspace_idx").on(table.workspaceId),
+  updaterIdx: index("agent_training_tasks_updater_idx").on(table.updatedByUserId),
 }));
-export type AssistantTrainingTaskRecord = typeof assistantTrainingTasks.$inferSelect;
+export type AgentTrainingTaskRecord = typeof agentTrainingTasks.$inferSelect;
 
-export const assistantTrainingMaterials = pgTable("assistant_training_materials", {
+export const agentTrainingMaterials = pgTable("agent_training_materials", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  assistantId: varchar("assistant_id").notNull().references(() => assistants.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   fileName: text("file_name").notNull(),
   mimeType: text("mime_type"),
@@ -13560,16 +13561,16 @@ export const assistantTrainingMaterials = pgTable("assistant_training_materials"
   createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  assistantIdx: index("assistant_training_materials_assistant_idx").on(table.assistantId, table.createdAt),
-  workspaceIdx: index("assistant_training_materials_workspace_idx").on(table.workspaceId),
-  creatorIdx: index("assistant_training_materials_creator_idx").on(table.createdByUserId),
+  agentIdx: index("agent_training_materials_agent_idx").on(table.agentId, table.createdAt),
+  workspaceIdx: index("agent_training_materials_workspace_idx").on(table.workspaceId),
+  creatorIdx: index("agent_training_materials_creator_idx").on(table.createdByUserId),
 }));
-export type AssistantTrainingMaterialRecord = typeof assistantTrainingMaterials.$inferSelect;
+export type AgentTrainingMaterialRecord = typeof agentTrainingMaterials.$inferSelect;
 
 // Паспорт задачи обучения (перестроение 12.11.2026): переменные результата, выбор шаблона и обязательные шаги —
 // платформа выводит их из примеров и материалов задачи; форма — shared/assistant-training.ts.
-export const assistantTrainingPassports = pgTable("assistant_training_passports", {
-  assistantId: varchar("assistant_id").primaryKey().references(() => assistants.id, { onDelete: "cascade" }),
+export const agentTrainingPassports = pgTable("agent_training_passports", {
+  agentId: varchar("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   status: text("status").notNull().default("building"),
   passport: jsonb("passport"),
@@ -13582,8 +13583,8 @@ export const assistantTrainingPassports = pgTable("assistant_training_passports"
   updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  workspaceIdx: index("assistant_training_passports_workspace_idx").on(table.workspaceId),
-  updaterIdx: index("assistant_training_passports_updater_idx").on(table.updatedByUserId),
-  statusCheck: check("assistant_training_passports_status_check", sql`${table.status} IN ('building','ready','failed')`),
+  workspaceIdx: index("agent_training_passports_workspace_idx").on(table.workspaceId),
+  updaterIdx: index("agent_training_passports_updater_idx").on(table.updatedByUserId),
+  statusCheck: check("agent_training_passports_status_check", sql`${table.status} IN ('building','ready','failed')`),
 }));
-export type AssistantTrainingPassportRecord = typeof assistantTrainingPassports.$inferSelect;
+export type AgentTrainingPassportRecord = typeof agentTrainingPassports.$inferSelect;

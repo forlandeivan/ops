@@ -6,6 +6,26 @@ import {
   type JsonObject,
 } from "./plugin-system";
 
+// Только выпущенные имена операций. Произвольный ключ из старого пространства имён прав не получает.
+const profileOperationAliases = new Map<string, string>([
+  ["assistant.read_material", "agent.read_material"],
+  ["assistants.list_options", "agents.list_options"],
+  ["assistants.list", "agents.list"],
+  ["assistants.get", "agents.get"],
+  ["assistants.dry_run", "agents.dry_run"],
+  ["assistants.create", "agents.create"],
+  ["assistants.update", "agents.update"],
+  ["assistants.update_skills", "agents.update_skills"],
+  ["assistants.bind_action", "agents.bind_action"],
+  ["assistants.create_file_from_attachment", "agents.create_file_from_attachment"],
+]);
+const profileOperationKeys = new Set(profileOperationAliases.values());
+
+export function canonicalSystemOperationKey(key: string): string {
+  const bare = key.startsWith("system.") ? key.slice("system.".length) : key;
+  return profileOperationAliases.get(bare) ?? (profileOperationKeys.has(bare) ? bare : key);
+}
+
 export const systemOperationCategoryValues = [
   "admin",
   "agent",

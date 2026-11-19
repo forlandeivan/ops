@@ -70,7 +70,7 @@ export const workflowContextRequestChatMetadataSchema = z.object({
   resolvedContextRefs: z.array(resolvedContextRefSchema).default([]),
 });
 
-export const assistantWorkflowContextRequestSubmissionSchema = z.object({
+export const agentWorkflowContextRequestSubmissionSchema = z.object({
   contextRefs: z.array(contextRefSchema).max(20),
   composerParts: z.array(composerPartSchema).max(200).optional(),
 });
@@ -84,8 +84,8 @@ export type ContextRefPart = z.infer<typeof contextRefPartSchema>;
 export type ComposerPart = z.infer<typeof composerPartSchema>;
 export type ComposerDraft = z.infer<typeof composerDraftSchema>;
 export type WorkflowContextRequestChatMetadata = z.infer<typeof workflowContextRequestChatMetadataSchema>;
-export type AssistantWorkflowContextRequestSubmission = z.infer<
-  typeof assistantWorkflowContextRequestSubmissionSchema
+export type AgentWorkflowContextRequestSubmission = z.infer<
+  typeof agentWorkflowContextRequestSubmissionSchema
 >;
 
 export type ComposerSubmitPayload = {

@@ -77,7 +77,7 @@ const SLASH_SCOPE_RANK: Record<PromptScope, number> = {
   workspace: 1,
   instance: 2,
   system: 3,
-  assistant: 4,
+  agent: 4,
 };
 
 /**

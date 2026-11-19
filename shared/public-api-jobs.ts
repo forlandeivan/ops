@@ -27,13 +27,24 @@ export function isTerminalJobStatus(status: PublicJobStatus): boolean {
 export const PUBLIC_JOB_KINDS = [
   "knowledge_indexing",
   "knowledge_ingestion",
-  "assistant_action",
-  "assistant_response",
+  "agent_action",
+  "agent_response",
   "transcription",
   "workflow_run",
 ] as const;
 
 export type PublicJobKind = (typeof PUBLIC_JOB_KINDS)[number];
+
+/** The v1 response keeps its original kind tokens for existing integrations. */
+export function toV1JobKind(kind: PublicJobKind) {
+  if (kind === "agent_action") return "assistant_action";
+  if (kind === "agent_response") return "assistant_response";
+  return kind;
+}
+
+export function parsePublicJobKind(value: unknown): PublicJobKind | null {
+  return PUBLIC_JOB_KINDS.find((kind) => value === kind || value === toV1JobKind(kind)) ?? null;
+}
 
 /**
  * Ожидание внешнего события — это `running`, а не отдельное состояние. Согласование,
@@ -63,7 +74,7 @@ const KNOWLEDGE_INDEXING_STATUS_MAP: Record<string, PublicJobStatus> = {
   canceled: "cancelled",
 };
 
-const ASSISTANT_ACTION_STATUS_MAP: Record<string, PublicJobStatus> = {
+const AGENT_ACTION_STATUS_MAP: Record<string, PublicJobStatus> = {
   pending: "queued",
   running: "running",
   success: "succeeded",
@@ -112,7 +123,7 @@ const KNOWLEDGE_INGESTION_STATUS_MAP: Record<string, PublicJobStatus> = {
  * и состояние он пишет прямо в реестр. Поэтому внутренние состояния совпадают с публичными —
  * переводить нечего.
  */
-const ASSISTANT_RESPONSE_STATUS_MAP: Record<string, PublicJobStatus> = {
+const AGENT_RESPONSE_STATUS_MAP: Record<string, PublicJobStatus> = {
   queued: "queued",
   running: "running",
   succeeded: "succeeded",
@@ -121,10 +132,10 @@ const ASSISTANT_RESPONSE_STATUS_MAP: Record<string, PublicJobStatus> = {
 };
 
 const STATUS_MAPS: Record<PublicJobKind, Record<string, PublicJobStatus>> = {
-  assistant_response: ASSISTANT_RESPONSE_STATUS_MAP,
+  agent_response: AGENT_RESPONSE_STATUS_MAP,
   knowledge_indexing: KNOWLEDGE_INDEXING_STATUS_MAP,
   knowledge_ingestion: KNOWLEDGE_INGESTION_STATUS_MAP,
-  assistant_action: ASSISTANT_ACTION_STATUS_MAP,
+  agent_action: AGENT_ACTION_STATUS_MAP,
   transcription: TRANSCRIPTION_STATUS_MAP,
   workflow_run: WORKFLOW_RUN_STATUS_MAP,
 };
@@ -157,7 +168,8 @@ export type PublicJobErrorBody = {
  */
 export type PublicJobBody = {
   id: string;
-  kind: PublicJobKind;
+  kind: ReturnType<typeof toV1JobKind>;
+  operation_kind: PublicJobKind;
   status: PublicJobStatus;
   workspace_id: string;
   created_at: string;

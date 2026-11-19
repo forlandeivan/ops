@@ -21,7 +21,7 @@ import {
   type UpdateCleanupPolicyDto,
 } from "@shared/cleanup-policies";
 
-import { JANITOR_TASKS, getJanitorTask, type JanitorTaskDefinition } from "./janitor-task-registry";
+import { JANITOR_TASKS, canonicalCleanupKey, getJanitorTask, type JanitorTaskDefinition } from "./janitor-task-registry";
 
 export class CleanupPolicyError extends Error {
   status: number;
@@ -144,7 +144,8 @@ export async function listResolvedPolicies(): Promise<CleanupPolicyDto[]> {
   );
 }
 
-export async function getResolvedPolicy(resourceKey: string): Promise<CleanupPolicyDto> {
+export async function getResolvedPolicy(key: string): Promise<CleanupPolicyDto> {
+  const resourceKey = canonicalCleanupKey(key);
   const task = getJanitorTask(resourceKey);
   if (!task) {
     throw new CleanupPolicyError(`Unknown cleanup resource: ${resourceKey}`, 404);
@@ -202,10 +203,11 @@ function auditSnapshot(policy: Pick<CleanupPolicyDto, "enabled" | "retentionDays
 }
 
 export async function updatePolicy(
-  resourceKey: string,
+  key: string,
   patch: UpdateCleanupPolicyDto,
   actorId: string | null,
 ): Promise<CleanupPolicyDto> {
+  const resourceKey = canonicalCleanupKey(key);
   const task = getJanitorTask(resourceKey);
   if (!task) {
     throw new CleanupPolicyError(`Unknown cleanup resource: ${resourceKey}`, 404);
@@ -281,7 +283,7 @@ export interface CleanupRunRecord {
 
 export async function recordRun(entry: CleanupRunRecord): Promise<void> {
   await db.insert(cleanupRunLog).values({
-    resourceKey: entry.resourceKey,
+    resourceKey: canonicalCleanupKey(entry.resourceKey),
     mode: entry.mode,
     status: entry.status,
     matchedCount: entry.matchedCount,
@@ -311,7 +313,7 @@ export async function recordRunStart(entry: CleanupRunStartRecord): Promise<stri
   const [row] = await db
     .insert(cleanupRunLog)
     .values({
-      resourceKey: entry.resourceKey,
+      resourceKey: canonicalCleanupKey(entry.resourceKey),
       mode: entry.mode,
       status: "running",
       startedAt: entry.startedAt,
@@ -379,7 +381,7 @@ export async function failStaleRunningRuns(params: {
 }): Promise<number> {
   const conditions = [eq(cleanupRunLog.status, "running"), lt(cleanupRunLog.startedAt, params.startedBefore)];
   if (params.resourceKey) {
-    conditions.push(eq(cleanupRunLog.resourceKey, params.resourceKey));
+    conditions.push(eq(cleanupRunLog.resourceKey, canonicalCleanupKey(params.resourceKey)));
   }
   const rows = await db
     .update(cleanupRunLog)
@@ -438,7 +440,8 @@ export async function listRecentRuns(limit = 100): Promise<CleanupRunJournalEntr
   return rows.map((row) => toJournalEntry(row));
 }
 
-export async function listRuns(resourceKey: string, limit = 20): Promise<CleanupRunSummaryDto[]> {
+export async function listRuns(key: string, limit = 20): Promise<CleanupRunSummaryDto[]> {
+  const resourceKey = canonicalCleanupKey(key);
   if (!getJanitorTask(resourceKey)) {
     throw new CleanupPolicyError(`Unknown cleanup resource: ${resourceKey}`, 404);
   }

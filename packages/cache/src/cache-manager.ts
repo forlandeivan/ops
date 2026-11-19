@@ -57,7 +57,8 @@ export const cacheKeys = {
     if (opts?.providerType) parts.push(`pt:${opts.providerType}`);
     return parts.join(':');
   },
-  assistant: (workspaceId: string, assistantId: string) => `assistant:${workspaceId}:${assistantId}`,
+  // Общий ключ для инвалидации профиля старыми и новыми процессами при обновлении.
+  agent: (workspaceId: string, agentId: string) => `assistant:${workspaceId}:${agentId}`,
   tariffPlanWithLimits: (planId: string) => `tariff:plan:${planId}:with-limits`,
   workspaceTariffPlanId: (workspaceId: string) => `ws:${workspaceId}:tariff-plan-id`,
   corsHostnames: () => `cors:hostnames`,

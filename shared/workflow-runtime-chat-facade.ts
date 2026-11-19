@@ -12,7 +12,7 @@
  */
 
 import type {
-  AssistantActionType,
+  AgentActionType,
   BotAction,
   BotActionStatus,
   ChatCard,
@@ -24,7 +24,7 @@ import type {
   Transcript,
   TranscriptStatus,
 } from "@shared/schema";
-import type { AssistantDto } from "@shared/assistants";
+import type { AgentDto } from "@shared/agents";
 
 /** Дескриптор файла в спроецированном сообщении чата (общий для `files[]` и `file`). */
 export type MappedChatMessageFile = {
@@ -57,27 +57,37 @@ export type ChatSummary = {
   id: string;
   workspaceId: string;
   userId: string;
+  agentId: string;
   assistantId: string;
   status: ChatStatus;
   title: string;
   createdAt: Date;
   updatedAt: Date;
   deletedAt?: Date | null;
+  agentName: string | null;
   assistantName: string | null;
+  agentIsSystem: boolean;
   assistantIsSystem: boolean;
+  agentSystemKey: string | null;
   assistantSystemKey: string | null;
+  agentStatus: string | null;
   assistantStatus: string | null;
   lastMessageSnippet?: string | null;
-  currentAssistantActionType?: AssistantActionType | null;
-  currentAssistantActionText?: string | null;
-  currentAssistantActionTriggerMessageId?: string | null;
-  currentAssistantActionUpdatedAt?: Date | string | null;
-  currentAssistantAction?: {
-    type: AssistantActionType;
+  currentAgentActionType?: AgentActionType | null;
+  currentAgentActionText?: string | null;
+  currentAgentActionTriggerMessageId?: string | null;
+  currentAgentActionUpdatedAt?: Date | string | null;
+  currentAgentAction?: {
+    type: AgentActionType;
     text: string | null;
     triggerMessageId: string | null;
     updatedAt: string | null;
   } | null;
+  currentAssistantActionType?: ChatSummary["currentAgentActionType"];
+  currentAssistantActionText?: ChatSummary["currentAgentActionText"];
+  currentAssistantActionTriggerMessageId?: ChatSummary["currentAgentActionTriggerMessageId"];
+  currentAssistantActionUpdatedAt?: ChatSummary["currentAgentActionUpdatedAt"];
+  currentAssistantAction?: ChatSummary["currentAgentAction"];
 };
 
 /** server/chat-service.ts — вид ассистента для LLM-контекста чата. */
@@ -105,7 +115,7 @@ export type ChatConversationMessage = {
 export type ChatLlmContext = {
   chat: ChatSummary;
   assistant: ChatAssistantContext;
-  assistantConfig: AssistantDto;
+  assistantConfig: AgentDto;
   provider: LlmProvider;
   requestConfig: LlmRequestConfig;
   model: string | null;
@@ -147,7 +157,7 @@ export type WorkflowGatewayChatPort = {
   setChatAssistantAction(opts: {
     workspaceId: string;
     chatId: string;
-    actionType?: AssistantActionType | null;
+    actionType?: AgentActionType | null;
     actionText?: string | null;
     triggerMessageId?: string | null;
     occurredAt?: string | Date | null;

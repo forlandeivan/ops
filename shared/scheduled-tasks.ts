@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeLegacyKeys } from "./legacy-keys";
 import { scheduledTaskScheduleSchema } from "./scheduled-task-schedule";
 
 export const scheduledTaskStates = [
@@ -31,11 +32,11 @@ export function scheduledTaskNotificationKind(status: string, outcome: string, p
   if (status !== "succeeded" || policy === "on_failure") return null;
   return policy === "always" || outcome === "completed" || outcome === "attention" ? "scheduled.completed" : null;
 }
-export const scheduledTaskDefinitionSchema = z
+const definitionFields = z
   .object({
     name: z.string().trim().min(1, "Укажите название").max(160),
     instruction: z.string().trim().min(1, "Опишите задачу").max(32_000),
-    assistantId: z.string().min(1),
+    agentId: z.string().min(1),
     actorUserId: z.string().min(1),
     execution: z.enum(["agent", "workflow"]),
     mode: z.enum(scheduledTaskModes).default("ask"),
@@ -44,6 +45,13 @@ export const scheduledTaskDefinitionSchema = z
     schedule: scheduledTaskScheduleSchema,
   })
   .strict();
+function normalizeDefinition(input: unknown, ctx: z.RefinementCtx) {
+  return normalizeLegacyKeys(input, ctx, { assistantId: "agentId" });
+}
+export const scheduledTaskDefinitionSchema = z.preprocess(normalizeDefinition, definitionFields);
+export const scheduledTaskDefinitionInputSchema = z.preprocess(
+  normalizeDefinition, definitionFields.extend({ schedule: z.unknown() }),
+);
 export type ScheduledTaskDefinition = z.infer<
   typeof scheduledTaskDefinitionSchema
 >;
@@ -84,13 +92,15 @@ export type ScheduledTaskDto = {
   revision: number;
   ownerUserId: string | null;
   actorUserId: string | null;
-  assistantId: string | null;
+  agentId: string | null;
+  /** @deprecated Older clients read this alias. */
+  assistantId?: string | null;
   nextRunAt: string | null;
   lastStartedAt: string | null;
   updatedAt: string;
   canEdit: boolean;
   canReadContent: boolean;
-  definition: ScheduledTaskDefinition | null;
+  definition: (ScheduledTaskDefinition & { assistantId?: string }) | null;
   lastRun: ScheduledTaskRunDto | null;
   activeRun: ScheduledTaskRunDto | null;
 };

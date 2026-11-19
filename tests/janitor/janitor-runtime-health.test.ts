@@ -67,7 +67,7 @@ describe("janitor: пробы и метрики", () => {
   });
 
   it("отдаёт Prometheus-метрики janitor на /metrics", async () => {
-    janitorRunsTotal.inc({ policy: "pg.assistant_executions", status: "success", trigger: "auto" });
+    janitorRunsTotal.inc({ policy: "pg.agent_response_executions", status: "success", trigger: "auto" });
     fileArtifactCleanupQueueJobs.set({ status: "error" }, 2);
     fileArtifactCleanupQueueJobs.set({ status: "dead" }, 3);
 

@@ -7,7 +7,7 @@
  *    конверта, поэтому `instanceof AssistantWorkflowRuntimeError` на call-sites монолита продолжает
  *    работать через шов (в отличие от гардов направления 2, где доменных классов нет).
  *
- * До WD4.4a класс жил в `server/workflow-runtime/assistant-workflow-runtime-service.ts`; вынесен сюда,
+ * До WD4.4a класс жил в `server/workflow-runtime/agent-workflow-runtime-service.ts`; вынесен сюда,
  * чтобы HTTP-путь направления 1 (`workflow-runtime-http-client` + порт `workflow-runtime-client`)
  * импортировался БЕЗ каталога `server/workflow-runtime/*` (тот физически удаляется в WD4.4b). Сервис-файл
  * ядра ре-экспортит класс для обратной совместимости (strangler) — подклассы рантайма продолжают

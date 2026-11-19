@@ -94,7 +94,7 @@ describe("cascade-safe PG retention", () => {
     expect(statement).toContain("enqueue_barrier");
     expect(statement).toContain("delete from \"chat_sessions\" as root");
     // Политика чатов не двухфазная: нет условия «не осталось детей».
-    expect(statement).not.toContain("child.assistant_id");
+    expect(statement).not.toContain("child.agent_id");
     expect(query.params).toContain("pg.chat_sessions");
     expect(query.params).toContain(300_000);
   });
@@ -104,7 +104,7 @@ describe("cascade-safe PG retention", () => {
     const store = createPgRetentionStore(capture.database);
 
     await expect(store.deleteBatch({
-      table: "assistants",
+      table: "agents",
       timeColumn: "updated_at",
       pkColumn: "id",
       cutoff,
@@ -114,22 +114,22 @@ describe("cascade-safe PG retention", () => {
 
     const query = capture.queries[0];
     const statement = query.sql.toLowerCase();
-    expect(statement).toContain("completion.assistant_id = root.id");
-    expect(statement).toContain("execution.assistant_id = root.id");
+    expect(statement).toContain("completion.agent_id = root.id");
+    expect(statement).toContain("execution.agent_id = root.id");
     expect(statement).toContain("join chat_sessions as session on session.id = attachment.chat_id");
-    expect(statement).toContain("join candidates on candidates.id = session.assistant_id");
-    expect(statement).toContain("delete from \"assistants\" as root");
+    expect(statement).toContain("join candidates on candidates.id = session.agent_id");
+    expect(statement).toContain("delete from \"agents\" as root");
     // Фаза B двухфазного purge: ассистент удаляется только когда чатов не осталось.
     expect(statement).toContain("not exists (");
     expect(statement).toContain("select 1 from chat_sessions as child");
-    expect(statement).toContain("child.assistant_id = root.id");
+    expect(statement).toContain("child.agent_id = root.id");
     expect(query.params).toContain("archived");
-    expect(query.params).toContain("pg.assistants.archived");
+    expect(query.params).toContain("pg.agents.archived");
   });
 });
 
 const assistantsOp: JanitorOperation = {
-  table: "assistants",
+  table: "agents",
   timeColumn: "updated_at",
   pkColumn: "id",
   action: "delete_rows",
@@ -153,7 +153,7 @@ const RESOLVED = { action: "delete_rows", mode: "enforce", retentionDays: 30, ba
 const isDrainStatement = (statement: string) =>
   statement.includes("delete from chat_sessions as chat");
 const isAssistantDeleteStatement = (statement: string) =>
-  statement.includes('delete from "assistants" as root');
+  statement.includes('delete from "agents" as root');
 
 describe("двухфазный purge архивных ассистентов: дренажный стейтмент (фаза A)", () => {
   it("удаляет порцию чатов кандидатов с enqueue snapshots, без условия deleted_at", async () => {
@@ -161,7 +161,7 @@ describe("двухфазный purge архивных ассистентов: д
     const store = createPgRetentionStore(capture.database);
 
     await expect(store.drainChildrenBatch!({
-      table: "assistants",
+      table: "agents",
       timeColumn: "updated_at",
       pkColumn: "id",
       cutoff,
@@ -175,14 +175,14 @@ describe("двухфазный purge архивных ассистентов: д
     // Кандидаты — чаты архивных ассистентов; batchSize считается в чатах.
     expect(statement).toContain("with candidates as materialized");
     expect(statement).toContain("from chat_sessions as chat");
-    expect(statement).toContain("join assistants as root on root.id = chat.assistant_id");
+    expect(statement).toContain("join agents as root on root.id = chat.agent_id");
     expect(statement).toContain('root."updated_at"');
     expect(statement).toContain('root."status"');
     // Дренируются ВСЕ чаты кандидата — soft-delete чата не требуется.
     expect(statement).not.toContain("deleted_at");
     // Ассистент с активной ASR не трогается вовсе: guard стоит уже на дренажe.
-    expect(statement).toContain("completion.assistant_id = root.id");
-    expect(statement).toContain("execution.assistant_id = root.id");
+    expect(statement).toContain("completion.agent_id = root.id");
+    expect(statement).toContain("execution.agent_id = root.id");
     expect(statement).toContain("coalesce(execution.lifecycle_status, execution.status, 'accepted')");
     expect(statement).toContain("for update of chat, root skip locked");
     // Snapshots вложений дренируемых чатов идут в durable-очередь тем же механизмом.
@@ -193,9 +193,9 @@ describe("двухфазный purge архивных ассистентов: д
     expect(statement).toContain("on conflict (idempotency_key) do update");
     expect(statement).toContain("enqueue_barrier");
     expect(statement).toContain("delete from chat_sessions as chat");
-    expect(statement).not.toContain('delete from "assistants"');
+    expect(statement).not.toContain('delete from "agents"');
     expect(query.params).toContain("archived");
-    expect(query.params).toContain("pg.assistants.archived");
+    expect(query.params).toContain("pg.agents.archived");
     expect(query.params).toContain(50);
   });
 
@@ -279,11 +279,11 @@ describe("двухфазный purge архивных ассистентов: ц
     const statement = capture.queries[0].sql.toLowerCase();
     expect(statement).toContain('delete from "chat_sessions" as root');
     expect(statement).toContain('"deleted_at"');
-    expect(statement).not.toContain("join assistants as root");
+    expect(statement).not.toContain("join agents as root");
   });
 
-  it("реестр включает двухфазный purge только для pg.assistants.archived", () => {
-    const archived = getJanitorTask("pg.assistants.archived");
+  it("реестр включает двухфазный purge только для pg.agents.archived", () => {
+    const archived = getJanitorTask("pg.agents.archived");
     expect(archived?.drainChildrenFirst).toBe(true);
     expect(operationsOf(archived!)[0].drainChildrenFirst).toBe(true);
     expect(getJanitorTask("pg.chat_sessions")?.drainChildrenFirst).toBeUndefined();

@@ -163,24 +163,24 @@ export function operationsOf(task: JanitorTaskDefinition): JanitorOperation[] {
 export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
   // ── LLM ────────────────────────────────────────────────────────────────
   task({
-    key: "pg.assistant_execution_steps.payloads",
+    key: "pg.agent_response_execution_steps.payloads",
     label: "Логи запуска LLM",
     description:
-      "Обнуляет тяжёлые данные лога шагов выполнения ассистента (input_payload / output_payload / diagnostic_info в assistant_execution_steps) старше срока хранения. Строка запуска и скелет шагов сохраняются.",
+      "Обнуляет тяжёлые данные лога шагов выполнения агента (input_payload / output_payload / diagnostic_info в agent_response_execution_steps) старше срока хранения. Строка запуска и скелет шагов сохраняются.",
     category: "llm",
     action: "strip_columns",
-    table: "assistant_execution_steps",
+    table: "agent_response_execution_steps",
     timeColumn: "started_at",
     strippedColumns: ["input_payload", "output_payload", "diagnostic_info"],
   }),
   task({
-    key: "pg.assistant_executions",
+    key: "pg.agent_response_executions",
     label: "Строки запуска LLM (assistant_executions)",
     description:
-      "Полностью удаляет строки запуска ассистента старше срока хранения (каскадно — шаги). Отдельная политика: можно держать выключенной, чтобы строки запуска не удалялись вовсе.",
+      "Полностью удаляет строки запуска агента старше срока хранения (каскадно — шаги). Отдельная политика: можно держать выключенной, чтобы строки запуска не удалялись вовсе.",
     category: "llm",
     action: "delete_rows",
-    table: "assistant_executions",
+    table: "agent_response_executions",
     timeColumn: "started_at",
     defaultEnabled: true,
     defaultRetentionDays: 30,
@@ -283,7 +283,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 60,
     sensitive: true,
     cascadeNote:
-      "Удаляет всё содержимое пространства: чаты, ассистентов, базы знаний, файлы, историю агента и настройки. Размер батча — строк одной таблицы за запрос. Очистку выполняет платформа по вызову janitor. Действие необратимо; запись о нём остаётся в журнале архивации и удаления.",
+      "Удаляет всё содержимое пространства: чаты, агентов, базы знаний, файлы, историю агента и настройки. Размер батча — строк одной таблицы за запрос. Очистку выполняет платформа по вызову janitor. Действие необратимо; запись о нём остаётся в журнале архивации и удаления.",
   }),
 
   // ── Проверка достоверности ответов (docs/rag-answer-quality-metrics-strategy-2026-09.md) ──
@@ -507,12 +507,12 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     timeColumn: "created_at",
   }),
   task({
-    key: "pg.assistant_workflow_run_events",
+    key: "pg.agent_workflow_run_events",
     label: "События шагов workflow (assistant_workflow_run_events)",
     description: "Удаляет события выполнения workflow-шагов старше срока хранения.",
     category: "events",
     action: "delete_rows",
-    table: "assistant_workflow_run_events",
+    table: "agent_workflow_run_events",
     timeColumn: "created_at",
   }),
   task({
@@ -916,7 +916,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
 
   // ── Векторное хранилище (Qdrant) ────────────────────────────────────────────
   // GC осиротевших коллекций Qdrant: удаляет коллекции, не связанные ни с одной БЗ/
-  // ассистентом в БД (после неудачных удалений БЗ, каскадов при удалении пространства,
+  // агентом в БД (после неудачных удалений БЗ, каскадов при удалении пространства,
   // сбоев уборки арены). Удаляется только то, что числится сиротой дольше grace-периода
   // (поле «Срок, дней»). В конце прогона оживляется reconcile usage. См.
   // server/janitor/tasks/qdrant-orphan-gc-task.ts.
@@ -924,7 +924,7 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     key: "qdrant.orphaned_collections",
     label: "Осиротевшие коллекции Qdrant",
     description:
-      "Удаляет коллекции Qdrant, не связанные ни с одной базой знаний или ассистентом в БД (остаются после неудачных удалений БЗ, удаления пространств и сбоев индексации). Удаляется только то, что непрерывно числится сиротой дольше grace-периода (поле «Срок, дней»). Топология коллекций не меняется, векторы не перекладываются.",
+      "Удаляет коллекции Qdrant, не связанные ни с одной базой знаний или агентом в БД (остаются после неудачных удалений БЗ, удаления пространств и сбоев индексации). Удаляется только то, что непрерывно числится сиротой дольше grace-периода (поле «Срок, дней»). Топология коллекций не меняется, векторы не перекладываются.",
     category: "vector",
     storage: "qdrant",
     action: "delete_collection",
@@ -938,18 +938,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     cascadeNote: "Удаляет данные из Qdrant безвозвратно. Первый прод-прогон рекомендуется делать через «Предпросмотр».",
   }),
 
-  // ── Ассистенты и чаты ───────────────────────────────────────────────────────
-  // Доменная группа «Ассистенты и чаты»: физическое удаление ассистентов из архива
+  // ── Агенты и чаты ───────────────────────────────────────────────────────
+  // Доменная группа «Агенты и чаты»: физическое удаление агентов из архива
   // и purge мягко-удалённых чатов. Обе задачи чувствительные и по умолчанию выключены —
   // архив служит «корзиной» (есть restore), удаление необратимо.
   task({
-    key: "pg.assistants.archived",
-    label: "Архивные ассистенты (physical purge)",
+    key: "pg.agents.archived",
+    label: "Архивные агенты (physical purge)",
     description:
-      "Физически удаляет ассистентов из архива (status='archived') старше срока хранения — в два шага: сначала чаты кандидата дренируются порциями (вложения каждой порции атомарно ставятся в durable file-cleanup очередь), затем удаляется сам ассистент, когда чатов не осталось. Активные и системные ассистенты не трогаются; ассистент с активной ASR откладывается. Выключена по умолчанию.",
-    category: "assistants",
+      "Физически удаляет агентов из архива (status='archived') старше срока хранения — в два шага: сначала чаты кандидата дренируются порциями (вложения каждой порции атомарно ставятся в durable file-cleanup очередь), затем удаляется сам агент, когда чатов не осталось. Активные и системные агенты не трогаются; агент с активной ASR откладывается. Выключена по умолчанию.",
+    category: "agents",
     action: "delete_rows",
-    table: "assistants",
+    table: "agents",
     timeColumn: "updated_at",
     equalsFilter: { column: "status", value: "archived" },
     drainChildrenFirst: true,
@@ -959,14 +959,14 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     intervalMinutes: 1440,
     sensitive: true,
     cascadeNote:
-      "Двухфазный purge: сначала порциями удаляются ВСЕ чаты ассистента (размер батча = чатов за стейтмент; их вложения фиксируются в durable cleanup-очереди), затем каскадно удаляется сам ассистент, оставшийся без чатов (размер батча = ассистентов за стейтмент). Активная ASR блокирует purge кандидата. Коллекция Qdrant остаётся до профильного GC. Действие необратимо.",
+      "Двухфазный purge: сначала порциями удаляются ВСЕ чаты агента (размер батча = чатов за стейтмент; их вложения фиксируются в durable cleanup-очереди), затем каскадно удаляется сам агент, оставшийся без чатов (размер батча = агентов за стейтмент). Активная ASR блокирует purge кандидата. Коллекция Qdrant остаётся до профильного GC. Действие необратимо.",
   }),
   task({
     key: "pg.chat_sessions",
     label: "Удалённые чаты (прежняя логика)",
     description:
       "Стирает чаты, которые пользователи удалили до перехода на удаление навсегда (#224): тогда чат только помечался удалённым (deleted_at) и оставался в базе. Сейчас «Удалить» стирает чат сразу, новые такие строки не появляются. Перед каскадом snapshots вложений атомарно ставятся в durable file-cleanup очередь. Чаты с активной ASR откладываются.",
-    category: "assistants",
+    category: "agents",
     action: "delete_rows",
     table: "chat_sessions",
     timeColumn: "deleted_at",
@@ -979,6 +979,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
   }),
 ] as const;
 
+const previousTaskKeys = new Map<string, string>([
+  ["pg.assistant_execution_steps.payloads", "pg.agent_response_execution_steps.payloads"],
+  ["pg.assistant_executions", "pg.agent_response_executions"],
+  ["pg.assistant_workflow_run_events", "pg.agent_workflow_run_events"],
+  ["pg.assistants.archived", "pg.agents.archived"],
+]);
+
+export function canonicalCleanupKey(key: string): string {
+  return previousTaskKeys.get(key) ?? key;
+}
+
 export function getJanitorTask(key: string): JanitorTaskDefinition | undefined {
-  return JANITOR_TASKS.find((item) => item.key === key);
+  const resourceKey = canonicalCleanupKey(key);
+  return JANITOR_TASKS.find((item) => item.key === resourceKey);
 }

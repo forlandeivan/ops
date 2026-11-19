@@ -4,6 +4,13 @@ import { JANITOR_TASKS, getJanitorTask, operationsOf } from "../../server/janito
 import { cleanupActions, cleanupCategories } from "@shared/cleanup-policies";
 
 describe("janitor task registry", () => {
+  it("resolves previously saved cleanup keys to the current policy", () => {
+    expect(getJanitorTask("pg.assistant_execution_steps.payloads")?.key).toBe("pg.agent_response_execution_steps.payloads");
+    expect(getJanitorTask("pg.assistant_executions")?.key).toBe("pg.agent_response_executions");
+    expect(getJanitorTask("pg.assistant_workflow_run_events")?.key).toBe("pg.agent_workflow_run_events");
+    expect(getJanitorTask("pg.assistants.archived")?.key).toBe("pg.agents.archived");
+  });
+
   it("has at least one task and unique keys", () => {
     expect(JANITOR_TASKS.length).toBeGreaterThan(0);
     const keys = JANITOR_TASKS.map((task) => task.key);
@@ -33,7 +40,7 @@ describe("janitor task registry", () => {
     expect(enabled).toEqual(
       [
         // поглощённые legacy-джобы — сохраняют прежнее поведение (уже чистили до janitor)
-        "pg.assistant_executions",
+        "pg.agent_response_executions",
         "pg.scheduled_task_runs",
         "pg.scheduled_task_audit",
         "pg.document_revisions.autosave",
@@ -121,7 +128,7 @@ describe("janitor task registry", () => {
   it("exposes exactly two policies per heavy domain (logs + run rows)", () => {
     const byCategory = (category: string) => JANITOR_TASKS.filter((task) => task.category === category);
     // В категории llm живут и политики проверки достоверности — домен запусков ассистента считаем по его таблицам.
-    expect(byCategory("llm").filter((task) => task.table.startsWith("assistant_execution"))).toHaveLength(2);
+    expect(byCategory("llm").filter((task) => task.table.startsWith("agent_response_execution"))).toHaveLength(2);
     expect(byCategory("asr")).toHaveLength(2);
   });
 
@@ -193,13 +200,13 @@ describe("janitor task registry", () => {
   });
 
   it("ships the LLM log-stripping policy", () => {
-    const llm = getJanitorTask("pg.assistant_execution_steps.payloads");
+    const llm = getJanitorTask("pg.agent_response_execution_steps.payloads");
     expect(llm?.action).toBe("strip_columns");
     expect(llm?.strippedColumns).toContain("input_payload");
   });
 
   it("splits run-row deletion into separate, sensitive, cascade-aware policies", () => {
-    const llmRows = getJanitorTask("pg.assistant_executions");
+    const llmRows = getJanitorTask("pg.agent_response_executions");
     const asrRows = getJanitorTask("pg.asr_executions");
     for (const policy of [llmRows, asrRows]) {
       expect(policy?.action).toBe("delete_rows");
@@ -313,18 +320,18 @@ describe("janitor task registry", () => {
   });
 
   it("groups assistant/chat purges under the 'assistants' category", () => {
-    expect(cleanupCategories).toContain("assistants");
-    const keys = JANITOR_TASKS.filter((task) => task.category === "assistants")
+    expect(cleanupCategories).toContain("agents");
+    const keys = JANITOR_TASKS.filter((task) => task.category === "agents")
       .map((task) => task.key)
       .sort();
-    expect(keys).toEqual(["pg.assistants.archived", "pg.chat_sessions"]);
+    expect(keys).toEqual(["pg.agents.archived", "pg.chat_sessions"]);
   });
 
   it("registers archived-assistant purge (assistants category, opt-in, sensitive, status-filtered)", () => {
-    const archived = getJanitorTask("pg.assistants.archived");
-    expect(archived?.category).toBe("assistants");
+    const archived = getJanitorTask("pg.agents.archived");
+    expect(archived?.category).toBe("agents");
     expect(archived?.action).toBe("delete_rows");
-    expect(archived?.table).toBe("assistants");
+    expect(archived?.table).toBe("agents");
     expect(archived?.timeColumn).toBe("updated_at");
     expect(archived?.equalsFilter).toEqual({ column: "status", value: "archived" });
     expect(archived?.defaultEnabled).toBe(false);

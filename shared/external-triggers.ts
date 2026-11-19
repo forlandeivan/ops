@@ -95,6 +95,7 @@ export const externalTriggerBindingSchema = z.object({
   connectionId: z.string().uuid(),
   provider: externalTriggerProviderSchema,
   eventKey: externalTriggerEventKeySchema,
+  agentId: z.string().min(1),
   assistantId: z.string().min(1),
   workflowDefinitionId: z.string().uuid(),
   actorUserId: z.string().min(1),
@@ -157,8 +158,18 @@ export const externalTriggerDeliverySchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
-export const createExternalTriggerBindingSchema = z.object({
-  assistantId: z.string().trim().min(1),
+export function normalizeTriggerAgentId(value: unknown, ctx: z.RefinementCtx) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("assistantId" in value)) return value;
+  const { assistantId, ...rest } = value as Record<string, unknown>;
+  if ("agentId" in rest && (typeof rest.agentId !== "string" || typeof assistantId !== "string" || rest.agentId.trim() !== assistantId.trim())) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["agentId"], message: "Идентификаторы агента расходятся" });
+    return z.NEVER;
+  }
+  return { ...rest, agentId: assistantId };
+}
+
+export const createExternalTriggerBindingSchema = z.preprocess(normalizeTriggerAgentId, z.object({
+  agentId: z.string().trim().min(1),
   workflowDefinitionId: z.string().uuid(),
   actorUserId: z.string().trim().min(1),
   title: z.string().trim().min(1).max(255),
@@ -178,10 +189,10 @@ export const createExternalTriggerBindingSchema = z.object({
     maxMessageChars: 4096,
   }),
   isActive: z.boolean().optional().default(true),
-});
+}));
 
-export const updateExternalTriggerBindingSchema = z.object({
-  assistantId: z.string().trim().min(1).optional(),
+export const updateExternalTriggerBindingSchema = z.preprocess(normalizeTriggerAgentId, z.object({
+  agentId: z.string().trim().min(1).optional(),
   workflowDefinitionId: z.string().uuid().optional(),
   actorUserId: z.string().trim().min(1).optional(),
   title: z.string().trim().min(1).max(255).optional(),
@@ -189,7 +200,7 @@ export const updateExternalTriggerBindingSchema = z.object({
   authPolicy: externalTriggerAuthPolicySchema.optional(),
   deliveryPolicy: externalTriggerDeliveryPolicySchema.optional(),
   isActive: z.boolean().optional(),
-});
+}));
 
 export const externalTriggerWebhookStatusSchema = z.object({
   provider: externalTriggerProviderSchema,

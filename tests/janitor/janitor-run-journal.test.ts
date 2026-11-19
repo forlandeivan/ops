@@ -7,7 +7,7 @@ const startedAt = new Date("2026-05-27T10:00:00.000Z");
 
 function row(partial: Partial<Parameters<typeof toJournalEntry>[0]> = {}) {
   return {
-    resourceKey: "pg.assistant_executions",
+    resourceKey: "pg.agent_response_executions",
     status: "success",
     deletedCount: 5,
     freedBytes: 0,

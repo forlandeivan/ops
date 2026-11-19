@@ -1,12 +1,15 @@
 import { z } from "zod";
 
 export const ragPipelineExecutionSources = [
-  "assistant_chat",
+  "agent_chat",
   "workflow",
   "rag_arena",
   "system_operation",
 ] as const;
-export const ragPipelineExecutionSourceSchema = z.enum(ragPipelineExecutionSources);
+export const ragPipelineExecutionSourceSchema = z.preprocess(
+  (value) => value === "assistant_chat" ? "agent_chat" : value,
+  z.enum(ragPipelineExecutionSources),
+);
 export type RagPipelineExecutionSource = z.infer<typeof ragPipelineExecutionSourceSchema>;
 
 const nullableShortStringSchema = z.string().trim().min(1).max(255).nullable().optional();

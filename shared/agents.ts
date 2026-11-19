@@ -1,21 +1,23 @@
 import { z } from "zod";
+
+import { PROMPT_TEXT_MAX, formatPromptLengthError } from "./prompt-limits";
 import {
-  assistantWorkflowContextRequestSubmissionSchema,
+  agentWorkflowContextRequestSubmissionSchema,
   contextRefSchema,
   contextRefTargetTypes,
   resolvedContextRefSchema,
   workflowContextRequestChatMetadataSchema,
 } from "./context-refs";
 import {
-  assistantEmbeddingModes,
-  assistantExecutionModes,
-  assistantLlmModelSelections,
-  assistantMediaInputModes,
-  assistantModes,
-  assistantRagModes,
-  assistantSearchModes,
-  assistantTranscriptionModes,
-  assistantTranscriptionFlowModes,
+  agentEmbeddingModes,
+  agentExecutionModes,
+  agentLlmModelSelections,
+  agentMediaInputModes,
+  agentModes,
+  agentRagModes,
+  agentSearchModes,
+  agentTranscriptionModes,
+  agentTranscriptionFlowModes,
   unicaAsrDiarizationPolicies,
 } from "./schema";
 import {
@@ -31,22 +33,57 @@ import {
   type WorkflowLangGraphReadinessStatus,
 } from "./workflow-langgraph";
 import type {
-  AssistantEmbeddingMode,
-  AssistantExecutionMode,
-  AssistantLlmModelSelection,
-  AssistantMediaInputMode,
-  AssistantMode,
-  AssistantRagMode,
-  AssistantSearchMode,
+  AgentEmbeddingMode,
+  AgentExecutionMode,
+  AgentLlmModelSelection,
+  AgentMediaInputMode,
+  AgentMode,
+  AgentRagMode,
+  AgentSearchMode,
   SearchProfileStrategy,
-  AssistantTranscriptionMode,
-  AssistantTranscriptionFlowMode,
+  AgentTranscriptionMode,
+  AgentTranscriptionFlowMode,
   UnicaAsrAdvancedOptions,
 } from "./schema";
 
-export const DEFAULT_ASSISTANT_MAX_COMPLETION_TOKENS = 16000;
+export const DEFAULT_AGENT_MAX_COMPLETION_TOKENS = 16000;
 
-export const assistantIconColors = [
+export type AgentTranscriptionCompletionConfig = {
+  onTranscriptionMode: AgentTranscriptionMode;
+  onTranscriptionAutoActionId: string | null;
+};
+
+export function usesBuiltInAgentTranscription(
+  executionMode: AgentExecutionMode,
+  transcriptionFlowMode: AgentTranscriptionFlowMode,
+): boolean {
+  return executionMode === "standard" && transcriptionFlowMode === "standard";
+}
+
+export function normalizeAgentTranscriptionCompletionConfig(params: {
+  executionMode: AgentExecutionMode;
+  transcriptionFlowMode: AgentTranscriptionFlowMode;
+  onTranscriptionMode?: AgentTranscriptionMode | null;
+  onTranscriptionAutoActionId?: string | null;
+}): AgentTranscriptionCompletionConfig {
+  const autoActionId = params.onTranscriptionAutoActionId?.trim() || null;
+  const canRunAutoAction =
+    usesBuiltInAgentTranscription(params.executionMode, params.transcriptionFlowMode) &&
+    params.onTranscriptionMode === "auto_action" &&
+    Boolean(autoActionId);
+
+  return canRunAutoAction
+    ? {
+        onTranscriptionMode: "auto_action",
+        onTranscriptionAutoActionId: autoActionId,
+      }
+    : {
+        onTranscriptionMode: "raw_only",
+        onTranscriptionAutoActionId: null,
+      };
+}
+
+export const agentIconColors = [
   "gray",
   "lightgray",
   "brown",
@@ -58,19 +95,19 @@ export const assistantIconColors = [
   "pink",
   "red",
 ] as const;
-export type AssistantIconColor = (typeof assistantIconColors)[number];
+export type AgentIconColor = (typeof agentIconColors)[number];
 
-export const DEFAULT_ASSISTANT_ICON_COLOR: AssistantIconColor = "gray";
+export const DEFAULT_AGENT_ICON_COLOR: AgentIconColor = "gray";
 
-export type AssistantIconColorPreset = {
-  value: AssistantIconColor;
+export type AgentIconColorPreset = {
+  value: AgentIconColor;
   label: string;
   foreground: string;
   background: string;
   border: string;
 };
 
-export const ASSISTANT_ICON_COLOR_PRESETS: Record<AssistantIconColor, AssistantIconColorPreset> = {
+export const AGENT_ICON_COLOR_PRESETS: Record<AgentIconColor, AgentIconColorPreset> = {
   gray: {
     value: "gray",
     label: "Серый",
@@ -136,6 +173,8 @@ export const ASSISTANT_ICON_COLOR_PRESETS: Record<AssistantIconColor, AssistantI
   },
   red: {
     value: "red",
+    // Legacy persisted value: existing assistants keep rendering it, but the
+    // preset is intentionally excluded from the selectable UI options below.
     label: "Красный",
     foreground: "#C4554D",
     background: "#FDEBEC",
@@ -143,20 +182,22 @@ export const ASSISTANT_ICON_COLOR_PRESETS: Record<AssistantIconColor, AssistantI
   },
 };
 
-export const ASSISTANT_ICON_COLOR_OPTIONS = assistantIconColors.map(
-  (value) => ASSISTANT_ICON_COLOR_PRESETS[value],
-);
+export const AGENT_ICON_COLOR_OPTIONS = agentIconColors
+  // Persisted legacy colors remain renderable, but new selections use one
+  // canonical gray and exclude the retired red preset.
+  .filter((value) => value !== "lightgray" && value !== "red")
+  .map((value) => AGENT_ICON_COLOR_PRESETS[value]);
 
-export function isAssistantIconColor(value: unknown): value is AssistantIconColor {
-  return typeof value === "string" && assistantIconColors.includes(value as AssistantIconColor);
+export function isAgentIconColor(value: unknown): value is AgentIconColor {
+  return typeof value === "string" && agentIconColors.includes(value as AgentIconColor);
 }
 
-export function normalizeAssistantIconColor(value: unknown): AssistantIconColor {
-  return isAssistantIconColor(value) ? value : DEFAULT_ASSISTANT_ICON_COLOR;
+export function normalizeAgentIconColor(value: unknown): AgentIconColor {
+  return isAgentIconColor(value) ? value : DEFAULT_AGENT_ICON_COLOR;
 }
 
-export function getAssistantIconColorPreset(value: unknown): AssistantIconColorPreset {
-  return ASSISTANT_ICON_COLOR_PRESETS[normalizeAssistantIconColor(value)];
+export function getAgentIconColorPreset(value: unknown): AgentIconColorPreset {
+  return AGENT_ICON_COLOR_PRESETS[normalizeAgentIconColor(value)];
 }
 
 const optionalString = (limit: number) =>
@@ -168,7 +209,14 @@ const optionalString = (limit: number) =>
         return true;
       }
       return value.length <= limit;
-    }, `Длина поля не должна превышать ${limit} символов`);
+    }, {
+      error: (issue) =>
+        formatPromptLengthError(
+          "Поле",
+          limit,
+          typeof issue.input === "string" ? issue.input.length : limit,
+        ),
+    });
 
 const optionalText = (limit: number) =>
   z
@@ -179,14 +227,21 @@ const optionalText = (limit: number) =>
         return true;
       }
       return value.length <= limit;
-    }, `Длина поля не должна превышать ${limit} символов`);
+    }, {
+      error: (issue) =>
+        formatPromptLengthError(
+          "Поле",
+          limit,
+          typeof issue.input === "string" ? issue.input.length : limit,
+        ),
+    });
 
 const knowledgeBaseIdSchema = z.string().min(1);
 
 const ragConfigInputSchema = z.object({
-  mode: z.enum(assistantRagModes).optional(),
-  searchMode: z.enum(assistantSearchModes).optional(),
-  embeddingMode: z.enum(assistantEmbeddingModes).optional(),
+  mode: z.enum(agentRagModes).optional(),
+  searchMode: z.enum(agentSearchModes).optional(),
+  embeddingMode: z.enum(agentEmbeddingModes).optional(),
   strategy: z.enum(["rrf", "weighted_thresholded", "union"]).nullable().optional(),
   collectionIds: z.array(z.string().min(1)).optional(),
   topK: z.number().int().min(1).max(50).nullable().optional(),
@@ -197,6 +252,7 @@ const ragConfigInputSchema = z.object({
   historyCharsLimit: z.number().int().min(0).max(50000).nullable().optional(),
   enableQueryRewriting: z.boolean().nullable().optional(),
   queryRewriteModel: z.string().max(200).nullable().optional(),
+  queryRewriteProviderId: optionalString(255),
   enableContextCaching: z.boolean().nullable().optional(),
   contextCacheTtlSeconds: z.number().int().min(60).max(1800).nullable().optional(), // от 1 минуты до 30 минут
   bm25Weight: z.number().min(0).max(1).nullable().optional(),
@@ -209,7 +265,7 @@ const ragConfigInputSchema = z.object({
   rerankEnabled: z.boolean().nullable().optional(),
   rerankProviderId: optionalString(255),
   rerankModel: optionalString(255),
-  rerankPrompt: optionalText(20000),
+  rerankPrompt: optionalText(PROMPT_TEXT_MAX),
   rerankCandidateCount: z.number().int().min(1).max(50).nullable().optional(),
   embeddingProviderId: optionalString(255),
   embeddingModel: optionalString(255),
@@ -236,7 +292,9 @@ const unicaAsrAdvancedOptionsSchema = z
   .object({
     diarize: z.boolean().optional(),
     diarizationPolicy: z.enum(unicaAsrDiarizationPolicies).optional(),
+    /** @deprecated Release-A passthrough only; SpeechRecognition v2 ignores this section. */
     processingOptions: unicaAsrAdvancedOptionRecordSchema.optional(),
+    /** @deprecated Release-A passthrough only; SpeechRecognition v2 ignores this section. */
     vadOptions: unicaAsrAdvancedOptionRecordSchema.optional(),
     generalOptions: unicaAsrAdvancedOptionRecordSchema.optional(),
   })
@@ -245,25 +303,24 @@ const unicaAsrAdvancedOptionsSchema = z
 const assistantEditableFieldsSchema = z.object({
   name: optionalString(200),
   description: optionalText(4000),
-  systemPrompt: optionalText(20000),
+  systemPrompt: optionalText(PROMPT_TEXT_MAX),
   modelId: optionalString(200),
   llmProviderConfigId: optionalString(200),
-  llmModelSelection: z.enum(assistantLlmModelSelections).optional(),
+  llmModelSelection: z.enum(agentLlmModelSelections).optional(),
   collectionName: optionalString(200),
-  executionMode: z.enum(assistantExecutionModes).optional(),
-  mediaInputMode: z.enum(assistantMediaInputModes).optional(),
+  executionMode: z.enum(agentExecutionModes).optional(),
+  mediaInputMode: z.enum(agentMediaInputModes).optional(),
   workflowDefinitionId: z.string().uuid().nullable().optional(),
   workflowSystemTemplateKey: optionalString(255),
   transcriptionWorkflowDefinitionId: z.string().uuid().nullable().optional(),
-  mode: z.enum(assistantModes).optional(),
+  mode: z.enum(agentModes).optional(),
   knowledgeBaseIds: z.array(knowledgeBaseIdSchema).optional(),
   ragConfig: ragConfigInputSchema.optional(),
   icon: optionalString(100),
-  iconColor: z.enum(assistantIconColors).nullable().optional(),
-  onTranscriptionMode: z.enum(assistantTranscriptionModes).optional(),
+  iconColor: z.enum(agentIconColors).nullable().optional(),
+  onTranscriptionMode: z.enum(agentTranscriptionModes).optional(),
   onTranscriptionAutoActionId: optionalString(200),
-  transcriptionFlowMode: z.enum(assistantTranscriptionFlowModes).optional(),
-  asrProviderId: optionalString(200),
+  transcriptionFlowMode: z.enum(agentTranscriptionFlowModes).optional(),
   contextInputLimit: contextInputLimitSchema,
   llmTopP: z.number().min(0).max(1).nullable().optional(),
   llmTopK: z.number().int().min(1).max(200).nullable().optional(),
@@ -272,13 +329,29 @@ const assistantEditableFieldsSchema = z.object({
   unicaAsrAdvancedOptions: unicaAsrAdvancedOptionsSchema,
 });
 
-export const createAssistantSchema = assistantEditableFieldsSchema;
-export const updateAssistantSchema = assistantEditableFieldsSchema;
+/**
+ * У создания название обязательно, у правки — нет.
+ *
+ * Поля общего набора необязательны намеренно: правка присылает только то, что меняет, и
+ * непереданное остаётся как было. Но для создания та же необязательность означала, что
+ * пустое тело заводит агента с `name = null` — форма проверяет поле на клиенте, а за
+ * ней не проверял никто, и безымянная запись занимала строку в списке. Требование ставится
+ * на схему запроса, а не на общий тип полезной нагрузки: им же пользуется перенос
+ * агентов, который собирает объект по частям.
+ */
+export const createAgentSchema = assistantEditableFieldsSchema.extend({
+  name: z
+    .string({ error: 'Укажите название агента' })
+    .trim()
+    .min(1, 'Укажите название агента')
+    .max(200, 'Название не длиннее 200 символов'),
+});
+export const updateAgentSchema = assistantEditableFieldsSchema;
 
-export type CreateAssistantPayload = z.infer<typeof createAssistantSchema>;
-export type UpdateAssistantPayload = z.infer<typeof updateAssistantSchema>;
+export type CreateAgentPayload = z.infer<typeof assistantEditableFieldsSchema>;
+export type UpdateAgentPayload = z.infer<typeof updateAgentSchema>;
 
-export type AssistantWorkflowBinding = {
+export type AgentWorkflowBinding = {
   definitionId: string;
   kind: "template" | "scenario";
   scopeKind: "global" | "workspace";
@@ -297,12 +370,12 @@ export type AssistantWorkflowBinding = {
   autoUpdates: boolean;
 };
 
-export type AssistantTranscriptionWorkflowBinding = AssistantWorkflowBinding;
+export type AgentTranscriptionWorkflowBinding = AgentWorkflowBinding;
 
 /**
- * Занятость workspace-сценария workflow-ассистентом (строгое 1:1). Используется пикером
- * сценария в настройках ассистента, чтобы дизейблить definition, уже привязанные к ДРУГОМУ
- * ассистенту. `assistantId` — id ассистента, который сейчас держит этот сценарий.
+ * Занятость workspace-сценария workflow-агентом (строгое 1:1). Используется пикером
+ * сценария в настройках агента, чтобы дизейблить definition, уже привязанные к ДРУГОМУ
+ * агенту. `assistantId` — id агента, который сейчас держит этот сценарий.
  */
 export type WorkflowScenarioBindingDto = {
   definitionId: string;
@@ -313,8 +386,8 @@ export type WorkflowScenarioBindingsResponseDto = {
   bindings: WorkflowScenarioBindingDto[];
 };
 
-export type AssistantEffectiveLlmConfig = {
-  source: "assistant" | "assistant_default" | "global_unica_chat" | "fallback_single_provider";
+export type AgentEffectiveLlmConfig = {
+  source: "assistant" | "assistant_default" | "chat_override";
   providerId: string;
   providerName: string;
   providerType: string | null;
@@ -377,7 +450,7 @@ export const systemWorkflowTemplateSummarySchema = globalWorkflowTemplateSummary
 export const systemWorkflowTemplateVersionSchema = globalWorkflowTemplateVersionSchema;
 export const systemWorkflowTemplateDetailSchema = globalWorkflowTemplateDetailSchema;
 
-export const assistantWorkflowApprovalDecisionSchema = z.object({
+export const agentWorkflowApprovalDecisionSchema = z.object({
   comment: z.string().trim().max(4000).nullable().optional(),
 });
 
@@ -396,6 +469,20 @@ export const workflowApprovalChatMetadataSchema = z.object({
   title: z.string().trim().min(1).max(240).optional(),
   summary: z.string().trim().min(1).max(4000).optional(),
   details: z.array(workflowApprovalChatDetailSchema).max(8).optional(),
+  // Строка под составом: чем станет показанный текст, например инструкцией для модели.
+  notice: z.string().trim().min(1).max(240).optional(),
+  // Состав не поместился в карточку: полный текст отдаёт GET согласования с include=display.
+  hasFullText: z.boolean().optional(),
+});
+
+export const workflowApprovalDisplaySectionSchema = z.object({
+  label: z.string().trim().min(1).max(120),
+  text: z.string().max(20000),
+});
+
+/** Полный состав операции для блока «Показать полностью» в карточке согласования. */
+export const workflowApprovalDisplaySchema = z.object({
+  sections: z.array(workflowApprovalDisplaySectionSchema).max(24),
 });
 
 export const agentChoicePromptOptionSchema = z.object({
@@ -411,10 +498,12 @@ export const agentChoicePromptSchema = z.object({
   inputPlaceholder: z.string().trim().max(240).nullable().optional(),
 });
 
-export const assistantWorkflowApprovalSummarySchema = z.object({
+export const agentWorkflowApprovalSummarySchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   workspaceId: z.string(),
+  agentId: z.string().optional(),
+  agentName: z.string().nullable().optional(),
   assistantId: z.string(),
   assistantName: z.string().nullable(),
   chatId: z.string(),
@@ -506,10 +595,12 @@ export const workflowFormChatMetadataSchema = z.object({
   submittedPayload: z.record(z.string(), z.unknown()).default({}).optional(),
 });
 
-export const assistantWorkflowFormRequestSummarySchema = z.object({
+export const agentWorkflowFormRequestSummarySchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   workspaceId: z.string(),
+  agentId: z.string().optional(),
+  agentName: z.string().nullable().optional(),
   assistantId: z.string(),
   assistantName: z.string().nullable(),
   chatId: z.string(),
@@ -527,16 +618,18 @@ export const assistantWorkflowFormRequestSummarySchema = z.object({
   submittedByUserId: z.string().nullable(),
 });
 
-export const assistantWorkflowFormSubmissionSchema = z.object({
+export const agentWorkflowFormSubmissionSchema = z.object({
   payload: z.record(z.string(), z.unknown()),
 });
 
-export { assistantWorkflowContextRequestSubmissionSchema, workflowContextRequestChatMetadataSchema };
+export { agentWorkflowContextRequestSubmissionSchema, workflowContextRequestChatMetadataSchema };
 
-export const assistantWorkflowContextRequestSummarySchema = z.object({
+export const agentWorkflowContextRequestSummarySchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   workspaceId: z.string(),
+  agentId: z.string().optional(),
+  agentName: z.string().nullable().optional(),
   assistantId: z.string(),
   assistantName: z.string().nullable(),
   chatId: z.string(),
@@ -563,6 +656,7 @@ export type SystemWorkflowTemplateVersion = GlobalWorkflowTemplateVersion;
 export type SystemWorkflowTemplateDetail = GlobalWorkflowTemplateDetail;
 export type WorkflowApprovalChatDetail = z.infer<typeof workflowApprovalChatDetailSchema>;
 export type WorkflowApprovalChatMetadata = z.infer<typeof workflowApprovalChatMetadataSchema>;
+export type WorkflowApprovalDisplay = z.infer<typeof workflowApprovalDisplaySchema>;
 export type WorkflowFormField = z.infer<typeof workflowFormFieldSchema>;
 export type WorkflowFormFieldReview = z.infer<typeof workflowFormFieldReviewSchema>;
 export type WorkflowFormProvenanceEntry = z.infer<typeof workflowFormProvenanceEntrySchema>;
@@ -570,19 +664,19 @@ export type WorkflowFormSchema = z.infer<typeof workflowFormSchemaSchema>;
 export type WorkflowFormChatMetadata = z.infer<typeof workflowFormChatMetadataSchema>;
 export type AgentChoicePromptOption = z.infer<typeof agentChoicePromptOptionSchema>;
 export type AgentChoicePrompt = z.infer<typeof agentChoicePromptSchema>;
-export type AssistantWorkflowApprovalSummary = z.infer<typeof assistantWorkflowApprovalSummarySchema>;
-export type AssistantWorkflowApprovalDecision = z.infer<typeof assistantWorkflowApprovalDecisionSchema>;
-export type AssistantWorkflowFormRequestSummary = z.infer<typeof assistantWorkflowFormRequestSummarySchema>;
-export type AssistantWorkflowFormSubmission = z.infer<typeof assistantWorkflowFormSubmissionSchema>;
+export type AgentWorkflowApprovalSummary = z.infer<typeof agentWorkflowApprovalSummarySchema>;
+export type AgentWorkflowApprovalDecision = z.infer<typeof agentWorkflowApprovalDecisionSchema>;
+export type AgentWorkflowFormRequestSummary = z.infer<typeof agentWorkflowFormRequestSummarySchema>;
+export type AgentWorkflowFormSubmission = z.infer<typeof agentWorkflowFormSubmissionSchema>;
 export type WorkflowContextRequestChatMetadata = z.infer<typeof workflowContextRequestChatMetadataSchema>;
-export type AssistantWorkflowContextRequestSummary = z.infer<
-  typeof assistantWorkflowContextRequestSummarySchema
+export type AgentWorkflowContextRequestSummary = z.infer<
+  typeof agentWorkflowContextRequestSummarySchema
 >;
-export type AssistantWorkflowContextRequestSubmission = z.infer<
-  typeof assistantWorkflowContextRequestSubmissionSchema
+export type AgentWorkflowContextRequestSubmission = z.infer<
+  typeof agentWorkflowContextRequestSubmissionSchema
 >;
 
-export type AssistantDto = {
+export type AgentDto = {
   id: string;
   workspaceId: string;
   name?: string | null;
@@ -590,30 +684,30 @@ export type AssistantDto = {
   systemPrompt?: string | null;
   modelId?: string | null;
   llmProviderConfigId?: string | null;
-  llmModelSelection: AssistantLlmModelSelection;
+  llmModelSelection: AgentLlmModelSelection;
   collectionName?: string | null;
   isSystem: boolean;
   systemKey?: string | null;
   /** Read-only-инстанс из сборки (install mode=reference): конфиг защищён от правки. */
   locked: boolean;
-  /** Провенанс: из какой сборки материализован ассистент (null — создан вручную). */
+  /** Провенанс: из какой сборки материализован агент (null — создан вручную). */
   originBuildId?: string | null;
-  executionMode: AssistantExecutionMode;
-  mediaInputMode: AssistantMediaInputMode;
-  status: "active" | "archived";
-  mode: AssistantMode;
+  executionMode: AgentExecutionMode;
+  mediaInputMode: AgentMediaInputMode;
+  /** training_draft — черновик обучения: скрытая копия, в списки не попадает. */
+  status: "active" | "archived" | "training_draft";
+  mode: AgentMode;
   knowledgeBaseIds?: string[];
-  ragConfig: AssistantRagConfig;
-  transcriptionFlowMode: AssistantTranscriptionFlowMode;
-  onTranscriptionMode: AssistantTranscriptionMode;
+  ragConfig: AgentRagConfig;
+  transcriptionFlowMode: AgentTranscriptionFlowMode;
+  onTranscriptionMode: AgentTranscriptionMode;
   onTranscriptionAutoActionId: string | null;
-  asrProviderId?: string | null;
   unicaAsrAdvancedOptions: UnicaAsrAdvancedOptions;
   icon?: string | null;
-  iconColor: AssistantIconColor;
-  workflowBinding: AssistantWorkflowBinding | null;
-  transcriptionWorkflowBinding: AssistantTranscriptionWorkflowBinding | null;
-  effectiveLlmConfig: AssistantEffectiveLlmConfig | null;
+  iconColor: AgentIconColor;
+  workflowBinding: AgentWorkflowBinding | null;
+  transcriptionWorkflowBinding: AgentTranscriptionWorkflowBinding | null;
+  effectiveLlmConfig: AgentEffectiveLlmConfig | null;
   sharedChatFiles: boolean;
   contextInputLimit: number | null;
   llmTopP: number | null;
@@ -625,10 +719,10 @@ export type AssistantDto = {
   updatedAt: string;
 };
 
-export type AssistantRagConfig = {
-  mode: AssistantRagMode;
-  searchMode: AssistantSearchMode;
-  embeddingMode: AssistantEmbeddingMode;
+export type AgentRagConfig = {
+  mode: AgentRagMode;
+  searchMode: AgentSearchMode;
+  embeddingMode: AgentEmbeddingMode;
   strategy: SearchProfileStrategy | null;
   collectionIds: string[];
   topK: number | null;
@@ -639,6 +733,7 @@ export type AssistantRagConfig = {
   historyCharsLimit: number | null;
   enableQueryRewriting: boolean | null;
   queryRewriteModel: string | null;
+  queryRewriteProviderId: string | null;
   enableContextCaching: boolean | null;
   contextCacheTtlSeconds: number | null;
   bm25Weight: number | null;
@@ -660,33 +755,46 @@ export type AssistantRagConfig = {
   llmResponseFormat: "text" | "markdown" | "html" | null;
 };
 
-export type AssistantResponse = {
-  assistant: AssistantDto;
+export type AgentResponse = {
+  agent: AgentDto;
 };
 
-export type AssistantListResponse = {
-  assistants: AssistantDto[];
+export type AgentListResponse = {
+  agents: AgentDto[];
 };
 
-export type AssistantCallbackTokenResponse = {
+export type AgentCallbackTokenResponse = {
   token: string;
   lastFour: string;
   rotatedAt: string;
-  assistant: AssistantDto;
+  assistant: AgentDto;
 };
 
 // Actions domain
 export const actionScopes = ["system", "workspace"] as const;
 export type ActionScope = (typeof actionScopes)[number];
 
-export const actionTargets = ["transcript", "knowledge_document", "message", "selection", "conversation"] as const;
+export const actionTargets = ["transcript", "knowledge_document", "message", "selection", "conversation", "chat_attachment"] as const;
 export type ActionTarget = (typeof actionTargets)[number];
 
 export const actionSources = actionTargets;
 export type ActionSource = (typeof actionSources)[number];
 
-export const actionPlacements = ["canvas", "chat_message", "chat_toolbar"] as const;
+export const actionPlacements = ["canvas", "chat_message", "chat_toolbar", "composer_slash"] as const;
 export type ActionPlacement = (typeof actionPlacements)[number];
+
+/**
+ * Кто может вызвать действие. Правило одно на оба листинга: каталог агента (хвост Tool-RAG) и
+ * меню поля ввода. Живёт в shared, а не в серверном модуле действий, чтобы фильтрация не тянула
+ * за собой доступ к базе — иначе маршруту и индексатору пришлось бы грузить репозиторий целиком.
+ */
+export function isAgentInvocableAction(action: { invocableBy?: ActionInvocableBy | null }): boolean {
+  return action.invocableBy !== "user";
+}
+
+export function isUserInvocableAction(action: { invocableBy?: ActionInvocableBy | null }): boolean {
+  return action.invocableBy !== "agent";
+}
 
 export const actionInputTypes = ["full_transcript", "full_text", "selection", "message_text"] as const;
 export type ActionInputType = (typeof actionInputTypes)[number];
@@ -735,10 +843,18 @@ export function normalizeActionSources(
 export const actionOutputModes = ["replace_text", "new_version", "new_message", "document"] as const;
 export type ActionOutputMode = (typeof actionOutputModes)[number];
 
-export const actionKinds = ["prompt", "tool", "hybrid"] as const;
+// agent — агентская команда: не исполняется движком действий, ход чата уходит агенту с задачей команды.
+export const actionKinds = ["prompt", "tool", "hybrid", "agent"] as const;
 export type ActionKind = (typeof actionKinds)[number];
 
-export const actionLlmPolicyModes = ["action_managed", "inherit_binding", "inherit_legacy_assistant"] as const;
+// Кому доступно действие: только человеку из UI, только рантайму агента, либо обоим.
+// Владеет полем код (для системных действий — реестр server/system-actions), пользовательские
+// действия остаются "both". Нужно, чтобы системное действие можно было отдать пользователю,
+// не отдавая его модели как инструмент.
+export const actionInvocableBy = ["user", "agent", "both"] as const;
+export type ActionInvocableBy = (typeof actionInvocableBy)[number];
+
+export const actionLlmPolicyModes = ["action_managed", "inherit_binding", "inherit_agent"] as const;
 export type ActionLlmPolicyMode = (typeof actionLlmPolicyModes)[number];
 
 export const actionStatuses = ["active", "archived"] as const;
@@ -757,10 +873,13 @@ export type ActionDto = {
   inputType: ActionInputType;
   outputMode: ActionOutputMode;
   actionKind: ActionKind;
+  invocableBy: ActionInvocableBy;
   toolName: string | null;
   toolConfig: Record<string, unknown>;
   llmPolicyMode: ActionLlmPolicyMode;
-  inheritAssistantSystemPrompt: boolean;
+  inheritAgentSystemPrompt: boolean;
+  /** @deprecated Older action API clients read this alias. */
+  inheritAssistantSystemPrompt?: boolean;
   llmProviderConfigId: string | null;
   llmModelId: string | null;
   llmTemperature: number | null;
@@ -779,8 +898,9 @@ export type ActionDto = {
   deletedAt?: string | null;
 };
 
-export type AssistantActionDto = {
+export type AgentActionDto = {
   id: string;
+  agentId: string;
   assistantId: string;
   actionId: string;
   enabled: boolean;
@@ -791,13 +911,19 @@ export type AssistantActionDto = {
 };
 
 export const actionBindingEntityTypes = [
-  "assistant",
+  "agent",
   "knowledge_document",
   "knowledge_base",
   "chat",
   "workspace_default",
 ] as const;
 export type ActionBindingEntityType = (typeof actionBindingEntityTypes)[number];
+
+export function parseActionBindingEntityType(value: unknown): ActionBindingEntityType | undefined {
+  const name = typeof value === "string" ? value.trim() : undefined;
+  if (name === "assistant") return "agent";
+  return actionBindingEntityTypes.find((type) => type === name);
+}
 
 export type ActionBindingDto = {
   id: string;

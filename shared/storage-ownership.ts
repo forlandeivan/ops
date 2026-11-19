@@ -105,10 +105,10 @@ const CHAT_ATTACHMENT_KEYS: readonly StorageKeyReference[] = [
   { table: "chat_attachments", column: "derived_manifest_object_key", workspaceColumn: "workspace_id" },
 ];
 
-/** Загруженный файл: на один объект могут ссылаться источник приёма, файл ассистента, файл API и вложение. */
+/** Загруженный файл: на один объект могут ссылаться источник приёма, файл агента, файл API и вложение. */
 const UPLOADED_FILE_KEYS: readonly StorageKeyReference[] = [
   { table: "files", column: "object_key", workspaceColumn: "workspace_id" },
-  { table: "assistant_files", column: "storage_key", workspaceColumn: "workspace_id" },
+  { table: "agent_files", column: "storage_key", workspaceColumn: "workspace_id" },
   { table: "ingest_sources", column: "blob_key", workspaceColumn: "workspace_id" },
   {
     table: "knowledge_upload_session_items",
@@ -159,7 +159,7 @@ export const WORKSPACE_STORAGE_OWNERSHIP: readonly StoragePrefixOwnership[] = [
     mode: "reconcile",
     references: [...UPLOADED_FILE_KEYS, ...CHAT_ATTACHMENT_KEYS],
     pathOwners: [],
-    note: "Загруженные файлы: оригиналы документов, файлы ассистентов, крупные медиа чата.",
+    note: "Загруженные файлы: оригиналы документов, файлы агентов, крупные медиа чата.",
   },
   {
     prefix: "files/",
@@ -167,7 +167,7 @@ export const WORKSPACE_STORAGE_OWNERSHIP: readonly StoragePrefixOwnership[] = [
     mode: "reconcile",
     references: [...UPLOADED_FILE_KEYS, ...CHAT_ATTACHMENT_KEYS],
     pathOwners: [],
-    note: "Файлы ассистентов и публичного API.",
+    note: "Файлы агентов и публичного API.",
   },
   {
     prefix: "ingest/",
@@ -300,7 +300,7 @@ export const STORAGE_KEY_COLUMNS_OUTSIDE_WORKSPACE_OBJECTS: readonly {
     column: "canonical_key",
     reason: "адрес кэша разбора; папка canonical/ защищена и не удаляется",
   },
-  { table: "assistant_workflow_run_events", column: "icon_key", reason: "имя иконки интерфейса, а не файл" },
+  { table: "agent_workflow_run_events", column: "icon_key", reason: "имя иконки интерфейса, а не файл" },
 ];
 
 /** Правило для ключа объекта: самый длинный подходящий префикс; null — папка не описана. */
