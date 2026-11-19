@@ -29,6 +29,7 @@ export const PUBLIC_JOB_KINDS = [
   "knowledge_ingestion",
   "agent_action",
   "agent_response",
+  "agent_run",
   "transcription",
   "workflow_run",
 ] as const;
@@ -132,6 +133,7 @@ const AGENT_RESPONSE_STATUS_MAP: Record<string, PublicJobStatus> = {
 };
 
 const STATUS_MAPS: Record<PublicJobKind, Record<string, PublicJobStatus>> = {
+  agent_run: WORKFLOW_RUN_STATUS_MAP,
   agent_response: AGENT_RESPONSE_STATUS_MAP,
   knowledge_indexing: KNOWLEDGE_INDEXING_STATUS_MAP,
   knowledge_ingestion: KNOWLEDGE_INGESTION_STATUS_MAP,

@@ -1143,6 +1143,40 @@ export const publicApiIdempotencyKeys = pgTable(
 
 export type PublicApiIdempotencyKey = typeof publicApiIdempotencyKeys.$inferSelect;
 
+
+/** Очередь приёма и доставки публичных заданий agent_run (видны только автору). Исполняет рантайм агента. */
+export const publicApiAgentRuns = pgTable("public_api_agent_runs", {
+  id: uuid("id").primaryKey().references(() => publicApiJobs.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: varchar("user_id").notNull(),
+  agentId: varchar("agent_id").notNull(),
+  requestKey: text("request_key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  clientReference: text("client_reference"),
+  /** Лимит задания в сотых кредита; NULL — ограничено только балансом пространства. */
+  maxCreditsCents: bigint("max_credits_cents", { mode: "number" }),
+  /** Сколько списано по заданию (сотые кредита): копит проход биллинга агента. */
+  chargedCreditsCents: bigint("charged_credits_cents", { mode: "number" }).notNull().default(0),
+  /** Когда проход биллинга остановил задание по лимиту (мягкий лимит: остановка в пределах ~минуты). */
+  limitReachedAt: timestamp("limit_reached_at", { withTimezone: true }),
+  input: text("input").notNull(),
+  fileIds: jsonb("file_ids").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  chatId: varchar("chat_id").notNull(),
+  messageId: varchar("message_id").notNull(),
+  enqueuePayload: jsonb("enqueue_payload").$type<Record<string, unknown>>(),
+  runId: uuid("run_id"),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  requestUnique: uniqueIndex("public_api_agent_runs_request_unique").on(table.workspaceId, table.userId, table.requestKey),
+  pendingIdx: index("public_api_agent_runs_pending_idx").on(table.nextAttemptAt),
+  runIdx: index("public_api_agent_runs_run_idx").on(table.runId),
+  workspaceIdx: index("public_api_agent_runs_workspace_idx").on(table.workspaceId),
+  maxCreditsCheck: check("public_api_agent_runs_max_credits_check", sql`${table.maxCreditsCents} IS NULL OR ${table.maxCreditsCents} > 0`),
+}));
+export type PublicApiAgentRun = typeof publicApiAgentRuns.$inferSelect;
+
 export type PublicApiJob = typeof publicApiJobs.$inferSelect;
 export type InsertPublicApiJob = typeof publicApiJobs.$inferInsert;
 
@@ -8127,6 +8161,7 @@ export type WorkspaceCreditLedgerEntry = typeof workspaceCreditLedger.$inferSele
 export type WorkspaceCreditLedgerInsert = typeof workspaceCreditLedger.$inferInsert;
 
 // --- Knowledge Document Images ---
+
 
 export const knowledgeDocumentImages = pgTable(
   "knowledge_document_images",
