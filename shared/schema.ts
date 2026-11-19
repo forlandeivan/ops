@@ -7476,6 +7476,12 @@ export const agentChatThreads = pgTable(
     coveredMessageId: varchar("covered_message_id"),
     contextDigest: jsonb("context_digest").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     compactions: integer("compactions").notNull().default(0),
+    // Последний запрос ведущего агента к модели в прошлом ходе (запрос + ответ) и бюджет запроса той модели по окну из
+    // карточки: по ним поле ввода режима «Агент» показывает заполнение контекста. NULL — неизвестно / окно не задано.
+    contextTokens: integer("context_tokens"),
+    contextBudgetTokens: integer("context_budget_tokens"),
+    // Человек нажал «Сжать контекст»: следующий ход агента перескажет раннюю часть переписки; конец хода снимает.
+    compactRequestedAt: timestamp("compact_requested_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).default(sql`now()`).notNull(),
   },
   (table) => ({
@@ -8156,12 +8162,12 @@ export const workspaceCreditGrants = pgTable(
 export type WorkspaceCreditGrant = typeof workspaceCreditGrants.$inferSelect;
 
 export type WorkspaceCreditAccount = typeof workspaceCreditAccounts.$inferSelect;
+
 export type WorkspaceCreditAccountInsert = typeof workspaceCreditAccounts.$inferInsert;
 export type WorkspaceCreditLedgerEntry = typeof workspaceCreditLedger.$inferSelect;
 export type WorkspaceCreditLedgerInsert = typeof workspaceCreditLedger.$inferInsert;
 
 // --- Knowledge Document Images ---
-
 
 export const knowledgeDocumentImages = pgTable(
   "knowledge_document_images",
