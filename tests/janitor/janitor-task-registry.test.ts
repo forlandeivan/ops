@@ -43,6 +43,8 @@ describe("janitor task registry", () => {
         "pg.agent_response_executions",
         "pg.scheduled_task_runs",
         "pg.scheduled_task_audit",
+        // Просмотры переписки администраторами (0473 монолита): след растёт с каждым открытием сессии — 365 дней из коробки.
+        "pg.admin_chat_view_audit",
         "pg.document_revisions.autosave",
         "pg.system_notification_logs",
         "s3.chat_attachments.drafts",

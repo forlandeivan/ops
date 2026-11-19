@@ -2473,6 +2473,27 @@ export const platformDiagnosticExports = pgTable(
 export type PlatformDiagnosticExportRow = typeof platformDiagnosticExports.$inferSelect;
 export type PlatformDiagnosticExportInsert = typeof platformDiagnosticExports.$inferInsert;
 
+/**
+ * Просмотры переписки администраторами платформы (журнал сессий, 0473). Только дописывается; без внешних ключей,
+ * чтобы запись пережила удаление чата и учётной записи. Срок хранения — правило очистки pg.admin_chat_view_audit.
+ */
+export const adminChatViewAudit = pgTable(
+  "admin_chat_view_audit",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    chatId: varchar("chat_id").notNull(),
+    workspaceId: varchar("workspace_id"),
+    chatOwnerUserId: varchar("chat_owner_user_id"),
+    viewerUserId: varchar("viewer_user_id").notNull(),
+    viewedAt: timestamp("viewed_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    viewedAtIdx: index("admin_chat_view_audit_viewed_at_idx").on(table.viewedAt),
+    chatIdx: index("admin_chat_view_audit_chat_idx").on(table.chatId, table.viewedAt),
+  }),
+);
+export type AdminChatViewAuditRow = typeof adminChatViewAudit.$inferSelect;
+
 export const knowledgeDocumentIndexRevisionStatuses = [
   "processing",
   "ready",
@@ -5048,6 +5069,8 @@ export const chatSessions = pgTable(
   },
   (table) => ({
     createdAtIdx: index("chat_sessions_created_at_idx").on(table.createdAt).where(sql`"deleted_at" IS NULL`),
+    // 0473: журнал сессий в админке — чаты всех пространств по последней активности.
+    updatedAtIdx: index("chat_sessions_updated_at_idx").on(table.updatedAt).where(sql`"deleted_at" IS NULL`),
     scheduledRunUnique: uniqueIndex("chat_sessions_scheduled_run_unique").on(table.scheduledTaskRunId).where(sql`${table.scheduledTaskRunId} IS NOT NULL`),
     deletedAtIdx: index("chat_sessions_deleted_at_idx").on(table.deletedAt).where(sql`"deleted_at" IS NOT NULL`),
     workspaceUserIdx: index("chat_sessions_workspace_user_idx").on(

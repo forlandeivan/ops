@@ -580,6 +580,13 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 365, defaultEnabled: true,
   }),
   task({
+    key: "pg.admin_chat_view_audit",
+    label: "Просмотры переписки администраторами",
+    description: "Удаляет записи о том, кто из администраторов платформы открывал переписку чата, старше срока хранения.",
+    category: "audit", action: "delete_rows", table: "admin_chat_view_audit", timeColumn: "viewed_at",
+    defaultRetentionDays: 365, defaultEnabled: true,
+  }),
+  task({
     key: "pg.workflow_audit_log",
     label: "Аудит workflow (workflow_audit_log)",
     description: "Удаляет аудит-записи изменений workflow старше срока хранения.",
