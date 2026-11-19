@@ -5201,7 +5201,18 @@ export type ChatMessageGroundingMetadata = {
     selectedKnowledgeBases?: Array<{ id: string; name: string }>;
     degraded?: string;
   };
+  /**
+   * Поиск по базам отработал не целиком: одна из двух ног упала, ответ собран по другой. Нет поля — поиск
+   * целый. Клиент показывает над ответом предупреждение, выгрузка диагностики считает такие ответы.
+   */
+  retrievalDegraded?: RetrievalDegradation;
 };
+
+/**
+ * Какая нога поиска по базам знаний упала: `vector_unavailable` — поиск по смыслу (векторное хранилище
+ * или эмбеддинг вопроса), `lexical_unavailable` — поиск по словам.
+ */
+export type RetrievalDegradation = "vector_unavailable" | "lexical_unavailable";
 
 export type ChatMessageMetadata = {
   /**
