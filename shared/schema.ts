@@ -12279,10 +12279,21 @@ export type IngestUnitKind = (typeof ingestUnitKinds)[number];
 export const ingestUnitOutcomeValues = ["ok", "degraded", "empty", "failed", "skipped"] as const;
 export type IngestUnitOutcome = (typeof ingestUnitOutcomeValues)[number];
 
+// Устарела с 0477: код её не читает и не пишет; форма закреплена контрактом сверки 0412/0413.
 export const ingestSchedulerTurns = pgTable("ingest_scheduler_turns", {
   workspaceId: varchar("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
   lastClaimedAt: timestamp("last_claimed_at", { withTimezone: true }).notNull(),
 });
+
+// Очередь пространств приёма — своя на каждую стадию: короткие заходы «готово?» одной стадии
+// (Docling, задание индексации) не отодвигают пространство в очереди за местом в другой (распознавание).
+export const ingestSchedulerStageTurns = pgTable("ingest_scheduler_stage_turns", {
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  stage: text("stage").notNull(),
+  lastClaimedAt: timestamp("last_claimed_at", { withTimezone: true }).notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.workspaceId, table.stage], name: "ingest_scheduler_stage_turns_pkey" }),
+}));
 
 export const ingestProcessingPolicies = pgTable("ingest_processing_policies", {
   scopeKey: text("scope_key").primaryKey(),
