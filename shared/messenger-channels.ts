@@ -76,12 +76,18 @@ const optionalUrl = z
   .nullable()
   .optional();
 
+/**
+ * Добавление бота — пресет мессенджера: администратор вводит только токен (и при желании название).
+ * Название по умолчанию — имя бота в мессенджере; приём — вебхук, если у установки есть публичный HTTPS-адрес,
+ * иначе опрос; адрес Bot API — стандартный; доступен всем пространствам, но выключен в них: включает
+ * администратор («Сразу включать в пространствах») или менеджер пространства.
+ */
 export const createMessengerBotSchema = z
   .object({
     provider: z.enum(messengerProviders).default("telegram"),
-    title: z.string().trim().min(1).max(120),
+    title: z.string().trim().min(1).max(120).optional(),
     token: z.string().trim().min(10).max(255),
-    receiveMode: z.enum(messengerReceiveModes).default("webhook"),
+    receiveMode: z.enum(messengerReceiveModes).optional(),
     apiBaseUrl: optionalUrl,
     availability: z.enum(messengerBotAvailabilities).default("all"),
     workspaceIds: z.array(z.string().trim().min(1)).max(1000).default([]),
@@ -89,7 +95,23 @@ export const createMessengerBotSchema = z
     releaseMode: z.enum(messengerReleaseModes).default("text_and_files"),
   })
   .strict();
-export type CreateMessengerBotInput = z.infer<typeof createMessengerBotSchema>;
+export type CreateMessengerBotInput = z.input<typeof createMessengerBotSchema>;
+
+/** Проверка токена до сохранения: мессенджер узнаёт бота и отдаёт его имя. */
+export const previewMessengerBotSchema = z
+  .object({
+    provider: z.enum(messengerProviders).default("telegram"),
+    token: z.string().trim().min(10).max(255),
+  })
+  .strict();
+
+export type MessengerBotPreviewDto = {
+  provider: MessengerProvider;
+  botUsername: string | null;
+  displayName: string | null;
+  /** Каким будет приём сообщений, если не менять: зависит от публичного адреса установки. */
+  receiveMode: MessengerReceiveMode;
+};
 
 export const updateMessengerBotSchema = z
   .object({
