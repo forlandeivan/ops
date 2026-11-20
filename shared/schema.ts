@@ -7259,6 +7259,38 @@ export type UserDeviceFolderRecord = typeof userDeviceFolders.$inferSelect;
 export type DevicePairingRecord = typeof devicePairings.$inferSelect;
 export type DeviceCommandRecord = typeof deviceCommands.$inferSelect;
 
+// --- Подключение внешнего приложения по коду (server/apps, shared/app-pairing.ts) -------------------------------------
+// Приложение (например, пульт агентов) просит доступ, человек подтверждает код под своим входом, приложение один раз
+// забирает личный API-токен этого человека. Пространство не выбирается: токен открывает те пространства, что человек
+// видит сам. Хранятся только хеши секретов; заявка живёт 10 минут и убирается janitor-задачей `pg.app_pairings`.
+export const appPairingStatuses = ["pending", "approved", "claimed"] as const;
+export type AppPairingStatus = (typeof appPairingStatuses)[number];
+
+export const appPairings = pgTable(
+  "app_pairings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userCode: text("user_code").notNull(),
+    pollTokenHash: text("poll_token_hash").notNull(),
+    appName: text("app_name").notNull(),
+    appVersion: text("app_version").notNull(),
+    status: text("status").$type<AppPairingStatus>().notNull().default("pending"),
+    approvedBy: varchar("approved_by").references(() => users.id, { onDelete: "cascade" }),
+    tokenId: varchar("token_id").references(() => personalApiTokens.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    userCodeIdx: uniqueIndex("app_pairings_user_code_idx").on(table.userCode),
+    createdIdx: index("app_pairings_created_idx").on(table.createdAt),
+    approvedByIdx: index("app_pairings_approved_by_idx").on(table.approvedBy).where(sql`${table.approvedBy} IS NOT NULL`),
+    tokenIdx: index("app_pairings_token_idx").on(table.tokenId).where(sql`${table.tokenId} IS NOT NULL`),
+    statusCheck: check("app_pairings_status_check", sql`${table.status} IN ('pending', 'approved', 'claimed')`),
+  }),
+);
+
+export type AppPairingRecord = typeof appPairings.$inferSelect;
+
 // --- Новый агент: сервис сессий агента (Python, rospartner.ai.unica.agent, app/sessions) ---------------------------
 // Таблицы сервиса живут в базе монолита и заводятся миграциями 0386–0387: своей базы у сервиса нет. Пишет в них сервис;
 // монолит читает состояние сессий и удаляет их вместе с чатом, пространством и пользователем. Точки восстановления

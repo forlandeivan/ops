@@ -572,6 +572,18 @@ export const JANITOR_TASKS: readonly JanitorTaskDefinition[] = [
     defaultRetentionDays: 1,
   }),
   task({
+    key: "pg.app_pairings",
+    label: "Заявки на подключение приложений",
+    description:
+      "Удаляет заявки на подключение внешнего приложения по коду (например, пульта агентов) старше срока хранения. Заявка действует 10 минут; выданные по ним API-токены уборка не трогает — они видны и отзываются в профиле.",
+    category: "events",
+    action: "delete_rows",
+    table: "app_pairings",
+    timeColumn: "created_at",
+    defaultEnabled: true,
+    defaultRetentionDays: 1,
+  }),
+  task({
     key: "pg.directory_sync_events",
     label: "Журнал событий корпоративного каталога",
     description:
