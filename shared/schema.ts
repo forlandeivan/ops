@@ -1366,6 +1366,8 @@ export const indexingProfiles = pgTable(
     chunkSize: integer("chunk_size").notNull(),
     chunkOverlap: integer("chunk_overlap").notNull(),
     workerConcurrency: integer("worker_concurrency").notNull().default(4),
+    /** Какую часть мест пула (в %) одно пространство может занять, пока ждут другие (shared/fair-share.ts). */
+    workspaceSharePercent: integer("workspace_share_percent").notNull().default(50),
     embeddingBatchMaxChunks: integer("embedding_batch_max_chunks").notNull().default(8),
     embeddingBatchMaxTokens: integer("embedding_batch_max_tokens").notNull().default(4000),
     qdrantUpsertMaxPoints: integer("qdrant_upsert_max_points").notNull().default(8),
@@ -1489,6 +1491,7 @@ export const knowledgeDocumentImportSettings = pgTable("knowledge_document_impor
   ocrRequestTimeoutMs: integer("ocr_request_timeout_ms"),
   chatDocumentOcrTimeoutMs: integer("chat_document_ocr_timeout_ms"),
   // Потолок одновременных job-ов индексации на пространство (fair claim, S16). NULL = env/дефолт.
+  /** @deprecated С 19.11.2026 не читается: долю пространства задаёт профиль индексации (workspace_share_percent). */
   kbIndexingPerWorkspaceLimit: integer("kb_indexing_per_workspace_limit"),
   // Сколько записей одного пользователя и одного пространства одновременно у сервиса распознавания
   // при приёме в базы знаний (0395). NULL = дефолт кода; потолка на установку нет.

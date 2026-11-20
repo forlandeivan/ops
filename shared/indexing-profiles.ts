@@ -10,6 +10,7 @@ import {
   MIN_CHUNK_SIZE,
   collectionSchemaFieldSchema,
 } from "./knowledge-base-indexing-policy";
+import { DEFAULT_WORKSPACE_SHARE_PERCENT, WORKSPACE_SHARE_PERCENT_OPTIONS } from "./fair-share";
 
 const optionalNullableString = z.string().trim().max(255).nullable().optional();
 
@@ -23,6 +24,15 @@ export const indexingProfileBaseSchema = z.object({
     .max(MAX_CHUNK_SIZE, `Размер чанка должен быть не больше ${MAX_CHUNK_SIZE}`),
   chunkOverlap: z.number().int().min(0, "chunkOverlap должно быть >= 0"),
   workerConcurrency: z.number().int().min(1, "Количество параллельных задач должно быть больше 0"),
+  workspaceSharePercent: z
+    .number()
+    .int()
+    .refine((value) => (WORKSPACE_SHARE_PERCENT_OPTIONS as readonly number[]).includes(value), {
+      message: `Доля пространства — одно из значений: ${WORKSPACE_SHARE_PERCENT_OPTIONS.join(", ")} %`,
+    })
+    // Без .default(): в частичном обновлении (partial) zod подставил бы дефолт и сбрасывал долю.
+    // Новый профиль без значения получает DEFAULT_WORKSPACE_SHARE_PERCENT из DEFAULT колонки.
+    .optional(),
   embeddingBatchMaxChunks: z.number().int().min(1, "Размер batch по чанкам должен быть больше 0"),
   embeddingBatchMaxTokens: z.number().int().min(1, "Лимит токенов в batch должен быть больше 0"),
   qdrantUpsertMaxPoints: z.number().int().min(1, "Размер batch для Qdrant должен быть больше 0"),
@@ -78,6 +88,7 @@ export const DEFAULT_INDEXING_PROFILE_INPUT: CreateIndexingProfileDto = {
   chunkSize: DEFAULT_KNOWLEDGE_BASE_INDEXING_POLICY.chunkSize,
   chunkOverlap: DEFAULT_KNOWLEDGE_BASE_INDEXING_POLICY.chunkOverlap,
   workerConcurrency: DEFAULT_KNOWLEDGE_BASE_INDEXING_POLICY.workerConcurrency ?? DEFAULT_KB_INDEXING_WORKER_CONCURRENCY,
+  workspaceSharePercent: DEFAULT_WORKSPACE_SHARE_PERCENT,
   embeddingBatchMaxChunks:
     DEFAULT_KNOWLEDGE_BASE_INDEXING_POLICY.embeddingBatchMaxChunks ?? DEFAULT_EMBEDDING_BATCH_MAX_CHUNKS,
   embeddingBatchMaxTokens:
