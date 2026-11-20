@@ -50,6 +50,18 @@ import type {
   ReferenceSetVersionStatus,
 } from "./reference-sets";
 import type {
+  MessengerActionKind,
+  MessengerBotAvailability,
+  MessengerBotStatus,
+  MessengerInboundStatus,
+  MessengerNotifyPreferences,
+  MessengerOutboxKind,
+  MessengerOutboxStatus,
+  MessengerProvider,
+  MessengerReceiveMode,
+  MessengerReleaseMode,
+} from "./messenger-channels";
+import type {
   IndexingArenaCleanupStatus,
   IndexingArenaConfigDto,
   IndexingArenaMetricsDto,
@@ -4996,9 +5008,9 @@ export type PackageBuilderStage = (typeof packageBuilderStageValues)[number];
  * Куда в итоге уезжает ответ ассистента из этого чата.
  *
  * `web` — наш фронт (markdown + KaTeX); `external` — переписка через внешний канал
- * (внешняя переписка), где разметка отображается сырым текстом.
+ * (боты мессенджеров, server/messenger-channels), где разметка отображается сырым текстом.
  * Проставляется один раз при создании чата — чтобы горячий путь промпта не ходил
- * за этим фактом в базу на каждом запросе.
+ * за этим фактом в `messenger_chats` на каждом запросе.
  */
 export const chatOutputChannels = ["web", "external"] as const;
 export type ChatOutputChannel = (typeof chatOutputChannels)[number];
@@ -9755,6 +9767,281 @@ export const workspaceConnectionSecrets = pgTable(
 
 export type WorkspaceConnectionSecret = typeof workspaceConnectionSecrets.$inferSelect;
 export type WorkspaceConnectionSecretInsert = typeof workspaceConnectionSecrets.$inferInsert;
+
+// ── Каналы мессенджеров (server/messenger-channels, shared/messenger-channels.ts) ──
+// Бот заводится администратором инсталляции, пространство его включает, сотрудник привязывает свой
+// аккаунт мессенджера одноразовой ссылкой. Каждое входящее сообщение идёт от привязанного человека,
+// через его обычный чат и обычные проверки доступа (членство, статус учётки, права) при каждой отправке.
+export const messengerBots = pgTable(
+  "messenger_bots",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    provider: varchar("provider", { length: 32 }).$type<MessengerProvider>().notNull(),
+    title: text("title").notNull(),
+    status: varchar("status", { length: 32 }).$type<MessengerBotStatus>().notNull().default("active"),
+    receiveMode: varchar("receive_mode", { length: 32 }).$type<MessengerReceiveMode>().notNull().default("webhook"),
+    apiBaseUrl: text("api_base_url"),
+    botUsername: varchar("bot_username", { length: 255 }),
+    botExternalId: varchar("bot_external_id", { length: 255 }),
+    availability: varchar("availability", { length: 32 }).$type<MessengerBotAvailability>().notNull().default("all"),
+    autoEnable: boolean("auto_enable").notNull().default(false),
+    releaseMode: varchar("release_mode", { length: 32 }).$type<MessengerReleaseMode>().notNull().default("text_and_files"),
+    /** Смещение длинного опроса: следующий update_id, который ещё не забран. */
+    pollOffset: bigint("poll_offset", { mode: "number" }),
+    lastError: text("last_error"),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    statusIdx: index("messenger_bots_status_idx").on(table.status, table.receiveMode),
+    createdByIdx: index("messenger_bots_created_by_idx").on(table.createdByUserId),
+    updatedByIdx: index("messenger_bots_updated_by_idx").on(table.updatedByUserId),
+  }),
+);
+
+export type MessengerBot = typeof messengerBots.$inferSelect;
+export type MessengerBotInsert = typeof messengerBots.$inferInsert;
+
+/** Токен бота и секрет вебхука — шифрованно (`server/secret-storage.ts`), одна строка на бота. */
+export const messengerBotSecrets = pgTable(
+  "messenger_bot_secrets",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    encryptedSecrets: jsonb("encrypted_secrets").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    botUniqueIdx: uniqueIndex("messenger_bot_secrets_bot_uq").on(table.botId),
+  }),
+);
+
+/** Пространства, которым доступен бот при `availability = selected`. */
+export const messengerBotWorkspaceAccess = pgTable(
+  "messenger_bot_workspace_access",
+  {
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.botId, table.workspaceId] }),
+    workspaceIdx: index("messenger_bot_workspace_access_workspace_idx").on(table.workspaceId),
+  }),
+);
+
+/** Бот включён в пространстве; агент по умолчанию для сотрудников, которые ещё не выбрали своего. */
+export const messengerBotInstallations = pgTable(
+  "messenger_bot_installations",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    isActive: boolean("is_active").notNull().default(true),
+    defaultAgentId: varchar("default_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pairUniqueIdx: uniqueIndex("messenger_bot_installations_pair_uq").on(table.botId, table.workspaceId),
+    workspaceIdx: index("messenger_bot_installations_workspace_idx").on(table.workspaceId),
+    defaultAgentIdx: index("messenger_bot_installations_default_agent_idx").on(table.defaultAgentId),
+    updatedByIdx: index("messenger_bot_installations_updated_by_idx").on(table.updatedByUserId),
+  }),
+);
+
+export type MessengerBotInstallation = typeof messengerBotInstallations.$inferSelect;
+
+/** Одноразовые коды привязки: в базе только хэш, срок 10 минут. */
+export const messengerLinkCodes = pgTable(
+  "messenger_link_codes",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    codeHash: varchar("code_hash", { length: 64 }).notNull(),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    codeHashUniqueIdx: uniqueIndex("messenger_link_codes_code_hash_uq").on(table.codeHash),
+    botIdx: index("messenger_link_codes_bot_idx").on(table.botId),
+    userIdx: index("messenger_link_codes_user_idx").on(table.userId),
+    expiresIdx: index("messenger_link_codes_expires_idx").on(table.expiresAt),
+  }),
+);
+
+/** Аккаунт мессенджера ↔ пользователь Уники. Отозванная привязка остаётся строкой для журнала. */
+export const messengerIdentityLinks = pgTable(
+  "messenger_identity_links",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    externalUserId: varchar("external_user_id", { length: 255 }).notNull(),
+    externalChatId: varchar("external_chat_id", { length: 255 }).notNull(),
+    externalUsername: varchar("external_username", { length: 255 }),
+    notifyCategories: jsonb("notify_categories").$type<MessengerNotifyPreferences>().notNull(),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: varchar("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** Человек заблокировал бота в мессенджере: отправка прекращена до следующего его сообщения. */
+    blockedByUserAt: timestamp("blocked_by_user_at", { withTimezone: true }),
+  },
+  (table) => ({
+    activeExternalUniqueIdx: uniqueIndex("messenger_identity_links_active_external_uq")
+      .on(table.botId, table.externalUserId)
+      .where(sql`${table.revokedAt} IS NULL`),
+    activeUserUniqueIdx: uniqueIndex("messenger_identity_links_active_user_uq")
+      .on(table.botId, table.userId)
+      .where(sql`${table.revokedAt} IS NULL`),
+    userIdx: index("messenger_identity_links_user_idx").on(table.userId),
+    revokedByIdx: index("messenger_identity_links_revoked_by_idx").on(table.revokedByUserId),
+  }),
+);
+
+export type MessengerIdentityLink = typeof messengerIdentityLinks.$inferSelect;
+
+/** Текущий контекст человека в мессенджере: пространство, агент и чат, куда идут его сообщения. */
+export const messengerConversations = pgTable(
+  "messenger_conversations",
+  {
+    linkId: uuid("link_id")
+      .primaryKey()
+      .references(() => messengerIdentityLinks.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceIdx: index("messenger_conversations_workspace_idx").on(table.workspaceId),
+    agentIdx: index("messenger_conversations_agent_idx").on(table.agentId),
+    chatIdx: index("messenger_conversations_chat_idx").on(table.chatId),
+  }),
+);
+
+export type MessengerConversation = typeof messengerConversations.$inferSelect;
+
+/** Чат Уники, открытый из мессенджера: по нему ответы агента уходят обратно в мессенджер. */
+export const messengerChats = pgTable(
+  "messenger_chats",
+  {
+    chatId: varchar("chat_id")
+      .primaryKey()
+      .references(() => chatSessions.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => messengerIdentityLinks.id, { onDelete: "cascade" }),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    linkIdx: index("messenger_chats_link_idx").on(table.linkId),
+    botIdx: index("messenger_chats_bot_idx").on(table.botId),
+    activityIdx: index("messenger_chats_activity_idx").on(table.lastActivityAt),
+  }),
+);
+
+/** Входящие события: защита от повторной доставки и журнал для админки. Текст сообщений не храним. */
+export const messengerInboundEvents = pgTable(
+  "messenger_inbound_events",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    providerUpdateId: varchar("provider_update_id", { length: 255 }).notNull(),
+    linkId: uuid("link_id").references(() => messengerIdentityLinks.id, { onDelete: "set null" }),
+    status: varchar("status", { length: 32 }).$type<MessengerInboundStatus>().notNull(),
+    errorCode: varchar("error_code", { length: 128 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    updateUniqueIdx: uniqueIndex("messenger_inbound_events_update_uq").on(table.botId, table.providerUpdateId),
+    linkIdx: index("messenger_inbound_events_link_idx").on(table.linkId),
+    createdIdx: index("messenger_inbound_events_created_idx").on(table.createdAt),
+  }),
+);
+
+/** Очередь доставки в мессенджер: повторы, учёт ограничений провайдера, журнал. */
+export const messengerOutbox = pgTable(
+  "messenger_outbox",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => messengerBots.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => messengerIdentityLinks.id, { onDelete: "cascade" }),
+    kind: varchar("kind", { length: 32 }).$type<MessengerOutboxKind>().notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    dedupeKey: varchar("dedupe_key", { length: 255 }).notNull(),
+    status: varchar("status", { length: 32 }).$type<MessengerOutboxStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    externalMessageId: varchar("external_message_id", { length: 255 }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+  },
+  (table) => ({
+    dedupeUniqueIdx: uniqueIndex("messenger_outbox_dedupe_uq").on(table.botId, table.dedupeKey),
+    queueIdx: index("messenger_outbox_queue_idx").on(table.status, table.nextAttemptAt),
+    linkIdx: index("messenger_outbox_link_idx").on(table.linkId),
+    createdIdx: index("messenger_outbox_created_idx").on(table.createdAt),
+  }),
+);
+
+export type MessengerOutboxRecord = typeof messengerOutbox.$inferSelect;
+
+/** Нажатия кнопок: короткий id в мессенджере, действие — здесь. Нажать может только владелец привязки. */
+export const messengerActions = pgTable(
+  "messenger_actions",
+  {
+    id: varchar("id", { length: 32 }).primaryKey(),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => messengerIdentityLinks.id, { onDelete: "cascade" }),
+    kind: varchar("kind", { length: 32 }).$type<MessengerActionKind>().notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (table) => ({
+    linkIdx: index("messenger_actions_link_idx").on(table.linkId),
+    expiresIdx: index("messenger_actions_expires_idx").on(table.expiresAt),
+  }),
+);
 
 // ── Webhook-триггеры workflow (n8n-подобные): узел webhook_trigger владеет уникальным
 //    URL (slug). Запуск идёт через workflow-ассистента (RAG из его KB) и авто-чат,

@@ -22,6 +22,7 @@ export const MODULE_LABELS: Record<string, string> = {
   web: 'Интернет',
   models_api: 'Модели для IDE и программ',
   devices: 'Компьютеры',
+  messengers: 'Мессенджеры',
 };
 
 export const PERMISSION_MODULES = [
@@ -45,6 +46,7 @@ export const PERMISSION_MODULES = [
   'web',
   'models_api',
   'devices',
+  'messengers',
 ] as const;
 export type PermissionModule = (typeof PERMISSION_MODULES)[number];
 
@@ -181,6 +183,9 @@ export const P = {
   // Unica Desktop (волна 1): свой компьютер и чтение разрешённых на нём папок агентом; управление — компьютеры участников.
   DEVICES_USE: 'devices:use',
   DEVICES_MANAGE: 'devices:manage',
+  // Мессенджеры (server/messenger-channels): писать агентам через бота мессенджера, которого администратор
+  // установки завёл, а пространство включило. Проверяется при каждом входящем сообщении.
+  MESSENGERS_USE: 'messengers:use',
 } as const;
 
 const legacyAgentPermissions = new Map<string, string>([
@@ -239,6 +244,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.RULES_VIEW, P.RULES_MANAGE,
     P.MODELS_API_USE,
     P.DEVICES_USE, P.DEVICES_MANAGE,
+    P.MESSENGERS_USE,
   ],
   member: [
     P.SCHEDULED_TASKS_VIEW, P.SCHEDULED_TASKS_CREATE, P.SCHEDULED_TASKS_MANAGE_OWN,
@@ -266,6 +272,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.RULES_VIEW,
     P.MODELS_API_USE,
     P.DEVICES_USE,
+    P.MESSENGERS_USE,
   ],
   viewer: [
     P.SCHEDULED_TASKS_VIEW,
@@ -282,6 +289,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleCode, PermissionId[]> = {
     P.GLOBAL_VARIABLES_READ,
     P.PROMPTS_VIEW,
     P.RULES_VIEW,
+    P.MESSENGERS_USE,
   ],
 };
 
@@ -444,6 +452,10 @@ export const MODULE_ACCESS_LEVELS: Record<PermissionModule, readonly AccessLevel
     { code: 'editor',  label: 'Свой компьютер',                    permissions: [P.DEVICES_USE] },
     { code: 'manager', label: 'Компьютеры участников пространства', permissions: [P.DEVICES_USE, P.DEVICES_MANAGE] },
   ],
+  messengers: [
+    { code: 'none',   label: 'Нет доступа',             permissions: [] },
+    { code: 'editor', label: 'Писать агентам из мессенджера', permissions: [P.MESSENGERS_USE] },
+  ],
 };
 
 /** Update only explicitly edited modules. Preserve every other grant verbatim. */
@@ -592,4 +604,5 @@ export const PERMISSION_CATALOG: Array<{
   { id: P.MODELS_API_USE, module: 'models_api', action: 'use', description: 'Обращение к моделям пространства из IDE и программ личным API-токеном (если доступ включён администратором установки)', isSensitive: false },
   { id: P.DEVICES_USE, module: 'devices', action: 'use', description: 'Подключать свой компьютер и давать агенту читать разрешённые на нём папки (если функция включена пространству)', isSensitive: false },
   { id: P.DEVICES_MANAGE, module: 'devices', action: 'manage', description: 'Видеть компьютеры участников пространства и отключать их', isSensitive: true },
+  { id: P.MESSENGERS_USE, module: 'messengers', action: 'use', description: 'Писать агентам пространства через бота мессенджера (если администратор установки завёл бота, а пространство его включило)', isSensitive: false },
 ];
