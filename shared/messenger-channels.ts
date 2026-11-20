@@ -23,8 +23,15 @@ export type MessengerBotAvailability = (typeof messengerBotAvailabilities)[numbe
 export const messengerReleaseModes = ["text", "text_and_files"] as const;
 export type MessengerReleaseMode = (typeof messengerReleaseModes)[number];
 
-export const messengerOutboxKinds = ["message", "file", "card", "notification", "service"] as const;
+export const messengerOutboxKinds = ["message", "file", "card", "notification", "service", "topic"] as const;
 export type MessengerOutboxKind = (typeof messengerOutboxKinds)[number];
+
+/**
+ * Тема в личном чате с ботом (Threaded Mode): одна на пару «пространство + агент». `pending` — ещё не создана
+ * в мессенджере, `open` — работает, `closed` — доступ потерян, история сохранена; при возврате доступа открывается.
+ */
+export const messengerTopicStates = ["pending", "open", "closed"] as const;
+export type MessengerTopicState = (typeof messengerTopicStates)[number];
 
 export const messengerOutboxStatuses = ["pending", "sending", "sent", "failed", "skipped"] as const;
 export type MessengerOutboxStatus = (typeof messengerOutboxStatuses)[number];
@@ -109,6 +116,7 @@ export type MessengerBotPreviewDto = {
   provider: MessengerProvider;
   botUsername: string | null;
   displayName: string | null;
+  topicsEnabled: boolean;
   /** Каким будет приём сообщений, если не менять: зависит от публичного адреса установки. */
   receiveMode: MessengerReceiveMode;
 };
@@ -156,6 +164,8 @@ export type MessengerBotDto = {
   autoEnable: boolean;
   releaseMode: MessengerReleaseMode;
   webhookUrl: string | null;
+  /** Включён ли в мессенджере режим тем (Telegram: Threaded Mode в @BotFather). */
+  topicsEnabled: boolean;
   lastError: string | null;
   lastCheckedAt: string | null;
   linkedUsers: number;

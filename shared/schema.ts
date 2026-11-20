@@ -60,6 +60,7 @@ import type {
   MessengerProvider,
   MessengerReceiveMode,
   MessengerReleaseMode,
+  MessengerTopicState,
 } from "./messenger-channels";
 import type {
   IndexingArenaCleanupStatus,
@@ -9820,6 +9821,8 @@ export const messengerBots = pgTable(
     releaseMode: varchar("release_mode", { length: 32 }).$type<MessengerReleaseMode>().notNull().default("text_and_files"),
     /** Смещение длинного опроса: следующий update_id, который ещё не забран. */
     pollOffset: bigint("poll_offset", { mode: "number" }),
+    /** Режим тем в личном чате (Telegram: Threaded Mode): тема на каждую пару «пространство + агент». */
+    topicsEnabled: boolean("topics_enabled").notNull().default(false),
     lastError: text("last_error"),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -9991,6 +9994,8 @@ export const messengerChats = pgTable(
     botId: uuid("bot_id")
       .notNull()
       .references(() => messengerBots.id, { onDelete: "cascade" }),
+    /** Тема, куда уходят ответы этого чата; null — общая ветка (бот без тем). */
+    externalThreadId: varchar("external_thread_id", { length: 64 }),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -10000,6 +10005,41 @@ export const messengerChats = pgTable(
     activityIdx: index("messenger_chats_activity_idx").on(table.lastActivityAt),
   }),
 );
+
+/**
+ * Темы в личном чате с ботом: одна на пару «пространство + агент» привязки. Набор поддерживает сверка
+ * (server/messenger-channels/topics.ts): создаёт, переименовывает, закрывает и открывает темы в мессенджере.
+ */
+export const messengerTopics = pgTable(
+  "messenger_topics",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => messengerIdentityLinks.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    externalThreadId: varchar("external_thread_id", { length: 64 }),
+    name: varchar("name", { length: 128 }).notNull(),
+    state: varchar("state", { length: 32 }).$type<MessengerTopicState>().notNull().default("pending"),
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pairUniqueIdx: uniqueIndex("messenger_topics_pair_uq").on(table.linkId, table.workspaceId, table.agentId),
+    threadUniqueIdx: uniqueIndex("messenger_topics_thread_uq").on(table.linkId, table.externalThreadId),
+    workspaceIdx: index("messenger_topics_workspace_idx").on(table.workspaceId),
+    agentIdx: index("messenger_topics_agent_idx").on(table.agentId),
+    chatIdx: index("messenger_topics_chat_idx").on(table.chatId),
+  }),
+);
+
+export type MessengerTopic = typeof messengerTopics.$inferSelect;
 
 /** Входящие события: защита от повторной доставки и журнал для админки. Текст сообщений не храним. */
 export const messengerInboundEvents = pgTable(
