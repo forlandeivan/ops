@@ -50,15 +50,6 @@ import type {
   ReferenceSetVersionStatus,
 } from "./reference-sets";
 import type {
-  ExternalTriggerAuthPolicy,
-  ExternalTriggerDeliveryPolicy,
-  ExternalTriggerDeliveryStatus,
-  ExternalTriggerEventKey,
-  ExternalTriggerFilter,
-  ExternalTriggerProvider,
-  ExternalTriggerReceiptStatus,
-} from "./external-triggers";
-import type {
   IndexingArenaCleanupStatus,
   IndexingArenaConfigDto,
   IndexingArenaMetricsDto,
@@ -5005,9 +4996,9 @@ export type PackageBuilderStage = (typeof packageBuilderStageValues)[number];
  * Куда в итоге уезжает ответ ассистента из этого чата.
  *
  * `web` — наш фронт (markdown + KaTeX); `external` — переписка через внешний канал
- * (Telegram и прочие webhook-адаптеры), где разметка отображается сырым текстом.
+ * (внешняя переписка), где разметка отображается сырым текстом.
  * Проставляется один раз при создании чата — чтобы горячий путь промпта не ходил
- * за этим фактом в `external_trigger_sessions` на каждом запросе.
+ * за этим фактом в базу на каждом запросе.
  */
 export const chatOutputChannels = ["web", "external"] as const;
 export type ChatOutputChannel = (typeof chatOutputChannels)[number];
@@ -9764,205 +9755,6 @@ export const workspaceConnectionSecrets = pgTable(
 
 export type WorkspaceConnectionSecret = typeof workspaceConnectionSecrets.$inferSelect;
 export type WorkspaceConnectionSecretInsert = typeof workspaceConnectionSecrets.$inferInsert;
-
-export const externalTriggerBindings = pgTable(
-  "external_trigger_bindings",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => workspaceConnections.id, { onDelete: "cascade" }),
-    provider: varchar("provider", { length: 64 }).$type<ExternalTriggerProvider>().notNull(),
-    eventKey: varchar("event_key", { length: 64 }).$type<ExternalTriggerEventKey>().notNull().default("message"),
-    agentId: varchar("agent_id")
-      .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
-    workflowDefinitionId: uuid("workflow_definition_id")
-      .notNull()
-      .references(() => workflowDefinitions.id, { onDelete: "cascade" }),
-    actorUserId: varchar("actor_user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "restrict" }),
-    title: text("title").notNull(),
-    filters: jsonb("filters").$type<ExternalTriggerFilter>().notNull().default(sql`'{}'::jsonb`),
-    authPolicy: jsonb("auth_policy").$type<ExternalTriggerAuthPolicy>().notNull().default(sql`'{"mode":"provider_managed"}'::jsonb`),
-    deliveryPolicy: jsonb("delivery_policy").$type<ExternalTriggerDeliveryPolicy>().notNull().default(sql`'{}'::jsonb`),
-    isActive: boolean("is_active").notNull().default(true),
-    createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    workspaceConnectionIdx: index("external_trigger_bindings_workspace_connection_idx").on(
-      table.workspaceId,
-      table.connectionId,
-      table.isActive,
-      table.updatedAt,
-    ),
-    // 0351: FK-индекс под каскад purge архивных ассистентов.
-    agentIdx: index("external_trigger_bindings_agent_idx").on(table.agentId),
-    agentConnectionTitleUniqueIdx: uniqueIndex("external_trigger_bindings_agent_connection_title_uq").on(
-      table.connectionId,
-      table.agentId,
-      table.title,
-    ),
-  }),
-);
-
-export type ExternalTriggerBindingRecord = typeof externalTriggerBindings.$inferSelect;
-export type ExternalTriggerBindingRecordInsert = typeof externalTriggerBindings.$inferInsert;
-
-export const externalTriggerSessions = pgTable(
-  "external_trigger_sessions",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    bindingId: uuid("binding_id")
-      .notNull()
-      .references(() => externalTriggerBindings.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => workspaceConnections.id, { onDelete: "cascade" }),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    externalConversationKey: varchar("external_conversation_key", { length: 255 }).notNull(),
-    externalUserKey: varchar("external_user_key", { length: 255 }),
-    internalChatId: varchar("internal_chat_id")
-      .notNull()
-      .references(() => chatSessions.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    bindingConversationUniqueIdx: uniqueIndex("external_trigger_sessions_binding_conversation_uq").on(
-      table.bindingId,
-      table.externalConversationKey,
-    ),
-    connectionConversationIdx: index("external_trigger_sessions_connection_conversation_idx").on(
-      table.connectionId,
-      table.externalConversationKey,
-      table.updatedAt,
-    ),
-    // 0350: FK-индекс под каскад удаления чата (internal_chat_id).
-    internalChatIdx: index("external_trigger_sessions_internal_chat_idx").on(table.internalChatId),
-  }),
-);
-
-export type ExternalTriggerSessionRecord = typeof externalTriggerSessions.$inferSelect;
-export type ExternalTriggerSessionRecordInsert = typeof externalTriggerSessions.$inferInsert;
-
-export const externalTriggerReceipts = pgTable(
-  "external_trigger_receipts",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => workspaceConnections.id, { onDelete: "cascade" }),
-    bindingId: uuid("binding_id").references(() => externalTriggerBindings.id, { onDelete: "set null" }),
-    provider: varchar("provider", { length: 64 }).$type<ExternalTriggerProvider>().notNull(),
-    providerEventId: varchar("provider_event_id", { length: 255 }).notNull(),
-    externalConversationKey: varchar("external_conversation_key", { length: 255 }),
-    status: varchar("status", { length: 64 }).$type<ExternalTriggerReceiptStatus>().notNull().default("received"),
-    workflowRunId: uuid("workflow_run_id").references(() => agentWorkflowRuns.id, { onDelete: "set null" }),
-    userMessageId: varchar("user_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
-    errorCode: varchar("error_code", { length: 128 }),
-    errorMessage: text("error_message"),
-    rawEventMeta: jsonb("raw_event_meta").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    createdAtIdx: index("external_trigger_receipts_created_at_idx").on(table.createdAt),
-    // 0351: SET NULL от chat_messages (каскад чата) и assistant_workflow_runs (retention ранов).
-    userMessageIdx: index("external_trigger_receipts_user_message_idx")
-      .on(table.userMessageId)
-      .where(sql`${table.userMessageId} IS NOT NULL`),
-    workflowRunIdx: index("external_trigger_receipts_workflow_run_idx")
-      .on(table.workflowRunId)
-      .where(sql`${table.workflowRunId} IS NOT NULL`),
-    unmatchedEventUniqueIdx: uniqueIndex("external_trigger_receipts_connection_provider_event_null_binding_uq")
-      .on(table.connectionId, table.providerEventId)
-      .where(sql`binding_id IS NULL`),
-    matchedEventBindingUniqueIdx: uniqueIndex("external_trigger_receipts_connection_provider_event_binding_uq")
-      .on(table.connectionId, table.providerEventId, table.bindingId)
-      .where(sql`binding_id IS NOT NULL`),
-    bindingStatusIdx: index("external_trigger_receipts_binding_status_idx").on(
-      table.bindingId,
-      table.status,
-      table.updatedAt,
-    ),
-    connectionStatusIdx: index("external_trigger_receipts_connection_status_idx").on(
-      table.connectionId,
-      table.status,
-      table.updatedAt,
-    ),
-    // 0260: FK-индекс под каскад удаления пространства (workspace_id).
-    workspaceIdx: index("external_trigger_receipts_workspace_id_idx").on(table.workspaceId),
-  }),
-);
-
-export type ExternalTriggerReceiptRecord = typeof externalTriggerReceipts.$inferSelect;
-export type ExternalTriggerReceiptRecordInsert = typeof externalTriggerReceipts.$inferInsert;
-
-export const externalTriggerDeliveries = pgTable(
-  "external_trigger_deliveries",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    workspaceId: varchar("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    bindingId: uuid("binding_id")
-      .notNull()
-      .references(() => externalTriggerBindings.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => workspaceConnections.id, { onDelete: "cascade" }),
-    workflowRunId: uuid("workflow_run_id")
-      .notNull()
-      .references(() => agentWorkflowRuns.id, { onDelete: "cascade" }),
-    internalMessageId: varchar("internal_message_id")
-      .notNull()
-      .references(() => chatMessages.id, { onDelete: "cascade" }),
-    providerMessageId: varchar("provider_message_id", { length: 255 }),
-    status: varchar("status", { length: 64 }).$type<ExternalTriggerDeliveryStatus>().notNull().default("pending"),
-    deliveryIndex: integer("delivery_index").notNull().default(1),
-    errorCode: varchar("error_code", { length: 128 }),
-    errorMessage: text("error_message"),
-    sentAt: timestamp("sent_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => ({
-    createdAtIdx: index("external_trigger_deliveries_created_at_idx").on(table.createdAt),
-    bindingRunIdx: index("external_trigger_deliveries_binding_run_idx").on(
-      table.bindingId,
-      table.workflowRunId,
-      table.createdAt,
-    ),
-    internalMessageUniqueIdx: uniqueIndex("external_trigger_deliveries_internal_message_uq").on(
-      table.internalMessageId,
-      table.deliveryIndex,
-    ),
-    connectionStatusIdx: index("external_trigger_deliveries_connection_status_idx").on(
-      table.connectionId,
-      table.status,
-      table.updatedAt,
-    ),
-    // 0260: FK-индексы под каскад удаления пространства / workflow-рана (workspace_id / workflow_run_id).
-    workspaceIdx: index("external_trigger_deliveries_workspace_id_idx").on(table.workspaceId),
-    workflowRunIdx: index("external_trigger_deliveries_workflow_run_id_idx").on(table.workflowRunId),
-  }),
-);
-
-export type ExternalTriggerDeliveryRecord = typeof externalTriggerDeliveries.$inferSelect;
-export type ExternalTriggerDeliveryRecordInsert = typeof externalTriggerDeliveries.$inferInsert;
 
 // ── Webhook-триггеры workflow (n8n-подобные): узел webhook_trigger владеет уникальным
 //    URL (slug). Запуск идёт через workflow-ассистента (RAG из его KB) и авто-чат,
