@@ -5024,6 +5024,8 @@ export const CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL = "workflow_trial" as const;
 /** Служебный чат прогона примера при обучении ассистента: в списке чатов человека его нет. */
 export const CHAT_SESSION_ORIGIN_AGENT_TRAINING = "agent_training" as const;
 export const LEGACY_CHAT_SESSION_ORIGIN_AGENT_TRAINING = "assistant_training" as const;
+/** Служебный чат экзамена модели для агента (shared/model-agent-exam.ts): человека в нём нет, в списке чатов его нет. */
+export const CHAT_SESSION_ORIGIN_MODEL_EXAM = "model_exam" as const;
 
 export type ChatSessionMetadata = {
   builderKind?: PackageKind;
@@ -5036,7 +5038,7 @@ export type ChatSessionMetadata = {
   /** Выбор режима ответа за этим чатом (В1): chat | agent | auto; отсутствует = дефолт клиента. */
   selectedChatMode?: ChatRequestMode | null;
   /** Служебное происхождение чата; отсутствует у обычных пользовательских чатов. */
-  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL | typeof CHAT_SESSION_ORIGIN_AGENT_TRAINING;
+  origin?: typeof CHAT_SESSION_ORIGIN_PUBLIC_API | typeof CHAT_SESSION_ORIGIN_SCHEDULED_TASK | typeof CHAT_SESSION_ORIGIN_WORKFLOW_TRIAL | typeof CHAT_SESSION_ORIGIN_AGENT_TRAINING | typeof CHAT_SESSION_ORIGIN_MODEL_EXAM;
   [key: string]: unknown;
 };
 
