@@ -13427,7 +13427,7 @@ export const notificationPublications = pgTable("notification_publications", {
  createdAt: timestamp("created_at", {withTimezone:true,precision:3}).notNull().defaultNow(),
  publishedAt: timestamp("published_at", {withTimezone:true,precision:3}),
  updatedAt: timestamp("updated_at", {withTimezone:true}).notNull().defaultNow(),
-}, t => ({kindCheck:check("notification_publications_kind_check",sql`(${t.kind}='release' AND ${t.releaseVersion} IS NOT NULL) OR (${t.kind} IN ('manual_instance','security_alert') AND ${t.releaseVersion} IS NULL)`),statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
+}, t => ({kindCheck:check("notification_publications_kind_check",sql`(${t.kind}='release' AND ${t.releaseVersion} IS NOT NULL) OR (${t.kind} IN ('manual_instance','security_alert','admin_notice') AND ${t.releaseVersion} IS NULL)`),statusCheck:check("notification_publications_status_check",sql`${t.status} IN ('awaiting_approval','dispatching','completed','partially_failed','suppressed','withdrawn')`)}));
 export const notificationInstanceAnnouncements = pgTable("notification_instance_announcements", {
   content: jsonb("content"),
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),

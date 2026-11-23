@@ -9,10 +9,11 @@ export type ReleaseAudience = z.infer<typeof releaseAudienceSchema>;
 
 /**
  * Публикации уровня инсталляции без аудитории: объявления платформы (`manual_instance`) и оповещения
- * «Защиты данных» администраторам (`security_alert`, адресаты выбраны при создании).
+ * «Защиты данных» администраторам (`security_alert`) и уведомления администрирования (`admin_notice`);
+ * у двух последних адресаты выбраны при создании.
  */
 export function isInstanceWidePublication(kind: string | null | undefined): boolean {
-  return kind === "manual_instance" || kind === "security_alert";
+  return kind === "manual_instance" || kind === "security_alert" || kind === "admin_notice";
 }
 
 export function isPublicationUrl(value: string): boolean {
