@@ -13651,6 +13651,12 @@ export const agentTrainingResults = pgTable("agent_training_results", {
   creditsChargedCents: bigint("credits_charged_cents", { mode: "number" }).notNull().default(0),
   errorCode: text("error_code"),
   errorMessage: text("error_message"),
+  /**
+   * Как получен результат: attempt — ход повторён после срыва; matched / judged — сколько вердиктов поставила сверка
+   * без модели и сколько проверяющий; clipped — проверяющий видел тексты не целиком; unreadableFiles — сданные файлы,
+   * из которых платформа не извлекла текст.
+   */
+  facts: jsonb("facts").$type<{ attempt?: number; matched?: number; judged?: number; clipped?: boolean; unreadableFiles?: string[] }>(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13712,6 +13718,9 @@ export const agentTrainingJobs = pgTable("agent_training_jobs", {
   bestTrainScore: doublePrecision("best_train_score"),
   bestHoldoutScore: doublePrecision("best_holdout_score"),
   bestCheckId: uuid("best_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
+  /** Исходный замер и его повтор: по двум замерам одного состояния видно, что проваливается устойчиво, а что плавает. */
+  baselineCheckId: uuid("baseline_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
+  baselineConfirmCheckId: uuid("baseline_confirm_check_id").references(() => agentTrainingChecks.id, { onDelete: "set null" }),
   /** Черновик ассистента, в котором идут круги; null — обучение старого вида (правило рабочего ассистента). */
   draftAgentId: varchar("draft_agent_id").references(() => agents.id, { onDelete: "set null" }),
   /** Соответствие навыков и правил черновика рабочим: { skills: { черновик: рабочий }, rules: { … } }. */
@@ -13734,6 +13743,8 @@ export const agentTrainingJobs = pgTable("agent_training_jobs", {
   originChatIdx: index("agent_training_jobs_origin_chat_idx").on(table.originChatId),
   currentCheckIdx: index("agent_training_jobs_current_check_idx").on(table.currentCheckId),
   bestCheckIdx: index("agent_training_jobs_best_check_idx").on(table.bestCheckId),
+  baselineCheckIdx: index("agent_training_jobs_baseline_check_idx").on(table.baselineCheckId),
+  baselineConfirmCheckIdx: index("agent_training_jobs_baseline_confirm_check_idx").on(table.baselineConfirmCheckId),
   beforeSnapshotIdx: index("agent_training_jobs_before_snapshot_idx").on(table.beforeSnapshotId),
   draftAgentIdx: index("agent_training_jobs_draft_agent_idx").on(table.draftAgentId),
   bestSnapshotIdx: index("agent_training_jobs_best_snapshot_idx").on(table.bestSnapshotId),
@@ -13766,6 +13777,10 @@ export const agentTrainingRounds = pgTable("agent_training_rounds", {
   snapshotId: uuid("snapshot_id").references(() => agentTrainingSnapshots.id, { onDelete: "set null" }),
   spentCents: bigint("spent_cents", { mode: "number" }).notNull().default(0),
   errorMessage: text("error_message"),
+  /** Исход круга простыми словами (`AgentTrainingRoundOutcome`); у кругов до 23.11.2026 — null. */
+  outcome: text("outcome"),
+  /** На чём основан исход: что правка исправила и сломала по сравнению с лучшей версией (`AgentTrainingRoundEvidence`). */
+  evidence: jsonb("evidence").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 }, (table) => ({
