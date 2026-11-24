@@ -4105,6 +4105,14 @@ export const speechProviderSecrets = pgTable(
   }),
 );
 
+/**
+ * Каким рабочим пространствам доступен провайдер установки (LLM, изображения): всем или только
+ * выбранным в таблице связей `*_workspace_access`. Собственный провайдер пространства (`workspaceId`)
+ * этой настройкой не ограничивается. Решает администратор установки.
+ */
+export const providerWorkspaceAvailabilities = ["all", "selected"] as const;
+export type ProviderWorkspaceAvailability = (typeof providerWorkspaceAvailabilities)[number];
+
 export const llmProviders = pgTable("llm_providers", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
   name: text("name").notNull(),
@@ -4137,6 +4145,11 @@ export const llmProviders = pgTable("llm_providers", {
   isSystem: boolean("is_system").notNull().default(false),
   workspaceId: varchar("workspace_id")
     .references(() => workspaces.id, { onDelete: "cascade" }),
+  // Провайдер установки: всем пространствам или выбранным (llm_provider_workspace_access), 0497.
+  availability: varchar("availability", { length: 32 })
+    .$type<ProviderWorkspaceAvailability>()
+    .notNull()
+    .default("all"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (table) => ({
@@ -4144,6 +4157,24 @@ export const llmProviders = pgTable("llm_providers", {
     .on(table.isSystem)
     .where(sql`${table.isSystem}`),
 }));
+
+/** Пространства, которым доступен LLM-провайдер установки при availability = selected. */
+export const llmProviderWorkspaceAccess = pgTable(
+  "llm_provider_workspace_access",
+  {
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => llmProviders.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.providerId, table.workspaceId] }),
+    workspaceIdx: index("llm_provider_workspace_access_workspace_idx").on(table.workspaceId),
+  }),
+);
 
 const ocrImageTransports = ["local_url", "base64"] as const;
 type OcrImageTransport = (typeof ocrImageTransports)[number];
@@ -4226,9 +4257,32 @@ export const imageGenerationProviders = pgTable("image_generation_providers", {
   inspectRequests: boolean("inspect_requests").notNull().default(true),
   isActive: boolean("is_active").notNull().default(true),
   isSystem: boolean("is_system").notNull().default(false),
+  // Всем пространствам или выбранным (image_generation_provider_workspace_access), 0497.
+  availability: varchar("availability", { length: 32 })
+    .$type<ProviderWorkspaceAvailability>()
+    .notNull()
+    .default("all"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+/** Пространства, которым доступен провайдер изображений при availability = selected. */
+export const imageGenerationProviderWorkspaceAccess = pgTable(
+  "image_generation_provider_workspace_access",
+  {
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => imageGenerationProviders.id, { onDelete: "cascade" }),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.providerId, table.workspaceId] }),
+    workspaceIdx: index("image_generation_provider_workspace_access_workspace_idx").on(table.workspaceId),
+  }),
+);
 
 export const imageGenerationModels = pgTable(
   "image_generation_models",
@@ -6645,6 +6699,9 @@ export const insertLlmProviderSchema = createInsertSchema(llmProviders)
       ),
     allowSelfSignedCertificate: z.boolean().default(false),
     inspectRequests: z.boolean().default(true),
+    // Доступность провайдера установки: всем пространствам или выбранным (workspaceIds).
+    availability: z.enum(providerWorkspaceAvailabilities).default("all"),
+    workspaceIds: z.array(z.string().trim().min(1)).max(5000).optional(),
     requestHeaders: z.record(z.string(), z.string()).default({}),
     requestConfig: z
       .any()
@@ -6757,6 +6814,8 @@ export const updateLlmProviderSchema = z
       ),
     allowSelfSignedCertificate: z.boolean().optional(),
     inspectRequests: z.boolean().optional(),
+    availability: z.enum(providerWorkspaceAvailabilities).optional(),
+    workspaceIds: z.array(z.string().trim().min(1)).max(5000).optional(),
     requestHeaders: z.record(z.string(), z.string()).optional(),
     requestConfig: z
       .record(z.string(), z.any())
@@ -7841,6 +7900,8 @@ export type InsertLlmProvider = z.infer<typeof insertLlmProviderSchema>;
 export type UpdateLlmProvider = z.infer<typeof updateLlmProviderSchema>;
 export type PublicLlmProvider = Omit<LlmProvider, "authorizationKey" | "availableModels"> & {
   hasAuthorizationKey: boolean;
+  /** Пространства, которым доступен провайдер при availability = selected. */
+  workspaceIds?: string[];
   availableModels: LlmModelOption[];
   recommendedModels?: LlmModelOption[];
 };
