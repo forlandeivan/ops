@@ -818,6 +818,7 @@ export const userActionKinds = [
   "knowledge_base_created",
   "knowledge_document_saved",
   "knowledge_upload",
+  "agent_installed",
 ] as const;
 export type UserActionKind = (typeof userActionKinds)[number];
 
@@ -9838,6 +9839,63 @@ export const installedBuilds = pgTable(
 
 export type InstalledBuild = typeof installedBuilds.$inferSelect;
 export type InstalledBuildInsert = typeof installedBuilds.$inferInsert;
+
+/** Откуда установлен пакет агента: репозиторий Git-хостинга, прямая ссылка на архив или на файл-агент. */
+export const agentPackageSourceKinds = ["git", "archive", "file"] as const;
+export type AgentPackageSourceKind = (typeof agentPackageSourceKinds)[number];
+
+export const agentPackageOriginStatuses = ["installing", "installed", "failed"] as const;
+export type AgentPackageOriginStatus = (typeof agentPackageOriginStatuses)[number];
+
+/**
+ * Происхождение агента, установленного пакетом по ссылке (0496). Личность источника — адрес и путь внутри
+ * него (`source_key` — их хеш): `id` из самого пакета личностью не служит, иначе чужая ссылка с тем же id
+ * выдала бы себя за уже установленного агента.
+ *
+ * Строка резервируется первой, до создания агента (`status = installing`, `agent_id` пуст): повторный запрос
+ * после обрыва соединения находит её и не создаёт второго агента. `revision` — счётчик для смены статуса
+ * сравнением (как у `installed_builds.revision`). Уникальность — по незавершившимся неудачей строкам; строка
+ * убирается при архивации агента (агенты удаляются мягко, каскад внешнего ключа сработал бы только при
+ * физическом удалении). У копии, созданной из уже установленного источника, строки нет.
+ */
+export const agentPackageOrigins = pgTable(
+  "agent_package_origins",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    workspaceId: varchar("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    sourceKind: varchar("source_kind", { length: 16 }).$type<AgentPackageSourceKind>().notNull(),
+    sourceUrl: text("source_url").notNull(),
+    sourcePath: text("source_path").notNull().default(""),
+    sourceKey: varchar("source_key", { length: 64 }).notNull(),
+    sourceRef: varchar("source_ref", { length: 255 }),
+    sourceCommit: varchar("source_commit", { length: 64 }),
+    packageId: varchar("package_id", { length: 255 }),
+    packageVersion: varchar("package_version", { length: 64 }),
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    status: varchar("status", { length: 16 }).$type<AgentPackageOriginStatus>().notNull().default("installing"),
+    revision: integer("revision").notNull().default(1),
+    report: jsonb("report").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    installedByUserId: varchar("installed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceSourceUniqueIdx: uniqueIndex("agent_package_origins_workspace_source_uq")
+      .on(table.workspaceId, table.sourceKey)
+      .where(sql`${table.status} <> 'failed'`),
+    workspaceSourceIdx: index("agent_package_origins_workspace_source_idx").on(table.workspaceId, table.sourceKey),
+    agentIdx: index("agent_package_origins_agent_idx").on(table.agentId),
+    installedByUserIdx: index("agent_package_origins_installed_by_user_idx")
+      .on(table.installedByUserId)
+      .where(sql`${table.installedByUserId} IS NOT NULL`),
+  }),
+);
+
+export type AgentPackageOrigin = typeof agentPackageOrigins.$inferSelect;
+export type AgentPackageOriginInsert = typeof agentPackageOrigins.$inferInsert;
 
 // История обновлений установленной сборки: аудит и основа для отката.
 export const installedBuildUpdateEvents = pgTable(

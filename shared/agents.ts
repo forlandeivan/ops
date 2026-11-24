@@ -676,9 +676,30 @@ export type AgentWorkflowContextRequestSubmission = z.infer<
   typeof agentWorkflowContextRequestSubmissionSchema
 >;
 
+/**
+ * Откуда установлен агент, поставленный пакетом по ссылке: репозиторий Git-хостинга, архив или файл-агент.
+ * У агента, созданного руками, загруженного архивом или скопированного из источника, происхождения нет.
+ */
+export type AgentPackageOriginDto = {
+  sourceKind: "git" | "archive" | "file";
+  /** Адрес источника: репозиторий без ветки и подпапки либо прямая ссылка. */
+  sourceUrl: string;
+  /** Папка агента или файл-агент внутри источника; пусто — корень. */
+  sourcePath: string;
+  /** Ветка или тег, если ссылка их называла. */
+  ref: string | null;
+  /** Точный установленный коммит; null у прямой ссылки. */
+  commit: string | null;
+  /** Версия из шапки AGENT.md. */
+  version: string | null;
+  installedAt: string;
+};
+
 export type AgentDto = {
   id: string;
   workspaceId: string;
+  /** Заполняется в списке и карточке агента; отсутствует там, где происхождение не запрашивали. */
+  packageOrigin?: AgentPackageOriginDto | null;
   name?: string | null;
   description?: string | null;
   systemPrompt?: string | null;
