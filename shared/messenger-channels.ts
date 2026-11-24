@@ -186,7 +186,8 @@ export type MessengerBotLinkDto = {
 
 export type MessengerBotActivityDto = {
   inbound: { processed: number; ignored: number; failed: number };
-  outbound: { sent: number; failed: number; pending: number };
+  /** skipped — не отправлено намеренно: бот выключен, привязка отозвана, человек заблокировал бота. */
+  outbound: { sent: number; failed: number; pending: number; skipped: number };
   lastInboundAt: string | null;
   lastOutboundAt: string | null;
   recentErrors: Array<{ at: string; direction: "inbound" | "outbound"; message: string }>;
