@@ -300,7 +300,8 @@ type WorkspacePlan = (typeof workspacePlans)[number];
 const workspacePlanEnum = pgEnum("workspace_plan", workspacePlans);
 
 // WEB — платные обращения агента к интернету (web.search, web.fetch) с ценой «за запрос»; в выбор моделей не попадают.
-export const modelTypes = ["LLM", "EMBEDDINGS", "ASR", "WEB"] as const;
+// IMAGE — модели генерации изображений: цена за картинку (REQUESTS); карточку ведёт раздел «Провайдеры изображений».
+export const modelTypes = ["LLM", "EMBEDDINGS", "ASR", "WEB", "IMAGE"] as const;
 export type ModelType = (typeof modelTypes)[number];
 const modelTypeEnum = pgEnum("model_type", modelTypes);
 
@@ -4188,6 +4189,83 @@ export const ocrProviders = pgTable(
   }),
 );
 
+/**
+ * Провайдеры генерации изображений — свой раздел админки, не LLM: адрес сервиса, авторизация, таймаут.
+ * Протокол `openai_images` — стандарт Images API (`/images/generations`, `/images/edits`): его отдают наш
+ * сервис изображений, vLLM-Omni и облачные шлюзы. Ключ хранится зашифрованным (`secret-storage`).
+ */
+export const imageGenerationProtocols = ["openai_images"] as const;
+export type ImageGenerationProtocol = (typeof imageGenerationProtocols)[number];
+export const imageGenerationAuthModes = ["bearer", "none"] as const;
+export type ImageGenerationAuthMode = (typeof imageGenerationAuthModes)[number];
+export const imageOutputFormats = ["png", "webp", "jpeg"] as const;
+export type ImageOutputFormat = (typeof imageOutputFormats)[number];
+
+/**
+ * Вариант модели — размер (и качество, если модель его различает) с ценой за одну картинку в центах кредита.
+ * `editCents` — цена правки картинки; `null` — правка стоит как генерация.
+ */
+export type ImageModelVariant = {
+  size: string;
+  quality: string | null;
+  generateCents: number;
+  editCents: number | null;
+};
+
+export const imageGenerationProviders = pgTable("image_generation_providers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
+  name: text("name").notNull(),
+  protocol: text("protocol").$type<ImageGenerationProtocol>().notNull().default("openai_images"),
+  baseUrl: text("base_url").notNull(),
+  authMode: text("auth_mode").$type<ImageGenerationAuthMode>().notNull().default("bearer"),
+  apiKeyEncrypted: text("api_key_encrypted"),
+  requestHeaders: jsonb("request_headers").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+  timeoutMs: integer("timeout_ms").notNull().default(150000),
+  allowSelfSignedCertificate: boolean("allow_self_signed_certificate").notNull().default(false),
+  inspectRequests: boolean("inspect_requests").notNull().default(true),
+  isActive: boolean("is_active").notNull().default(true),
+  isSystem: boolean("is_system").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const imageGenerationModels = pgTable(
+  "image_generation_models",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    providerId: varchar("provider_id")
+      .notNull()
+      .references(() => imageGenerationProviders.id, { onDelete: "cascade" }),
+    providerModelKey: text("provider_model_key").notNull(),
+    displayName: text("display_name").notNull(),
+    // Чем модель хороша — агент выбирает модель по этому описанию, если пользователь не назвал её сам.
+    agentDescription: text("agent_description").notNull().default(""),
+    variants: jsonb("variants").$type<ImageModelVariant[]>().notNull().default(sql`'[]'::jsonb`),
+    outputFormat: text("output_format").$type<ImageOutputFormat>().notNull().default("png"),
+    maxImagesPerCall: integer("max_images_per_call").notNull().default(1),
+    supportsEdit: boolean("supports_edit").notNull().default(false),
+    // Доп. поля тела запроса по умолчанию: seed, negative_prompt, num_inference_steps, guidance_scale.
+    defaultParams: jsonb("default_params").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    isActive: boolean("is_active").notNull().default(true),
+    sortOrder: integer("sort_order").notNull().default(0),
+    // Карточка в общем каталоге «Модели» — для учёта расхода и отчётов; цену ведут варианты.
+    catalogModelId: varchar("catalog_model_id").references(() => models.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    providerModelUnique: uniqueIndex("image_generation_models_provider_model_unique").on(
+      table.providerId,
+      table.providerModelKey,
+    ),
+    activeOrderIdx: index("image_generation_models_active_order_idx").on(table.isActive, table.sortOrder),
+    catalogModelIdx: index("image_generation_models_catalog_model_idx").on(table.catalogModelId),
+  }),
+);
+
+export type ImageGenerationProviderRecord = typeof imageGenerationProviders.$inferSelect;
+export type ImageGenerationModelRecord = typeof imageGenerationModels.$inferSelect;
+
 export const unicaChatConfig = pgTable("unica_chat_config", {
   scheduledTaskSettings: jsonb("scheduled_task_settings").$type<Record<string, unknown>>().notNull().default({}),
   id: varchar("id").primaryKey().default("singleton"),
@@ -7134,6 +7212,49 @@ export const agentWebRequests = pgTable(
 );
 
 export type AgentWebRequestRecord = typeof agentWebRequests.$inferSelect;
+
+/**
+ * Журнал генераций изображений агентом: что попросили, какой моделью, сколько картинок вышло и сколько
+ * списано. Списание идемпотентно по `image:<id>` строки.
+ */
+export const agentImageGenerations = pgTable(
+  "agent_image_generations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: varchar("user_id").references(() => users.id, { onDelete: "set null" }),
+    chatId: varchar("chat_id").references(() => chatSessions.id, { onDelete: "cascade" }),
+    runId: varchar("run_id"),
+    // generate | edit
+    kind: text("kind").notNull(),
+    imageModelId: varchar("image_model_id").references(() => imageGenerationModels.id, { onDelete: "set null" }),
+    providerId: varchar("provider_id"),
+    providerModelKey: text("provider_model_key"),
+    prompt: text("prompt"),
+    size: text("size"),
+    quality: text("quality"),
+    requestedCount: integer("requested_count").notNull().default(1),
+    producedCount: integer("produced_count").notNull().default(0),
+    // ok | blocked | rejected | insufficient_credits | error
+    outcome: text("outcome").notNull(),
+    errorCode: text("error_code"),
+    attachmentIds: jsonb("attachment_ids").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    // usage провайдера как есть (токены, cost_rub) — для сверки; списание идёт по цене варианта.
+    providerUsage: jsonb("provider_usage").$type<Record<string, unknown>>(),
+    durationMs: integer("duration_ms"),
+    chargedCents: integer("charged_cents").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    workspaceIdx: index("agent_image_generations_workspace_idx").on(table.workspaceId, table.createdAt),
+    chatIdx: index("agent_image_generations_chat_idx").on(table.chatId, table.createdAt),
+    runIdx: index("agent_image_generations_run_idx").on(table.runId),
+    userIdx: index("agent_image_generations_user_idx").on(table.userId),
+    imageModelIdx: index("agent_image_generations_image_model_idx").on(table.imageModelId),
+  }),
+);
+
+export type AgentImageGenerationRecord = typeof agentImageGenerations.$inferSelect;
 export type AgentExecutionRecord = typeof agentExecutions.$inferSelect;
 export type AgentExecutionInsert = typeof agentExecutions.$inferInsert;
 export type AgentExecutionEventRecord = typeof agentExecutionEvents.$inferSelect;
