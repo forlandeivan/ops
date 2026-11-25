@@ -5206,6 +5206,9 @@ export const chatSessions = pgTable(
     currentAgentActionUpdatedAt: timestamp("current_agent_action_updated_at"),
     metadata: jsonb("metadata").$type<ChatSessionMetadata>().notNull().default(sql`'{}'::jsonb`),
     pinnedAt: timestamp("pinned_at"),
+    // Когда агент в этом чате впервые получил текст внешней системы (MCP, импорт по адресу; H-113). После
+    // этого записи идут с карточкой, как после веба: текст мог подложить указание.
+    externalContentAt: timestamp("external_content_at", { withTimezone: true }),
     createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
     deletedAt: timestamp("deleted_at"),
@@ -10359,7 +10362,16 @@ export const messengerActions = pgTable(
 // ── Webhook-триггеры workflow (n8n-подобные): узел webhook_trigger владеет уникальным
 //    URL (slug). Запуск идёт через workflow-ассистента (RAG из его KB) и авто-чат,
 //    поэтому assistant_id/chat_id в run-таблице остаются NOT NULL (headless не вводим).
-export const workflowWebhookTriggerAuthModes = ["none", "bearer_personal_token"] as const;
+// Режимы входа: без защиты, личный токен (все права пользователя), общий секрет триггера — своя подпись
+// HMAC-SHA256 по сырому телу (`X-Unica-Signature-256`), пресеты GitHub (`X-Hub-Signature-256`) и GitLab
+// (`X-Gitlab-Token`). Секрет хранится зашифрованным в `secret_encrypted` и показывается один раз (H-119).
+export const workflowWebhookTriggerAuthModes = [
+  "none",
+  "bearer_personal_token",
+  "hmac_sha256",
+  "github_signature",
+  "gitlab_token",
+] as const;
 export type WorkflowWebhookTriggerAuthMode = (typeof workflowWebhookTriggerAuthModes)[number];
 
 // Режим ответа вебхука: async — сразу 202 (результат уходит узлом http_request);
@@ -10395,6 +10407,10 @@ export const workflowWebhookTriggers = pgTable(
       .notNull()
       .default("async"),
     isActive: boolean("is_active").notNull().default(true),
+    // Общий секрет режимов hmac_sha256 / github_signature / gitlab_token: `enc.v2…` (secret-storage),
+    // наружу не отдаётся. null — секрет не выпущен: вызовы в режиме с секретом получают 503.
+    secretEncrypted: text("secret_encrypted"),
+    secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }),
     createdByUserId: varchar("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedByUserId: varchar("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -13465,6 +13481,9 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   currentRevisionId: uuid("current_revision_id"),
   nextRunAt: timestamp("next_run_at", { withTimezone: true }),
   lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+  // Плановый слот последнего запуска по расписанию (H-118): порог частоты считается от него, а не от старта.
+  // Ручной запуск его не трогает, поэтому не сдвигает следующий плановый слот.
+  lastScheduledFor: timestamp("last_scheduled_for", { withTimezone: true }),
   cursorAt: timestamp("cursor_at", { withTimezone: true }),
   consecutiveFailures: integer("consecutive_failures").notNull().default(0),
   pauseReason: text("pause_reason"),
