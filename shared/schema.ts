@@ -213,6 +213,15 @@ export const users = pgTable("users", {
   // это непустая отметка. Внешнего ключа на исполнителя нет: отметка переживает его учётную запись.
   deletionRequestedAt: timestamp("deletion_requested_at", { withTimezone: true }),
   deletionRequestedBy: varchar("deletion_requested_by"),
+  // Блокировка входа (0504, политика «Защита от подбора пароля»). Пустой locked_at — вход открыт;
+  // locked_until пуст при заполненном locked_at — до разблокировки администратором. Отдельно от
+  // status: `disabled` остаётся ручной деактивацией администратором.
+  failedLoginCount: integer("failed_login_count").notNull().default(0),
+  lockedAt: timestamp("locked_at", { withTimezone: true }),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  lockReason: varchar("lock_reason", { length: 32 }).$type<"failed_logins" | "inactive">(),
+  // Сколько блокировок подряд в пределах суток: срок временной блокировки удваивается.
+  lockStreak: integer("lock_streak").notNull().default(0),
 }, (table) => ({
   createdAtIdx: index("users_created_at_idx").on(table.createdAt),
 }));
@@ -3417,6 +3426,12 @@ export const insertUserSchema = createInsertSchema(users).omit({
   yandexEmailVerified: true,
   avatarKey: true,
   avatarUpdatedAt: true,
+  // Блокировку входа ставит только политика или администратор, не создание учётной записи.
+  failedLoginCount: true,
+  lockedAt: true,
+  lockedUntil: true,
+  lockReason: true,
+  lockStreak: true,
 });
 
 export const embeddingProviderTypes = ["gigachat", "custom", "aitunnel", "unica"] as const;
@@ -11637,6 +11652,8 @@ export const authPolicySettings = pgTable("auth_policy_settings", {
   localLoginMode: text("local_login_mode").$type<LocalLoginMode>().notNull().default("all"),
   // Переопределения потолков частоты из админки (shared/rate-limit-policy.ts); пусто — по умолчанию.
   rateLimits: jsonb("rate_limits").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
+  // Политика блокировки учётной записи (shared/account-lockout-policy.ts); пусто — по умолчанию (выключена).
+  accountLockout: jsonb("account_lockout").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => ({
