@@ -11619,6 +11619,8 @@ export type DirectorySyncRunInsert = typeof directorySyncRuns.$inferInsert;
 export const authPolicySettings = pgTable("auth_policy_settings", {
   id: varchar("id").primaryKey().default("auth_policy_settings_singleton"),
   localLoginMode: text("local_login_mode").$type<LocalLoginMode>().notNull().default("all"),
+  // Переопределения потолков частоты из админки (shared/rate-limit-policy.ts); пусто — по умолчанию.
+  rateLimits: jsonb("rate_limits").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => ({
