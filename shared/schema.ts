@@ -197,6 +197,9 @@ export const users = pgTable("users", {
   emailConfirmedAt: timestamp("email_confirmed_at", { withTimezone: true }),
   status: varchar("status", { length: 64 }).notNull().default("active"),
   mustChangePassword: boolean("must_change_password").notNull().default(false),
+  // Когда задан текущий пароль (0505): плановая смена и «не чаще раза в N суток». Пусто — отсчёт
+  // начнётся с ближайшего входа.
+  passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
   disablePersonalWorkspaceAutoCreate: boolean("disable_personal_workspace_auto_create").notNull().default(false),
   // «Моя память» (shared/agent-memory.ts): один выключатель на человека во всех пространствах — его решение о приватности.
   personalMemoryEnabled: boolean("personal_memory_enabled").notNull().default(true),
@@ -3418,6 +3421,7 @@ export const insertUserSchema = createInsertSchema(users).omit({
   emailConfirmedAt: true,
   status: true,
   mustChangePassword: true,
+  passwordChangedAt: true,
   disablePersonalWorkspaceAutoCreate: true,
   personalApiTokenHash: true,
   personalApiTokenLastFour: true,
@@ -11656,11 +11660,32 @@ export const authPolicySettings = pgTable("auth_policy_settings", {
   accountLockout: jsonb("account_lockout").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
   updatedByAdminId: varchar("updated_by_admin_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  // Политика паролей (shared/password-policy.ts); пусто — по умолчанию.
+  passwordPolicy: jsonb("password_policy").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
 }, (table) => ({
   localLoginModeChk: check("auth_policy_settings_local_login_mode_chk", sql`${table.localLoginMode} IN ('all', 'admins_only')`),
 }));
 
 export type AuthPolicySettings = typeof authPolicySettings.$inferSelect;
+
+/**
+ * Прежние хеши паролей для правила «не повторять последние N» (0505). Хранится хеш bcrypt, не
+ * пароль; лишние строки сверх потолка истории удаляются при каждой смене.
+ */
+export const userPasswordHistory = pgTable(
+  "user_password_history",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: varchar("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => ({
+    userCreatedIdx: index("user_password_history_user_created_idx").on(table.userId, table.createdAt),
+  }),
+);
 
 export const directorySyncEventOrigins = ["sync", "login", "admin"] as const;
 export type DirectorySyncEventOrigin = (typeof directorySyncEventOrigins)[number];
